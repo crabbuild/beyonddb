@@ -18,7 +18,7 @@ use extenddb_core::types::{
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{
-    BackupEngine, BoxedFuture, DataEngine, MetadataEngine, TableEngine, TtlTableInfo, WorkerStore,
+    BackupEngine, BoxedFuture, MetadataEngine, TableEngine, TtlTableInfo, WorkerStore,
 };
 
 use crate::Json;
@@ -213,11 +213,18 @@ impl CellStorage {
             for item in items {
                 let key = extract_key(&item, &key_info.key_schema);
                 match self
-                    .delete_item(&key_info, &key, false, Some(&condition), &maps, None)
+                    .delete_expired_partition_item(
+                        &owner,
+                        &state.table_id,
+                        partition.epoch,
+                        key,
+                        &condition,
+                        &maps,
+                    )
                     .await
                 {
-                    Ok(_) => deleted += 1,
-                    Err(StorageError::ConditionFailed(_)) => {}
+                    Ok(true) => deleted += 1,
+                    Ok(false) => {}
                     // A prepare can lock an item after candidate selection.
                     // Defer that key so unrelated items/tables keep progressing;
                     // its expiry entry remains available after lock resolution.

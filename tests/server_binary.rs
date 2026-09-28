@@ -505,11 +505,64 @@ async fn signed_stream_records_survive_hard_server_restart() {
     let first = records(public);
     assert_eq!(first.len(), 1);
     assert_eq!(first[0]["dynamodb"]["Keys"]["id"]["S"], "streamed");
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .saturating_sub(1);
+    sdk.put_item()
+        .table_name("StreamProcess")
+        .item("id", AttributeValue::S("expired".into()))
+        .item("expires", AttributeValue::N(expires.to_string()))
+        .send()
+        .await
+        .unwrap();
+    sdk.update_time_to_live()
+        .table_name("StreamProcess")
+        .time_to_live_specification(
+            TimeToLiveSpecification::builder()
+                .attribute_name("expires")
+                .enabled(true)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(75);
+    loop {
+        let item = sdk
+            .get_item()
+            .table_name("StreamProcess")
+            .key("id", AttributeValue::S("expired".into()))
+            .send()
+            .await
+            .unwrap();
+        if item.item().is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "TTL worker did not delete stream item"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let with_ttl = records(public);
+    let removal = with_ttl
+        .iter()
+        .find(|record| record["eventName"] == "REMOVE")
+        .unwrap();
+    assert_eq!(removal["userIdentity"]["Type"], "Service");
+    assert_eq!(
+        removal["userIdentity"]["PrincipalId"],
+        "dynamodb.amazonaws.com"
+    );
+    assert!(first[0].get("userIdentity").is_none());
     child.kill().unwrap();
     child.wait().unwrap();
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
-    assert_eq!(records(public), first);
+    assert_eq!(records(public), with_ttl);
     sdk.delete_table()
         .table_name("StreamProcess")
         .send()
@@ -524,7 +577,7 @@ async fn signed_stream_records_survive_hard_server_restart() {
     assert_eq!(retained["Streams"][0]["StreamArn"], arn);
     let described = streams_cli(public, &["describe-stream", "--stream-arn", arn]);
     assert_eq!(described["StreamDescription"]["StreamStatus"], "DISABLED");
-    assert_eq!(records(public), first);
+    assert_eq!(records(public), with_ttl);
     sdk.create_table()
         .table_name("StreamProcess")
         .key_schema(
@@ -545,7 +598,7 @@ async fn signed_stream_records_survive_hard_server_restart() {
         .send()
         .await
         .unwrap();
-    assert_eq!(records(public), first);
+    assert_eq!(records(public), with_ttl);
     stop(&mut restarted, &log);
     drop(rustfs);
 }

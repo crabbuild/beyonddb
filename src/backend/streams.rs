@@ -191,6 +191,11 @@ impl StreamEngine for CellStorage {
             let shard = StreamShard::parse(&shard_id)
                 .ok_or_else(|| StorageError::TableNotFound(shard_id.clone()))?;
             let owner = target(&account_id)?;
+            // A table ID embeds its account tenant. Reject a foreign shard
+            // before querying an account Cell that may not be provisioned.
+            if shard.target()?.tenant() != owner.tenant() {
+                return Err(StorageError::TableNotFound(shard_id));
+            }
             let entry = self
                 .client
                 .query::<ReadStreamCatalog>(
