@@ -125,7 +125,18 @@ async fn recovery_reads_routes_from_live_remote_account() {
 
     fixture
         .provisioner
-        .recover_registered_partitions("123456789012", &fixture.client, &fixture.directory)
+        .recover_configured_account("123456789012", &fixture.directory)
+        .await
+        .unwrap();
+    let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
+    fixture
+        .provisioner
+        .recover_registered_account(
+            "123456789012",
+            &fixture.client,
+            &storage,
+            &fixture.directory,
+        )
         .await
         .unwrap();
 

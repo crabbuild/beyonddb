@@ -431,22 +431,15 @@ impl CellInitialPartitionProvisioner {
 
     /// Restore registered data and coordinator Cells before serving an account.
     ///
-    /// Requires an owned account Cell and available private peer routing. Data
-    /// admission errors do not skip coordinator recovery, but still fail readiness.
+    /// Requires available private peer routing to the current account owner.
+    /// Data admission errors do not skip coordinator recovery, but still fail readiness.
     pub async fn recover_registered_account(
         &self,
         account_id: &str,
-        account: cellule_runtime::cell::actor::CellHandle,
         client: &CellClient,
         storage: &CellStorage,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
-        let target = account_target(account_id).map_err(provision_error)?;
-        if account.cell_id() != target.cell_id() {
-            return Err(StorageError::Validation(
-                "recovery account handle does not match account".into(),
-            ));
-        }
         let admission = self
             .recover_registered_partitions(account_id, client, nodes)
             .await;

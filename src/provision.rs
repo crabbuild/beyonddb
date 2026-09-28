@@ -169,14 +169,25 @@ impl CellInitialPartitionProvisioner {
     }
 
     /// Admit a configured account or recover its published root after a crash.
-    pub async fn recover_owned_account(
+    /// A live peer keeps its ownership while this node recovers registered work.
+    pub async fn recover_configured_account(
         &self,
         account_id: &str,
         nodes: &NodeDirectory,
-    ) -> Result<CellHandle, StorageError> {
+    ) -> Result<(), StorageError> {
         let target = account_target(account_id).map_err(provision_error)?;
-        self.recover_owned(&target, crate::MODULE, nodes, initialize_account)
+        if CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
             .await
+            .map_err(provision_error)?
+            .is_none()
+        {
+            self.admit_account(account_id).await?;
+            return Ok(());
+        }
+        self.recover_discovered_owner(&target, crate::MODULE, initialize_account, nodes)
+            .await?;
+        Ok(())
     }
 
     /// Admit a configured credential shard or recover it after a crash.

@@ -278,9 +278,9 @@ async fn cleanup_restart(delete_first: bool) {
         SessionId::from_bytes([252; 16]),
         &directory.path().join("restored"),
     );
-    let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     provisioner
-        .recover_registered_account(ACCOUNT, account_handle, &client, &storage, &nodes)
+        .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
         .await
         .unwrap();
     provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();

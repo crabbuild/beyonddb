@@ -146,8 +146,8 @@ elastic-Cell, peer-network, and process tests against pinned Cellule. The former
 Crab monorepo's qualification results are historical. Ordinary `cargo test`
 does not run the ignored process tests.
 
-This server uses an explicit list of locally owned account and credential
-Cells. On startup it recovers configured account and credential Cells, then
+This server uses an explicit list of configured accounts and locally owned
+credential Cells. On startup it recovers configured account and credential Cells, then
 pages base/index directory leaves and the account coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
 takeover still requires node-session fencing and a Cell authority CAS. Recovery
