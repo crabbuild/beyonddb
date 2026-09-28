@@ -1,8 +1,9 @@
 # Streams implementation: closed-shard contract
 
-Status: [ExtendDB PR #371](https://github.com/ExtendDB/extenddb/pull/371) is
-open from the reviewed fork commit pinned by this BeyondDB implementation
-branch. The older `extenddb-stream-completion.proposed.patch` records the
+Status: [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372) is
+open. BeyondDB pins the identical commit on crabbuild's
+[ExtendDB fork branch](https://github.com/crabbuild/extenddb/pull/1).
+The older `extenddb-stream-completion.proposed.patch` records the
 original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
 the upstream PR supersedes it. Focused SQLite and engine tests, all three
 backend compile checks, and strict Clippy passed on current ExtendDB main.
@@ -108,9 +109,10 @@ in the source Cell's seal command.
 
 ## Upstream integration
 
-The fork commit is a temporary dependency while the upstream PR is reviewed.
-BeyondDB must pin the merged upstream revision before release. PostgreSQL and
-MongoDB runtime tests and BeyondDB's broader signed SDK matrix remain open.
+The crabbuild fork commit is a reviewed, immutable dependency while the
+upstream PR is open. BeyondDB can release against this pin; move to an upstream
+revision after its contract is merged and qualified. PostgreSQL and MongoDB
+runtime tests and BeyondDB's broader signed SDK matrix remain open.
 
 ## Remaining BeyondDB implementation
 

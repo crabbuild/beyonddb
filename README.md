@@ -478,7 +478,10 @@ initial admission and owner recovery through those paths.
 
 The closed-shard completion contract and full Streams implementation boundaries
 are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). The contract is under review
-in ExtendDB PR #371; this implementation branch temporarily pins that commit.
+in [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372).
+BeyondDB pins the identical commit in the crabbuild-owned
+[ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1), so upstream
+release timing does not block this service.
 The native Cell write path now journals item changes atomically for an
 installed stream policy and exposes bounded owner Cell reads. CreateTable
 can install a stream policy; ListStreams and DescribeStream discover current and

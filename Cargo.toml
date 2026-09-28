@@ -53,10 +53,10 @@ cellule-peer-http.workspace = true
 cellule-runtime.workspace = true
 cellule-store.workspace = true
 cellule-ltx = { workspace = true, features = ["replica"] }
-extenddb-auth = { git = "https://github.com/forhappy/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
-extenddb-core = { git = "https://github.com/forhappy/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
-extenddb-server = { git = "https://github.com/forhappy/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
-extenddb-storage = { git = "https://github.com/forhappy/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
+extenddb-auth = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
+extenddb-core = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
+extenddb-server = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
+extenddb-storage = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 futures-util.workspace = true
 fs4 = "0.13.1"
 getrandom = "0.3"
@@ -77,7 +77,7 @@ aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-dynamodb.workspace = true
 ed25519-dalek.workspace = true
-extenddb-engine = { git = "https://github.com/forhappy/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
+extenddb-engine = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }
