@@ -185,10 +185,10 @@ async fn discovered_recovery_resumes_claimed_ranges_before_sdk_requests() {
         targets.push(target);
     }
     assert_eq!(targets.len(), 4);
-    let account = fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account = fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions(ACCOUNT, account, &fixture.client, &fixture.directory)
+        .recover_registered_partitions(ACCOUNT, &fixture.client, &fixture.directory)
         .await
         .unwrap();
     // A local-only client cannot rescue a skipped activation through SDK routing.

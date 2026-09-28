@@ -441,8 +441,14 @@ impl CellInitialPartitionProvisioner {
         storage: &CellStorage,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
+        let target = account_target(account_id).map_err(provision_error)?;
+        if account.cell_id() != target.cell_id() {
+            return Err(StorageError::Validation(
+                "recovery account handle does not match account".into(),
+            ));
+        }
         let admission = self
-            .recover_registered_partitions(account_id, account, client, nodes)
+            .recover_registered_partitions(account_id, client, nodes)
             .await;
         let resolution = self
             .recover_registered_coordinators(account_id, client, storage, nodes)

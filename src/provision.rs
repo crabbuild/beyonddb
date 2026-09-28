@@ -327,20 +327,20 @@ impl CellInitialPartitionProvisioner {
 
     /// Recover idle or expired routed ranges for a configured account.
     ///
-    /// The caller selects this node as the account's recovery owner. Live remote
-    /// owners remain in place; local capacity and fenced takeover still gate admission.
+    /// Account metadata may have moved to a live peer. The caller selects this
+    /// node for range recovery; live remote owners remain in place.
     pub async fn recover_registered_partitions(
         &self,
         account_id: &str,
-        account_handle: CellHandle,
         routed_client: &CellClient,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = CellClient::local(self.application.registry(), account_handle);
         let mut after_table = None;
         loop {
-            let page = client
+            // Routing metadata must come from its current owner, or an account
+            // move can strand otherwise recoverable data and index ranges.
+            let page = routed_client
                 .query::<ListTables>(
                     &account,
                     None,
@@ -357,7 +357,7 @@ impl CellInitialPartitionProvisioner {
                 return Err(StorageError::Internal("invalid recovery table page".into()));
             };
             for name in page.names {
-                let Some(table) = client
+                let Some(table) = routed_client
                     .query::<DescribeTable>(&account, None, Json(name))
                     .await
                     .map_err(cell_error)?

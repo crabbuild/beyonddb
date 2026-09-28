@@ -1098,6 +1098,11 @@ startup discovery and failed because a data range still named the former owner.
 
 `recover_registered_partitions` and the coordinator/participant discovery paths
 now share `recover_discovered_owner`. A live remote session is left in place.
+Range discovery reads table and route metadata through the authenticated routed
+client. The account Cell may have moved to a live peer before a failed data
+owner is replaced; requiring a local account handle would leave its idle ranges
+undiscovered. The recovery test moves the account to a peer, releases a data
+range, then checks that recovery restores its owner and a signed SDK read.
 An expired session reaches the existing `takeover_expired` path, which rechecks
 the current Cell owner, obtains a fenced node takeover proof, restores the
 published root, and changes authority through the runtime's CAS. A missing or
