@@ -38,7 +38,23 @@ pub enum StreamJournalOutcome {
     Page {
         records: Vec<StreamRecord>,
         last_sequence: Option<String>,
+        /// A sealed source has no future item changes; a caller may stop after its last page.
+        closed: bool,
     },
+    Missing,
+}
+
+/// Identify a stream generation for a constant-time tail lookup.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamTailInput {
+    pub table_id: String,
+    pub label: String,
+}
+
+/// Latest stored sequence, including the empty-shard case.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum StreamTailOutcome {
+    Latest(Option<String>),
     Missing,
 }
 
@@ -63,7 +79,7 @@ impl Query for ReadAccountStreamJournal {
         if table.stream.as_ref().map(|stream| stream.label.as_str()) != Some(input.label.as_str()) {
             return Ok(Json(StreamJournalOutcome::Missing));
         }
-        Ok(Json(read(context, input)?))
+        Ok(Json(read(context, input, false)?))
     }
 }
 
@@ -95,11 +111,88 @@ impl Query for ReadPartitionStreamJournal {
         {
             return Ok(Json(StreamJournalOutcome::Missing));
         }
-        Ok(Json(read(context, input)?))
+        let closed = matches!(
+            crate::partition::query_access(context)?,
+            crate::partition::AccessState::Sealed
+        );
+        Ok(Json(read(context, input, closed)?))
     }
 }
 
-fn read(context: &mut QueryContext<'_>, input: StreamJournalInput) -> Result<StreamJournalOutcome> {
+/// Read the account Cell's latest sequence without paging through records.
+pub struct ReadAccountStreamTail;
+
+impl Query for ReadAccountStreamTail {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 45;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<StreamTailInput>;
+    type Output = Json<StreamTailOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            vec![SqlValue::Text(input.table_id.clone())],
+        ))?;
+        let Some(table) = crate::table::decode_table(&rows[0])? else {
+            return Ok(Json(StreamTailOutcome::Missing));
+        };
+        if table.stream.as_ref().map(|stream| stream.label.as_str()) != Some(input.label.as_str()) {
+            return Ok(Json(StreamTailOutcome::Missing));
+        }
+        Ok(Json(StreamTailOutcome::Latest(tail(context, input)?)))
+    }
+}
+
+/// Read one data Cell's latest sequence without scanning the journal.
+pub struct ReadPartitionStreamTail;
+
+impl Query for ReadPartitionStreamTail {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 17;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<StreamTailInput>;
+    type Output = Json<StreamTailOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT spec FROM ddb_partition WHERE singleton = 1",
+            vec![],
+        ))?;
+        let Some(spec) = crate::partition::decode_spec(&rows[0])? else {
+            return Ok(Json(StreamTailOutcome::Missing));
+        };
+        if spec.table.id != input.table_id
+            || spec
+                .table
+                .stream
+                .as_ref()
+                .map(|stream| stream.label.as_str())
+                != Some(input.label.as_str())
+        {
+            return Ok(Json(StreamTailOutcome::Missing));
+        }
+        Ok(Json(StreamTailOutcome::Latest(tail(context, input)?)))
+    }
+}
+
+fn tail(context: &mut QueryContext<'_>, input: StreamTailInput) -> Result<Option<String>> {
+    let rows = context.sql(&statement(
+        "SELECT sequence_number FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 ORDER BY sequence_number DESC LIMIT 1",
+        vec![SqlValue::Text(input.table_id), SqlValue::Text(input.label)],
+    ))?;
+    match rows[0].rows.first().map(Vec::as_slice) {
+        Some([SqlValue::Text(sequence)]) => Ok(Some(sequence.clone())),
+        None => Ok(None),
+        _ => Err(Error::Command("invalid stream tail row")),
+    }
+}
+
+fn read(
+    context: &mut QueryContext<'_>,
+    input: StreamJournalInput,
+    closed: bool,
+) -> Result<StreamJournalOutcome> {
     if input.limit == 0 || input.limit > 1_000 {
         return Err(Error::Command("stream record limit is outside 1..=1000"));
     }
@@ -135,6 +228,7 @@ fn read(context: &mut QueryContext<'_>, input: StreamJournalInput) -> Result<Str
     Ok(StreamJournalOutcome::Page {
         records,
         last_sequence,
+        closed,
     })
 }
 

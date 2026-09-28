@@ -141,8 +141,8 @@ use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
 use extenddb_storage::management_store::OpError;
 use extenddb_storage::{
-    BoxedFuture, DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp,
-    TransactWriteOp, error::StorageError,
+    BoxedFuture, DataEngine, IdempotencyKey, MetadataEngine, StreamContinuation, StreamEngine,
+    TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 use tokio_util::sync::CancellationToken;
@@ -4262,6 +4262,76 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         source_status.output.0.unwrap().state,
         PartitionState::Sealed(seal.clone())
     );
+    let sealed_page = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            Some(sealed.receipt),
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: None,
+                limit: 1_000,
+            }),
+        )
+        .await
+        .unwrap();
+    let StreamJournalOutcome::Page {
+        closed: true,
+        last_sequence: Some(last_sequence),
+        ..
+    } = sealed_page.output.0
+    else {
+        panic!("sealed source must retain its journal");
+    };
+    let exhausted = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            Some(sealed.receipt),
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: Some(last_sequence.clone()),
+                limit: 1_000,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(exhausted.output.0, StreamJournalOutcome::Page { records, closed: true, .. } if records.is_empty())
+    );
+    let shard_id = format!(
+        "shardId-{}-{:032x}-2026-09-27T00:00:00.000",
+        table.id,
+        u128::from_be_bytes(left_id)
+    );
+    let stream_arn =
+        "arn:aws:dynamodb:us-east-1:123456789012:table/Books/stream/2026-09-27T00:00:00.000";
+    storage
+        .validate_shard("123456789012", stream_arn, &shard_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.latest_sequence_number(&shard_id).await.unwrap(),
+        Some(last_sequence.clone())
+    );
+    assert!(matches!(
+        storage
+            .validate_shard("999999999999", stream_arn, &shard_id)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
+    let (records, continuation) = storage
+        .get_stream_records("123456789012", &shard_id, Some(&last_sequence), 100)
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+    assert_eq!(continuation, StreamContinuation::End);
+    assert!(matches!(
+        storage
+            .get_stream_records("999999999999", &shard_id, None, 100)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
     let replayed = client
         .command::<SealPartition>(&left_target, identity(45), Json(seal.clone()))
         .await
@@ -4541,6 +4611,21 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert_eq!(
         stream_count(&directory.path().join("child-right.sqlite"), &table.id),
         0
+    );
+    let child_shard = format!(
+        "shardId-{}-{:032x}-2026-09-27T00:00:00.000",
+        table.id,
+        u128::from_be_bytes(next_route.partitions[first_child].partition_id)
+    );
+    let (records, continuation) = storage
+        .get_stream_records("123456789012", &child_shard, None, 100)
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+    assert_eq!(continuation, StreamContinuation::More(None));
+    assert_eq!(
+        storage.latest_sequence_number(&child_shard).await.unwrap(),
+        None
     );
     let mut changed_item = first_item.clone();
     changed_item.insert("title".into(), AttributeValue::S("newer".into()));

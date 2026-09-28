@@ -608,6 +608,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
             || stream.label.is_empty()
             || stream.region.len() > 64
             || stream.label.len() > 128
+            || stream.label.contains('|')
     }) {
         return false;
     }

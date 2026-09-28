@@ -77,7 +77,7 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(18),
     operation(19),
 ];
-static QUERIES: [OperationDescriptor; 15] = [
+static QUERIES: [OperationDescriptor; 16] = [
     operation(1),
     operation(2),
     operation(3),
@@ -93,6 +93,7 @@ static QUERIES: [OperationDescriptor; 15] = [
     operation(14),
     operation(15),
     operation(16),
+    operation(17),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -180,6 +181,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;
         registry.bind_query::<crate::statistics::ReadPartitionStatistics>()?;
         registry.bind_query::<crate::ReadPartitionStreamJournal>()?;
+        registry.bind_query::<crate::ReadPartitionStreamTail>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;

@@ -25,11 +25,19 @@ Native account and partition queries read that journal in sequence order with
 a 2 MiB response budget and an exclusive sequence cursor. The account test
 follows multiple pages after owner restoration; the routed test reads its owner
 Cell and confirms imported children have no journal records.
+The partition query also reads the Cell's durable split seal. The ExtendDB
+storage method maps an empty sealed page to `End` and an empty open page to
+`More(None)`, with a 23-digit sequence width and account-scoped routing. The
+routed test exercises both states and rejects a different account's shard.
+Known shard IDs are validated against the canonical stream ARN, account table
+generation, and installed data Cell. `LATEST` reads the owner Cell's indexed
+journal tail without scanning pages. Native account and routed tests cover
+validation and tail lookup; no public shard discovery issues these IDs yet.
 
 This slice is exercised by the native account Cell test for insert, replay,
 equal-image Put, deletion, transaction commit, and rejection. It does not yet
 expose `CreateTable(StreamSpecification)`: the adapter still rejects that
-request, and the ExtendDB Streams read methods remain unsupported. A native
+request, and public shard discovery remains unsupported. A native
 stream policy can be installed only by the direct Cell command during tests.
 The current native read checks the installed table policy, so it cannot yet
 serve a retained generation after table deletion or policy replacement.
@@ -77,14 +85,12 @@ The patch covers every producer and consumer found in the pinned source:
 | PostgreSQL | Read ending sequence with the shard's table ID, retain the catalog ownership check, and use the same lookahead rule. |
 | MongoDB | Read ending sequence from the already-fetched shard document, retain account validation, and use the same lookahead rule. |
 | Page limits | Validate 1–1000 records before lookahead; fetch at most limit + 1 and return at most limit. |
-| BeyondDB | Its current unsupported `StreamEngine` methods already use the result alias. Implement Cell-backed pages against the new explicit continuation after the dependency is validated. |
+| BeyondDB | The branch reads Cell-backed pages through the explicit continuation. It reports `End` after an empty sealed page and `More` while the shard remains open. |
 
-Two proposed handler tests cover closed-shard termination and open-page cursor
-preservation/advancement with timestamp renewal. Two proposed SQLite tests
-cover an empty open/closed shard, a closed shard with multiple pages including
-an exactly-full final page, and account isolation. These tests are **not yet
-compiled or run**. PostgreSQL/MongoDB require their backend integration gates;
-compiling their adapters alone will not establish their runtime behavior.
+The upstream PR tests closed-shard termination, open-page cursor behavior,
+SQLite pagination, and account isolation. Focused tests passed against the
+fork commit, but PostgreSQL/MongoDB still require their backend integration
+gates; compiling their adapters alone does not establish runtime behavior.
 
 **Is this the best fix?** An explicit continuation state removes the ambiguity
 at the owning contract. It preserves both valid empty-open polling and final
@@ -104,7 +110,9 @@ remain to be run after the Cell-backed implementation exists.
 ## Remaining BeyondDB implementation
 
 This dependency fix is necessary but does not implement Streams by itself.
-BeyondDB still explicitly rejects public streamed writes and Streams API operations.
+BeyondDB still rejects public stream table creation and shard discovery. Its
+Cell-backed record reader is reachable only with a known, valid shard ID;
+retention and full public Streams behavior remain unfinished.
 The implementation must cover all of these boundaries before support is claimed:
 
 1. Store stream identity, view type, generation, shard lineage, and lifetime

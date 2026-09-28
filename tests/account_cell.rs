@@ -29,8 +29,8 @@ use extenddb_core::types::{
     StreamEventName, StreamRecord, StreamViewType, TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
-    DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp, TransactWriteOp,
-    error::StorageError,
+    DataEngine, IdempotencyKey, MetadataEngine, StreamEngine, TableEngine, TransactGetOp,
+    TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 
@@ -1070,6 +1070,26 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             |row| row.get(0),
         )
         .unwrap();
+    let tail: Option<String> = connection
+        .query_row(
+            "SELECT max(sequence_number) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let shard_id = format!("shardId-{book_table_id}-account-2026-09-27T00:00:00.000");
+    storage
+        .validate_shard(
+            "123456789012",
+            "arn:aws:dynamodb:us-east-1:123456789012:table/Books/stream/2026-09-27T00:00:00.000",
+            &shard_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.latest_sequence_number(&shard_id).await.unwrap(),
+        tail
+    );
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -1131,10 +1151,12 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         let StreamJournalOutcome::Page {
             records,
             last_sequence,
+            closed,
         } = restored_streams.output.0
         else {
             panic!("restored stream generation is missing");
         };
+        assert!(!closed);
         restored_stream_count += i64::try_from(records.len()).unwrap();
         let Some(next) = last_sequence else {
             break;

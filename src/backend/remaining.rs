@@ -2,7 +2,7 @@
 //!
 //! Each unimplemented operation fails explicitly. This allows the completed
 //! table and item paths to run through ExtendDB's real dispatch contract
-//! without claiming Streams or backups work yet. TTL uses per-account sweeps.
+//! without claiming public Streams or backups work yet. TTL uses per-account sweeps.
 
 use std::{
     collections::HashMap,
@@ -14,13 +14,11 @@ use cellule_runtime::identity::CellTarget;
 use extenddb_core::expression::{CompareOp, Expr, ExpressionMaps, PathElement};
 use extenddb_core::types::{
     AttributeValue, BackupDescription, BackupDetails, BackupSummary, ContinuousBackupsDescription,
-    DescribeStreamInput, Item, StreamDescription, StreamRecord, TableDescription, Tag,
-    TimeToLiveDescription, TimeToLiveStatus, extract_key,
+    Item, TableDescription, Tag, TimeToLiveDescription, TimeToLiveStatus, extract_key,
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{
-    BackupEngine, BoxedFuture, DataEngine, MetadataEngine, StreamEngine, StreamListResult,
-    StreamRecordsResult, TableEngine, TtlTableInfo, WorkerStore,
+    BackupEngine, BoxedFuture, DataEngine, MetadataEngine, TableEngine, TtlTableInfo, WorkerStore,
 };
 
 use crate::Json;
@@ -40,7 +38,6 @@ use crate::{
 use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
 
 const TTL_TABLES_PER_SWEEP: usize = 16;
-
 impl CellStorage {
     /// Sweep bounded expired items for TTL tables owned by one account.
     pub async fn sweep_account_ttl(&self, account_id: &str) -> Result<u64, StorageError> {
@@ -767,85 +764,6 @@ impl MetadataEngine for CellStorage {
 
     fn all_active_tables(&self) -> BoxedFuture<'_, Result<Vec<(String, String)>, StorageError>> {
         Box::pin(async { Err(unsupported("global table listing")) })
-    }
-}
-
-impl StreamEngine for CellStorage {
-    fn write_stream_record(
-        &self,
-        _account_id: &str,
-        _record: &StreamRecord,
-        _shard_id: &str,
-        _table_name: &str,
-    ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn get_stream_records(
-        &self,
-        _account_id: &str,
-        _shard_id: &str,
-        _after_sequence: Option<&str>,
-        _limit: i64,
-    ) -> BoxedFuture<'_, StreamRecordsResult> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn describe_stream(
-        &self,
-        _account_id: &str,
-        _input: &DescribeStreamInput,
-    ) -> BoxedFuture<'_, Result<StreamDescription, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn list_streams(
-        &self,
-        _account_id: &str,
-        _table_name: Option<&str>,
-        _limit: i64,
-        _exclusive_start_stream_arn: Option<&str>,
-    ) -> BoxedFuture<'_, StreamListResult> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn cleanup_expired_stream_records(
-        &self,
-        _retention_hours: i64,
-    ) -> BoxedFuture<'_, Result<u64, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn assign_shard(
-        &self,
-        _account_id: &str,
-        _table_name: &str,
-        _partition_key: &str,
-    ) -> BoxedFuture<'_, Result<String, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn next_sequence_number(
-        &self,
-        _shard_id: &str,
-    ) -> BoxedFuture<'_, Result<String, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn validate_shard(
-        &self,
-        _account_id: &str,
-        _stream_arn: &str,
-        _shard_id: &str,
-    ) -> BoxedFuture<'_, Result<(), StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
-    }
-
-    fn latest_sequence_number(
-        &self,
-        _shard_id: &str,
-    ) -> BoxedFuture<'_, Result<Option<String>, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
     }
 }
 

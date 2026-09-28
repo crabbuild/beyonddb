@@ -6,6 +6,7 @@ mod global_index;
 mod recovery;
 mod remaining;
 mod statistics;
+mod streams;
 pub(crate) mod table_creation;
 mod transaction;
 mod transaction_read;
