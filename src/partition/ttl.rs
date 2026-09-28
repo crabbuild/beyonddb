@@ -64,6 +64,22 @@ fn item_epoch(item: &Item, attribute: Option<&str>) -> Option<i64> {
     value.parse::<i64>().ok().filter(|epoch| *epoch > 0)
 }
 
+pub(super) fn expired_for_configured_ttl(
+    context: &mut CommandContext<'_, '_>,
+    item: Option<&Item>,
+) -> Result<bool> {
+    let Some(item) = item else {
+        return Ok(false);
+    };
+    let rows = context.sql(&statement(state_sql(), vec![]))?;
+    let Some(state) = decode_state(&rows[0])? else {
+        return Ok(false);
+    };
+    Ok(state.ready
+        && item_epoch(item, state.attribute.as_deref())
+            .is_some_and(|epoch| epoch <= context.now_ms() / 1_000))
+}
+
 pub(super) fn write_values(
     context: &mut CommandContext<'_, '_>,
     item: &Item,

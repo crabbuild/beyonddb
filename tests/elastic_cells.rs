@@ -135,7 +135,7 @@ use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DescribeTableInput, Item,
     KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    StreamViewType, TableStatus,
+    StreamEventName, StreamViewType, TableStatus,
 };
 use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
@@ -628,7 +628,11 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
-                stream: None,
+                stream: Some(StreamConfig {
+                    view_type: StreamViewType::KeysOnly,
+                    region: "us-east-1".into(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                }),
             }),
         )
         .await
@@ -856,6 +860,24 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
             .await
             .unwrap();
     }
+    let first_owner = data_target("123456789012", &table.id, &partitions[0].partition_id).unwrap();
+    let early_expiry = client
+        .command::<PartitionDelete>(
+            &first_owner,
+            identity(222),
+            Json(PartitionDeleteInput {
+                table_id: table.id.clone(),
+                epoch: 1,
+                key: first_item.clone(),
+                condition: None,
+                return_old: false,
+                ttl: true,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(early_expiry, Err(InvocationError::Rejected(result)) if matches!(result.output.0, PartitionDeleteOutcome::ConditionFailed(_)))
+    );
     storage
         .update_ttl("123456789012", "ManyRanges", "expires", true)
         .await
@@ -870,6 +892,34 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
     assert_eq!(
         storage.get_item(&key_info, &first_item).await.unwrap(),
         None
+    );
+    let journal = client
+        .query::<ReadPartitionStreamJournal>(
+            &first_owner,
+            None,
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap();
+    let StreamJournalOutcome::Page { records, .. } = journal.output.0 else {
+        panic!("TTL stream generation is missing");
+    };
+    let removal = records
+        .iter()
+        .find(|record| record.event_name == StreamEventName::Remove)
+        .unwrap();
+    let service_identity = removal.user_identity.as_ref().unwrap();
+    assert_eq!(
+        (
+            service_identity.identity_type.as_str(),
+            service_identity.principal_id.as_str()
+        ),
+        ("Service", "dynamodb.amazonaws.com")
     );
     assert!(
         storage
@@ -3377,6 +3427,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                     epoch: side.1,
                     key: side.2,
                     condition: None,
+                    ttl: false,
                 }),
             )
             .await
@@ -3981,6 +4032,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch: 1,
                 key: right_key.clone(),
                 condition: None,
+                ttl: false,
             }),
         )
         .await
@@ -4246,6 +4298,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch: 1,
                 key: intent_item,
                 condition: None,
+                ttl: false,
             }),
         )
         .await
@@ -4381,6 +4434,7 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 epoch: 1,
                 key: left_key.clone(),
                 condition: None,
+                ttl: false,
             }),
         )
         .await;

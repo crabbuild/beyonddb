@@ -3,7 +3,7 @@
 use cellule_runtime::registry::{CommandContext, Query, QueryContext};
 use extenddb_core::types::{
     Item, KeySchemaElement, StreamEventName, StreamRecord, StreamRecordData, StreamViewType,
-    extract_key, item_size_bytes,
+    UserIdentity, extract_key, item_size_bytes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -406,6 +406,43 @@ pub(crate) fn append(
     new: Option<&Item>,
     ordinal: usize,
 ) -> Result<()> {
+    append_record(
+        context, table_id, key_schema, stream, old, new, ordinal, None,
+    )
+}
+
+pub(crate) fn append_ttl_delete(
+    context: &CommandContext<'_, '_>,
+    table_id: &str,
+    key_schema: &[KeySchemaElement],
+    stream: Option<&StreamConfig>,
+    old: Option<&Item>,
+) -> Result<()> {
+    append_record(
+        context,
+        table_id,
+        key_schema,
+        stream,
+        old,
+        None,
+        0,
+        Some(UserIdentity {
+            identity_type: "Service".into(),
+            principal_id: "dynamodb.amazonaws.com".into(),
+        }),
+    )
+}
+
+fn append_record(
+    context: &CommandContext<'_, '_>,
+    table_id: &str,
+    key_schema: &[KeySchemaElement],
+    stream: Option<&StreamConfig>,
+    old: Option<&Item>,
+    new: Option<&Item>,
+    ordinal: usize,
+    user_identity: Option<UserIdentity>,
+) -> Result<()> {
     let Some(stream) = stream else {
         return Ok(());
     };
@@ -449,7 +486,7 @@ pub(crate) fn append(
             size_bytes: i64::try_from(item_size_bytes(source)).unwrap_or(i64::MAX),
             stream_view_type: stream.view_type,
         },
-        user_identity: None,
+        user_identity,
     };
     // The enclosing Cell command commits the item and this row under one SQL
     // savepoint. A failed append aborts the item mutation as well.

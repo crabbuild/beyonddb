@@ -48,6 +48,12 @@ account Cell test covers this lifecycle. A signed process smoke creates a
 routed table, reads its record, restarts the server hard, and reads the same
 record again. Physical collection of expired catalog and journal rows is still
 needed to bound storage; policy replacement remains unsupported.
+The TTL worker submits a marked delete to the routed owner Cell. That Cell
+checks its current TTL policy and the item's expiry before committing the
+deletion and stream record together. Its REMOVE record carries the
+[DynamoDB TTL service identity](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/time-to-live-ttl-streams.html).
+The native range test rejects a TTL-marked delete before TTL is enabled; the
+signed SDK/CLI smoke verifies the service identity and hard-restart replay.
 The new SQL table changes the unreleased version-1 schema digest; no tagged
 BeyondDB release or upgrade contract exists yet.
 
@@ -141,7 +147,7 @@ The implementation must cover all of these boundaries before support is claimed:
    validation, sequence lookups, and GetRecords response byte bounds against
    DynamoDB's limits and the full upstream protocol suite.
 6. Add bounded retention and recovery for old stream generations, then qualify
-   all view types, no-op/conditional writes, TTL identity, cross-Cell COMMIT and
+   all view types, no-op/conditional writes, cross-Cell COMMIT and
    ABORT, split lineage, disable/re-enable, delete/recreate, and hard restart
    through signed clients. The current dependency's other Streams gaps, such
    as byte bounds and shard-filter support, also need qualification.
