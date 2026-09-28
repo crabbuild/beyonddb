@@ -1,11 +1,12 @@
-# Streams implementation: closed-shard contract proposal
+# Streams implementation: closed-shard contract
 
-Status: **proposal only**. `extenddb-stream-completion.proposed.patch` is an
-unapplied diff against ExtendDB `bdb7b3df4ace3b80a6e928f144036d056aec0327`, the
-revision currently pinned by BeyondDB. It does not change Cargo resolution or
-install a dependency override. It has been parsed/formatted with Rustfmt and
-passes `git apply --check` against that revision. Compilation, its proposed
-tests, and SDK qualification remain pending approval and execution.
+Status: [ExtendDB PR #371](https://github.com/ExtendDB/extenddb/pull/371) is
+open from the reviewed fork commit pinned by this BeyondDB implementation
+branch. The older `extenddb-stream-completion.proposed.patch` records the
+original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
+the upstream PR supersedes it. Focused SQLite and engine tests, all three
+backend compile checks, and strict Clippy passed on current ExtendDB main.
+Signed SDK qualification of BeyondDB Streams is still pending.
 
 ## Why this dependency change is necessary
 
@@ -17,7 +18,7 @@ and ordering in [DynamoDB Streams](https://docs.aws.amazon.com/amazondynamodb/la
 `GetRecords` must stop returning an iterator when a closed shard is exhausted;
 see the [NextShardIterator response contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html).
 
-The pinned ExtendDB contract cannot express this:
+The previously pinned ExtendDB contract could not express this:
 
 - `crates/storage/src/lib.rs:159` returns `(records, Option<String>)`. The
   implementation uses that option for the last sequence returned, despite its
@@ -65,19 +66,12 @@ engine consumer. The closing writer must publish its final records before the
 ending marker and never append afterward; BeyondDB must enforce that ordering
 in the source Cell's seal command.
 
-## Approval boundary
+## Upstream integration
 
-Root `AGENTS.md` requires explicit approval for dependency patches, overrides,
-or vendoring. Applying this proposal to ExtendDB and changing BeyondDB's
-resolved dependency therefore requires that approval. The proposal is reviewable
-before approval; the Cargo manifests, lockfile, and cached dependency source
-remain unchanged. No upstream pull request or message has been sent.
-
-After approval: prepare an isolated ExtendDB checkout on the workspace volume,
-apply and compile the change, run its handler and backend tests, fix any issues,
-then update BeyondDB to the tested immutable revision and rerun its signed SDK
-and process recovery gates. An upstream PR requires authorization to publish it;
-this proposal does not assume that authorization.
+The fork commit is a temporary dependency while the upstream PR is reviewed.
+BeyondDB must pin the merged upstream revision before release. PostgreSQL and
+MongoDB runtime tests and BeyondDB's signed SDK and process recovery gates
+remain to be run after the Cell-backed implementation exists.
 
 ## Remaining BeyondDB implementation
 

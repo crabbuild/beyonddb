@@ -476,10 +476,10 @@ initial admission and owner recovery through those paths.
 
 ## Streams dependency contract
 
-The closed-shard completion proposal and full Streams implementation boundaries
-are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). Its accompanying patch is
-unapplied and awaits explicit dependency-change approval. Public Streams
-operations remain unsupported.
+The closed-shard completion contract and full Streams implementation boundaries
+are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). The contract is under review
+in ExtendDB PR #371; this implementation branch temporarily pins that commit.
+Public Streams operations remain unsupported.
 
 ## API coverage boundary
 
