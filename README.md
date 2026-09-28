@@ -24,25 +24,44 @@ workload.
 | Understand Cells, routing, and transactions | [Architecture](docs/architecture.md) |
 | Follow implementation evidence and open gates | [Implementation status](docs/implementation-status.md) |
 
-## How a request reaches durable storage
+## Architecture at a glance
+
+![Layered BeyondDB architecture: AWS clients, ExtendDB protocol, BeyondDB state and routing, Cellule execution, and object-store durability](diagram/beyonddb-architecture/layers.svg)
+
+ExtendDB owns the public HTTP, SigV4, IAM, validation, and expression layers.
+BeyondDB implements ExtendDB's storage contracts with Cell-backed state,
+routing, provisioning, and transaction coordination. Cellule owns fenced Cell
+execution, peer transport, SQLite commands, and LTX publication. The object
+store holds published roots for owner recovery. [PNG version](diagram/beyonddb-architecture/layers@2x.png)
+
+### BeyondDB's Cell types
 
 ```mermaid
 flowchart LR
-    Client["AWS SDK / CLI"] --> Public["ExtendDB public HTTP endpoint"]
-    Public --> Auth["SigV4, IAM, validation, expressions"]
-    Auth --> Adapter["BeyondDB StorageEngine adapter"]
-    Adapter --> Route["Cell directory and owner routing"]
-    Route --> Cell["Owning Cell: one SQLite command"]
-    Cell --> LTX["LTX publication"]
-    LTX --> Store["Conditional object store"]
-    Store --> Reply["Acknowledged response"]
+    Request["ExtendDB request handling"] --> Account["Account Cell<br/>tables · policies · TTL settings"]
+    Request -. "SigV4 lookup" .-> Credential["Credential Cells<br/>encrypted access keys"]
+    Account --> Directory["Directory Cells<br/>base and GSI ranges"]
+    Directory --> Data["Data Cells<br/>items · LSIs · streams · GSI journal"]
+    Data -. "asynchronous projection" .-> GSI["GSI Cells<br/>projected entries"]
+    Request --> Coordinator["Coordinator Cells<br/>durable transaction decision"]
+    Coordinator --> Data
+    Coordinator --> Account
 ```
 
-The account Cell owns table metadata; separate data Cells own partition-key
-ranges. A partition-local mutation, its result, and its stream intent commit
-in one Cell command. Cross-Cell transactions use a durable coordinator decision
-and idempotent participant resolution. [Architecture](docs/architecture.md)
-explains ownership, failure recovery, and index propagation.
+Each box represents BeyondDB state hosted in Cellule, not an independent
+HTTP service. An account Cell owns table metadata; data Cells own
+partition-key ranges. A GSI is maintained asynchronously from a journal
+committed with the base item. Cross-Cell transactions use a durable
+coordinator decision and idempotent participant resolution.
+
+### When a write becomes durable
+
+![Sequence of a signed PutItem: ExtendDB validates, BeyondDB routes, Cellule commits and publishes LTX, then the response returns](diagram/beyonddb-architecture/durable-write.svg)
+
+A partition-local mutation, its result, LSI changes, GSI journal entry, and
+stream intent commit in one Cell command. The successful response follows
+durable publication. [PNG version](diagram/beyonddb-architecture/durable-write@2x.png) ·
+[Detailed architecture and recovery design](docs/architecture.md)
 
 ## Current capability boundary
 
