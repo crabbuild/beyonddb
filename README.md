@@ -488,7 +488,9 @@ can install a stream policy; ListStreams and DescribeStream discover current and
 deleted generations for 24 hours after deletion, and GetShardIterator/GetRecords
 read retained records during that window. Account Cell regression covers table
 name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
-server restart. UpdateTable stream transitions, physical collection of expired
+server restart. The signed TTL sweep also emits the DynamoDB service identity on
+its REMOVE record after the owner Cell verifies the configured expiry.
+UpdateTable stream transitions, physical collection of expired
 history, and fleet-scale qualification remain open.
 
 ## API coverage boundary

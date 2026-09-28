@@ -56,7 +56,10 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
 static COMMANDS: [OperationDescriptor; 19] = [
     operation(1),
     operation(2),
-    operation(3),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(3)
+    },
     operation(4),
     operation(5),
     operation(6),
@@ -1018,6 +1021,8 @@ pub struct PartitionDeleteInput {
     pub condition: Option<WireCondition>,
     /// Include the previous image in the durable successful result.
     pub return_old: bool,
+    /// Only the TTL worker sets this; the Cell verifies its current expiry policy.
+    pub ttl: bool,
 }
 
 /// Result of a partition-local DeleteItem.
@@ -1051,7 +1056,7 @@ pub struct PartitionDelete;
 impl Command for PartitionDelete {
     const MODULE: &'static str = DATA_MODULE;
     const ID: u32 = 3;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<PartitionDeleteInput>;
     type Output = Json<PartitionDeleteOutcome>;
 
@@ -1119,16 +1124,31 @@ impl Command for PartitionDelete {
                 }
             }
         }
+        if input.ttl && !ttl::expired_for_configured_ttl(context, old.as_ref())? {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::ConditionFailed(old),
+            )));
+        }
         delete_item(context, &spec.table, &key, spec.epoch)?;
-        crate::stream_journal::append(
-            context,
-            &spec.table.id,
-            &spec.table.key_schema,
-            spec.table.stream.as_ref(),
-            old.as_ref(),
-            None,
-            0,
-        )?;
+        if input.ttl {
+            crate::stream_journal::append_ttl_delete(
+                context,
+                &spec.table.id,
+                &spec.table.key_schema,
+                spec.table.stream.as_ref(),
+                old.as_ref(),
+            )?;
+        } else {
+            crate::stream_journal::append(
+                context,
+                &spec.table.id,
+                &spec.table.key_schema,
+                spec.table.stream.as_ref(),
+                old.as_ref(),
+                None,
+                0,
+            )?;
+        }
         Ok(CommandResult::Success(Json(
             PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
         )))

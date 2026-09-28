@@ -36,6 +36,48 @@ use crate::{
     TransactionOperation, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
+use cellule_runtime::identity::CellTarget;
+
+impl CellStorage {
+    pub(super) async fn delete_expired_partition_item(
+        &self,
+        owner: &CellTarget,
+        table_id: &str,
+        epoch: u64,
+        key: Item,
+        condition: &Expr,
+        maps: &ExpressionMaps,
+    ) -> Result<bool, StorageError> {
+        let outcome = self
+            .client
+            .command::<PartitionDelete>(
+                owner,
+                mutation_identity()?,
+                Json(PartitionDeleteInput {
+                    table_id: table_id.into(),
+                    epoch,
+                    key,
+                    condition: Some(WireCondition::from_core(condition, maps)),
+                    return_old: false,
+                    ttl: true,
+                }),
+            )
+            .await;
+        match outcome {
+            Ok(committed) => match committed.output.0 {
+                PartitionDeleteOutcome::Applied(_) => Ok(true),
+                _ => Err(StorageError::Internal(
+                    "unexpected TTL delete result".into(),
+                )),
+            },
+            Err(InvocationError::Rejected(committed)) => match committed.output.0 {
+                PartitionDeleteOutcome::ConditionFailed(_) => Ok(false),
+                other => Err(partition_delete_rejection(other)),
+            },
+            Err(error) => Err(cell_error(error)),
+        }
+    }
+}
 
 impl DataEngine for CellStorage {
     fn put_item(
@@ -193,6 +235,7 @@ impl DataEngine for CellStorage {
                             epoch,
                             key,
                             condition,
+                            ttl: false,
                         }),
                     )
                     .await;
