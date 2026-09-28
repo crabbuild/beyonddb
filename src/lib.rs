@@ -44,11 +44,12 @@ pub use server::{
 };
 pub use split::*;
 pub use stream_journal::{
-    HasExpiredAccountStreamRecords, ListStreamCatalog, ListStreamCatalogInput,
-    ListStreamCatalogPage, PruneAccountStreamRecords, ReadAccountStreamJournal,
-    ReadAccountStreamTail, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
-    StreamCatalogEntry, StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome,
-    StreamTailInput, StreamTailOutcome,
+    HasExpiredAccountStreamRecords, HasExpiredPartitionStreamRecords, ListStreamCatalog,
+    ListStreamCatalogInput, ListStreamCatalogPage, PruneAccountStreamRecords,
+    PrunePartitionStreamRecords, ReadAccountStreamJournal, ReadAccountStreamTail,
+    ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog, StreamCatalogEntry,
+    StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
+    StreamTailOutcome,
 };
 pub use table::*;
 pub use transaction_coordinator::*;

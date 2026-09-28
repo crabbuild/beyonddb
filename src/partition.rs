@@ -53,7 +53,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 19] = [
+static COMMANDS: [OperationDescriptor; 20] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -79,8 +79,9 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(17),
     operation(18),
     operation(19),
+    operation(20),
 ];
-static QUERIES: [OperationDescriptor; 16] = [
+static QUERIES: [OperationDescriptor; 17] = [
     operation(1),
     operation(2),
     operation(3),
@@ -97,6 +98,7 @@ static QUERIES: [OperationDescriptor; 16] = [
     operation(15),
     operation(16),
     operation(17),
+    operation(18),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -162,6 +164,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<crate::PrunePartitionStreamRecords>()?;
+        registry.bind_query::<crate::HasExpiredPartitionStreamRecords>()?;
         registry.bind_command::<ConfigurePartitionIndexes>()?;
         registry.bind_command::<BackfillPartitionIndex>()?;
         registry.bind_command::<InheritPartitionIndexes>()?;

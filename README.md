@@ -490,10 +490,10 @@ read retained records during that window. Account Cell regression covers table
 name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
 server restart. The signed TTL sweep also emits the DynamoDB service identity on
 its REMOVE record after the owner Cell verifies the configured expiry.
-A supervised account Cell sweep now deletes expired journal
-records in bounded batches, including records from deleted generations.
-Routed Cell history, expired catalog rows, UpdateTable stream transitions, and
-fleet-scale qualification remain open.
+Supervised sweeps now delete expired account Cell records and records in active
+routed owner Cells in bounded batches. Account cleanup includes deleted table
+generations. Dormant and deleted routed Cells, expired catalog rows, UpdateTable
+stream transitions, and fleet-scale qualification remain open.
 
 ## API coverage boundary
 
