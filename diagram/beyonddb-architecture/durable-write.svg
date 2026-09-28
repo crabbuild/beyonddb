@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" role="img" aria-labelledby="title desc">
+  <title id="title">Durable PutItem sequence</title>
+  <desc id="desc">A signed PutItem passes through ExtendDB and BeyondDB to an owning Cellule Cell. The Cell atomically records the item and related intents, publishes LTX to the object store, and only then returns a committed response.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker>
+    <marker id="arrow-open" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polyline points="0 0, 10 3.5, 0 7" fill="none" stroke="#94a3b8" stroke-width="1.5"/></marker>
+    <style>
+      text { font-family:'JetBrains Mono','SF Mono','Cascadia Code',monospace; }
+      .title { fill:#f8fafc; font-size:22px; font-weight:700; }
+      .subtitle { fill:#94a3b8; font-size:12px; }
+      .actor { fill:#f8fafc; font-size:12px; font-weight:600; }
+      .message { fill:#e2e8f0; font-size:10px; }
+      .return { fill:#94a3b8; font-size:9px; }
+      .life { stroke:#475569; stroke-width:1; stroke-dasharray:6,5; }
+      .call { stroke:#94a3b8; stroke-width:1.7; marker-end:url(#arrow); }
+      .reply { stroke:#64748b; stroke-width:1.3; stroke-dasharray:6,4; marker-end:url(#arrow-open); }
+    </style>
+  </defs>
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+  <text x="36" y="42" class="title">One durable PutItem</text>
+  <text x="36" y="64" class="subtitle">The public response follows the owning Cell's durable publication</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="148" x2="100" y2="588" class="life"/>
+  <line x1="350" y1="148" x2="350" y2="588" class="life"/>
+  <line x1="600" y1="148" x2="600" y2="588" class="life"/>
+  <line x1="850" y1="148" x2="850" y2="588" class="life"/>
+  <line x1="1100" y1="148" x2="1100" y2="588" class="life"/>
+
+  <!-- Messages -->
+  <line x1="100" y1="186" x2="350" y2="186" class="call"/>
+  <text x="225" y="174" class="message" text-anchor="middle">1 · signed PutItem</text>
+  <line x1="350" y1="246" x2="600" y2="246" class="call"/>
+  <text x="475" y="234" class="message" text-anchor="middle">2 · validated operation</text>
+  <line x1="600" y1="306" x2="850" y2="306" class="call"/>
+  <text x="725" y="294" class="message" text-anchor="middle">3 · routed Cell command</text>
+  <line x1="850" y1="412" x2="1100" y2="412" class="call"/>
+  <text x="975" y="400" class="message" text-anchor="middle">4 · publish LTX + root</text>
+  <line x1="1100" y1="467" x2="850" y2="467" class="reply"/>
+  <text x="975" y="455" class="return" text-anchor="middle">5 · conditional update succeeds</text>
+  <line x1="850" y1="522" x2="600" y2="522" class="reply"/>
+  <text x="725" y="510" class="return" text-anchor="middle">6 · committed result</text>
+  <line x1="600" y1="551" x2="350" y2="551" class="reply"/>
+  <text x="475" y="540" class="return" text-anchor="middle">7 · backend result</text>
+  <line x1="350" y1="580" x2="100" y2="580" class="reply"/>
+  <text x="225" y="569" class="return" text-anchor="middle">8 · DynamoDB response</text>
+
+  <!-- Activation bars -->
+  <rect x="344" y="186" width="12" height="394" rx="2" fill="#082d3b" stroke="#22d3ee"/>
+  <rect x="594" y="246" width="12" height="305" rx="2" fill="#083c32" stroke="#34d399"/>
+  <rect x="844" y="306" width="12" height="216" rx="2" fill="#34204e" stroke="#a78bfa"/>
+
+  <!-- Atomic command note masks the lifeline underneath -->
+  <rect x="666" y="326" width="370" height="60" rx="8" fill="#0f172a"/>
+  <rect x="666" y="326" width="370" height="60" rx="8" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.3"/>
+  <text x="851" y="350" class="actor" text-anchor="middle">One atomic SQLite command</text>
+  <text x="851" y="368" class="return" text-anchor="middle">item · LSI · GSI journal · stream intent</text>
+
+  <!-- Actor boxes above lines -->
+  <rect x="24" y="92" width="152" height="56" rx="8" fill="#0f172a"/>
+  <rect x="24" y="92" width="152" height="56" rx="8" fill="rgba(30,41,59,0.55)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="100" y="125" class="actor" text-anchor="middle">AWS client</text>
+  <rect x="274" y="92" width="152" height="56" rx="8" fill="#0f172a"/>
+  <rect x="274" y="92" width="152" height="56" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="350" y="125" class="actor" text-anchor="middle">ExtendDB</text>
+  <rect x="524" y="92" width="152" height="56" rx="8" fill="#0f172a"/>
+  <rect x="524" y="92" width="152" height="56" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="600" y="125" class="actor" text-anchor="middle">BeyondDB</text>
+  <rect x="774" y="92" width="152" height="56" rx="8" fill="#0f172a"/>
+  <rect x="774" y="92" width="152" height="56" rx="8" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="850" y="125" class="actor" text-anchor="middle">Cellule Cell</text>
+  <rect x="1024" y="92" width="152" height="56" rx="8" fill="#0f172a"/>
+  <rect x="1024" y="92" width="152" height="56" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1100" y="125" class="actor" text-anchor="middle">Object store</text>
+
+  <rect x="36" y="610" width="1128" height="32" rx="6" fill="rgba(30,41,59,0.65)" stroke="#475569"/>
+  <text x="600" y="631" class="message" text-anchor="middle">A rejected command rolls back; a successful mutation reply follows published Cell state.</text>
+</svg>
