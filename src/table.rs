@@ -216,14 +216,27 @@ impl Command for CreateTable {
                 .then_some(context.now_ms()),
             stream: input.stream,
         };
+        let encoded = serde_json::to_vec(&record)?;
         context.sql(&statement(
             "INSERT INTO ddb_tables (table_name, table_id, record) VALUES (?1, ?2, ?3)",
             vec![
                 SqlValue::Text(input.table_name),
                 SqlValue::Text(table_id),
-                SqlValue::Blob(serde_json::to_vec(&record)?),
+                SqlValue::Blob(encoded.clone()),
             ],
         ))?;
+        if let Some(stream) = &record.stream {
+            context.sql(&statement(
+                "INSERT INTO ddb_stream_catalog (table_id, table_name, stream_label, region, record) VALUES (?1, ?2, ?3, ?4, ?5)",
+                vec![
+                    SqlValue::Text(record.id.clone()),
+                    SqlValue::Text(record.table_name.clone()),
+                    SqlValue::Text(stream.label.clone()),
+                    SqlValue::Text(stream.region.clone()),
+                    SqlValue::Blob(encoded),
+                ],
+            ))?;
+        }
         if matches!(record.placement, TablePlacement::Routed { .. }) {
             // Persist lifecycle ownership before provisioning independent roots.
             // Deletion must fence even an installer that never publishes its copy.

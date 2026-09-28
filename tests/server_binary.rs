@@ -510,6 +510,42 @@ async fn signed_stream_records_survive_hard_server_restart() {
     let mut restarted = start(&config, &log, false, s3);
     wait_healthy(&mut restarted, public, &log);
     assert_eq!(records(public), first);
+    sdk.delete_table()
+        .table_name("StreamProcess")
+        .send()
+        .await
+        .unwrap();
+    sdk.wait_until_table_not_exists()
+        .table_name("StreamProcess")
+        .wait(Duration::from_secs(60))
+        .await
+        .unwrap();
+    let retained = streams_cli(public, &["list-streams", "--table-name", "StreamProcess"]);
+    assert_eq!(retained["Streams"][0]["StreamArn"], arn);
+    let described = streams_cli(public, &["describe-stream", "--stream-arn", arn]);
+    assert_eq!(described["StreamDescription"]["StreamStatus"], "DISABLED");
+    assert_eq!(records(public), first);
+    sdk.create_table()
+        .table_name("StreamProcess")
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(records(public), first);
     stop(&mut restarted, &log);
     drop(rustfs);
 }

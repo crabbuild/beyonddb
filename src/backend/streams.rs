@@ -11,9 +11,10 @@ use extenddb_storage::{
 };
 
 use crate::{
-    Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionState, ReadAccountStreamJournal,
+    Json, ListStreamCatalog, ListStreamCatalogInput, PartitionState, ReadAccountStreamJournal,
     ReadAccountStreamTail, ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail,
-    StreamJournalInput, StreamJournalOutcome, StreamTailInput, StreamTailOutcome, data_target,
+    ReadStreamCatalog, StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
+    StreamTailOutcome, data_target,
 };
 
 use super::{CellStorage, cell_error, target, unsupported};
@@ -124,23 +125,37 @@ impl CellStorage {
         {
             return Err(missing());
         }
-        let (record, status) = match self.lifecycle(account_id, &table_name).await? {
-            crate::TableLifecycle::Live(record) => {
-                let status = if matches!(record.placement, crate::TablePlacement::Routed { .. })
-                    && !self.route_active_for(account_id, &record.id).await?
-                {
-                    StreamStatus::Enabling
-                } else {
-                    StreamStatus::Enabled
-                };
-                (record, status)
+        let owner = target(account_id)?;
+        let entry = self
+            .client
+            .query::<ReadStreamCatalog>(
+                &owner,
+                None,
+                Json(StreamCatalogKey::NameLabel {
+                    table_name: table_name.clone(),
+                    label: label.clone(),
+                }),
+            )
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .ok_or_else(missing)?;
+        let record = entry.record;
+        let status = if entry.disabled_at_ms.is_some() {
+            match self.lifecycle(account_id, &table_name).await? {
+                crate::TableLifecycle::Deleting(current) if current.id == record.id => {
+                    StreamStatus::Disabling
+                }
+                _ => StreamStatus::Disabled,
             }
-            crate::TableLifecycle::Deleting(record) => (record, StreamStatus::Disabling),
-            crate::TableLifecycle::Missing => return Err(missing()),
+        } else if matches!(record.placement, crate::TablePlacement::Routed { .. })
+            && !self.route_active_for(account_id, &record.id).await?
+        {
+            StreamStatus::Enabling
+        } else {
+            StreamStatus::Enabled
         };
-        if record.stream.as_ref().map(|stream| stream.label.as_str()) != Some(label.as_str()) {
-            return Err(missing());
-        }
         Ok((record, label, status))
     }
 }
@@ -175,6 +190,38 @@ impl StreamEngine for CellStorage {
                 })?;
             let shard = StreamShard::parse(&shard_id)
                 .ok_or_else(|| StorageError::TableNotFound(shard_id.clone()))?;
+            let owner = target(&account_id)?;
+            let entry = self
+                .client
+                .query::<ReadStreamCatalog>(
+                    &owner,
+                    None,
+                    Json(StreamCatalogKey::Id(shard.table_id().into())),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or_else(|| StorageError::TableNotFound(shard_id.clone()))?;
+            if entry
+                .record
+                .stream
+                .as_ref()
+                .map(|stream| stream.label.as_str())
+                != Some(shard.label())
+            {
+                return Err(StorageError::TableNotFound(shard_id));
+            }
+            // Deletion first fences the table, then waits for routed owners to
+            // retire. Keep polling possible until the final owner is retired.
+            let disabled = if entry.disabled_at_ms.is_some() {
+                !matches!(
+                    self.lifecycle(&account_id, &entry.record.table_name).await?,
+                    crate::TableLifecycle::Deleting(current) if current.id == entry.record.id
+                )
+            } else {
+                false
+            };
             let input = StreamJournalInput {
                 table_id: shard.table_id().to_owned(),
                 label: shard.label().to_owned(),
@@ -183,7 +230,6 @@ impl StreamEngine for CellStorage {
             };
             let page = match shard {
                 StreamShard::Account { .. } => {
-                    let owner = target(&account_id)?;
                     self.client
                         .query::<ReadAccountStreamJournal>(&owner, None, Json(input))
                         .await
@@ -210,10 +256,10 @@ impl StreamEngine for CellStorage {
                 StreamJournalOutcome::Missing => Err(StorageError::TableNotFound(shard_id)),
                 StreamJournalOutcome::Page {
                     records,
-                    closed: true,
+                    closed,
                     exhausted: true,
                     ..
-                } => Ok((records, StreamContinuation::End)),
+                } if closed || disabled => Ok((records, StreamContinuation::End)),
                 StreamJournalOutcome::Page {
                     records,
                     last_sequence,
@@ -286,6 +332,15 @@ impl StreamEngine for CellStorage {
                         ));
                     }
                     match state.state {
+                        PartitionState::Serving | PartitionState::Opened { .. }
+                            if status == StreamStatus::Disabled =>
+                        {
+                            Some(
+                                self.latest_sequence_number(&shard_id)
+                                    .await?
+                                    .unwrap_or_else(|| FIRST_SEQUENCE.into()),
+                            )
+                        }
                         PartitionState::Serving | PartitionState::Opened { .. } => None,
                         PartitionState::Sealed(seal) => {
                             pending.push((Some(seal.right_partition_id), Some(shard_id.clone())));
@@ -302,6 +357,12 @@ impl StreamEngine for CellStorage {
                             ));
                         }
                     }
+                } else if status == StreamStatus::Disabled {
+                    Some(
+                        self.latest_sequence_number(&shard_id)
+                            .await?
+                            .unwrap_or_else(|| FIRST_SEQUENCE.into()),
+                    )
                 } else {
                     None
                 };
@@ -365,9 +426,9 @@ impl StreamEngine for CellStorage {
                 .ok_or_else(|| {
                     StorageError::Validation("stream listing limit must be 1..=100".into())
                 })?;
-            let start_name = match start {
+            let after = match start {
                 Some(arn) => {
-                    let (record, _, _) = self.stream_record(&account_id, &arn).await?;
+                    let (record, label, _) = self.stream_record(&account_id, &arn).await?;
                     if table_name
                         .as_ref()
                         .is_some_and(|name| name != &record.table_name)
@@ -376,86 +437,46 @@ impl StreamEngine for CellStorage {
                             "stream cursor is outside table filter".into(),
                         ));
                     }
-                    Some(record.table_name)
+                    Some((record.table_name, label))
                 }
                 None => None,
             };
-            if let Some(name) = table_name {
-                if start_name.is_some() {
-                    return Ok((Vec::new(), None));
-                }
-                let record = match self.lifecycle(&account_id, &name).await? {
-                    crate::TableLifecycle::Live(record)
-                    | crate::TableLifecycle::Deleting(record) => record,
-                    crate::TableLifecycle::Missing => return Ok((Vec::new(), None)),
-                };
-                return Ok((
-                    record
-                        .stream
-                        .as_ref()
-                        .map(|stream| StreamSummary {
-                            stream_arn: extenddb_storage::util::stream_arn(
-                                &stream.region,
-                                &account_id,
-                                &record.table_name,
-                                &stream.label,
-                            ),
-                            stream_label: stream.label.clone(),
-                            table_name: record.table_name,
-                        })
-                        .into_iter()
-                        .collect(),
-                    None,
-                ));
-            }
             let owner = target(&account_id)?;
-            let mut cursor = start_name;
-            let mut streams = Vec::with_capacity(limit);
-            loop {
-                let page = self
-                    .client
-                    .query::<ListTables>(
-                        &owner,
-                        None,
-                        Json(ListTablesInput {
-                            limit: 100,
-                            exclusive_start: cursor.clone(),
-                        }),
-                    )
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0;
-                let ListTablesOutcome::Page(page) = page else {
-                    return Err(StorageError::Internal("account table page rejected".into()));
-                };
-                for name in page.names {
-                    cursor = Some(name.clone());
-                    let record = self.record(&account_id, &name).await?;
-                    let Some(stream) = record.stream else {
-                        continue;
-                    };
-                    if streams.len() == limit {
-                        let last = streams
-                            .last()
-                            .map(|stream: &StreamSummary| stream.stream_arn.clone());
-                        return Ok((streams, last));
-                    }
-                    streams.push(StreamSummary {
-                        stream_arn: extenddb_storage::util::stream_arn(
-                            &stream.region,
-                            &account_id,
-                            &name,
-                            &stream.label,
-                        ),
-                        stream_label: stream.label,
-                        table_name: name,
-                    });
-                }
-                if page.last_evaluated.is_none() {
-                    return Ok((streams, None));
-                }
-            }
+            let page = self
+                .client
+                .query::<ListStreamCatalog>(
+                    &owner,
+                    None,
+                    Json(ListStreamCatalogInput {
+                        table_name,
+                        after,
+                        limit: u16::try_from(limit).map_err(|_| {
+                            StorageError::Validation("invalid stream listing limit".into())
+                        })?,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            let streams = page
+                .streams
+                .into_iter()
+                .map(|stream| StreamSummary {
+                    stream_arn: extenddb_storage::util::stream_arn(
+                        &stream.region,
+                        &account_id,
+                        &stream.table_name,
+                        &stream.label,
+                    ),
+                    stream_label: stream.label,
+                    table_name: stream.table_name,
+                })
+                .collect();
+            let last = page.last_evaluated.map(|(name, label)| {
+                extenddb_storage::util::stream_arn(&self.region, &account_id, &name, &label)
+            });
+            Ok((streams, last))
         })
     }
 

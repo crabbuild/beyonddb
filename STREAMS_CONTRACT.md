@@ -39,11 +39,14 @@ This slice is exercised by the native account Cell test for insert, replay,
 equal-image Put, deletion, transaction commit, and rejection. The adapter now
 accepts `CreateTable(StreamSpecification)`, returns its stream ARN and view
 type in the table description, and passes streamed writes to the Cell command.
-ListStreams and DescribeStream discover current generations. A signed process
-smoke creates a routed table, reads its record, restarts the server hard, and
-reads the same record again.
-The current native read checks the installed table policy, so it cannot yet
-serve a retained generation after table deletion or policy replacement.
+ListStreams and DescribeStream use a generation catalog committed with table
+creation. DeleteTable marks that generation disabled before removing the table
+record. Catalog reads and record queries apply a 24-hour visibility cutoff;
+the old stream remains readable after deletion and table name reuse. The
+account Cell test covers this lifecycle. A signed process smoke creates a
+routed table, reads its record, restarts the server hard, and reads the same
+record again. Physical collection of expired catalog and journal rows is still
+needed to bound storage; policy replacement remains unsupported.
 The new SQL table changes the unreleased version-1 schema digest; no tagged
 BeyondDB release or upgrade contract exists yet.
 
@@ -112,9 +115,9 @@ MongoDB runtime tests and BeyondDB's broader signed SDK matrix remain open.
 ## Remaining BeyondDB implementation
 
 This dependency fix is necessary but does not implement Streams by itself.
-BeyondDB supports current-generation creation, discovery, and record reads.
-Retained generations, policy transitions, retention, and full public Streams
-behavior remain unfinished.
+BeyondDB supports generation creation, discovery, and record reads through a
+24-hour visibility window after deletion. Policy transitions, physical
+collection, and full public Streams behavior remain unfinished.
 The implementation must cover all of these boundaries before support is claimed:
 
 1. Store stream identity, view type, generation, shard lineage, and lifetime

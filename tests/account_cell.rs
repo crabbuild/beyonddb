@@ -1239,6 +1239,81 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_ne!(first_streams[0].stream_arn, second_streams[0].stream_arn);
+    storage
+        .delete_table(
+            "123456789012",
+            DeleteTableInput {
+                table_name: "Streamed".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let (retained, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    let retained_description = storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: streamed.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_description.stream_status,
+        extenddb_core::types::StreamStatus::Disabled
+    );
+    let (retained_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(retained_records.len(), 1);
+    assert_eq!(continuation, StreamContinuation::End);
+    storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "Streamed".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::KeysOnly),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (generations, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(generations.len(), 2);
+    let (first_generation, cursor) = storage
+        .list_streams("123456789012", Some("Streamed"), 1, None)
+        .await
+        .unwrap();
+    let (next_generation, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 1, cursor.as_deref())
+        .await
+        .unwrap();
+    assert_ne!(
+        first_generation[0].stream_arn,
+        next_generation[0].stream_arn
+    );
+    let (old_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(old_records.len(), 1);
+    assert_eq!(continuation, StreamContinuation::End);
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 

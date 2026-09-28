@@ -7,10 +7,145 @@ use extenddb_core::types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::table::statement;
+use crate::table::{TableRecord, statement};
 use crate::{DATA_MODULE, Error, Json, MODULE, Result, SqlValue};
 
 pub(crate) const SCHEMA: &str = include_str!("stream_journal.sql");
+const RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
+
+/// Locate a retained stream generation by immutable ID or its public ARN components.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum StreamCatalogKey {
+    Id(String),
+    NameLabel { table_name: String, label: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamCatalogEntry {
+    pub record: TableRecord,
+    pub disabled_at_ms: Option<i64>,
+}
+
+pub struct ReadStreamCatalog;
+
+impl Query for ReadStreamCatalog {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 46;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<StreamCatalogKey>;
+    type Output = Json<Option<StreamCatalogEntry>>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(key): Self::Input) -> Result<Self::Output> {
+        let (sql, parameters) = match key {
+            StreamCatalogKey::Id(id) => (
+                "SELECT record, disabled_at_ms FROM ddb_stream_catalog WHERE table_id = ?1",
+                vec![SqlValue::Text(id)],
+            ),
+            StreamCatalogKey::NameLabel { table_name, label } => (
+                "SELECT record, disabled_at_ms FROM ddb_stream_catalog WHERE table_name = ?1 AND stream_label = ?2",
+                vec![SqlValue::Text(table_name), SqlValue::Text(label)],
+            ),
+        };
+        let rows = context.sql(&statement(sql, parameters))?;
+        let entry = match rows[0].rows.first().map(Vec::as_slice) {
+            None => None,
+            Some([SqlValue::Blob(record), disabled]) => {
+                let disabled_at_ms = match disabled {
+                    SqlValue::Integer(time) => Some(*time),
+                    SqlValue::Null => None,
+                    _ => return Err(Error::Command("invalid stream catalog timestamp")),
+                };
+                if disabled_at_ms
+                    .is_some_and(|time| time <= context.now_ms().saturating_sub(RETENTION_MS))
+                {
+                    None
+                } else {
+                    Some(StreamCatalogEntry {
+                        record: serde_json::from_slice(record)?,
+                        disabled_at_ms,
+                    })
+                }
+            }
+            _ => return Err(Error::Command("invalid stream catalog row")),
+        };
+        Ok(Json(entry))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListStreamCatalogInput {
+    pub table_name: Option<String>,
+    pub after: Option<(String, String)>,
+    pub limit: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamCatalogSummary {
+    pub table_name: String,
+    pub label: String,
+    pub region: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListStreamCatalogPage {
+    pub streams: Vec<StreamCatalogSummary>,
+    pub last_evaluated: Option<(String, String)>,
+}
+
+pub struct ListStreamCatalog;
+
+impl Query for ListStreamCatalog {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 47;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ListStreamCatalogInput>;
+    type Output = Json<ListStreamCatalogPage>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        if input.limit == 0 || input.limit > 100 {
+            return Err(Error::Command("stream listing limit is outside 1..=100"));
+        }
+        let (after_name, after_label) = input.after.unwrap_or_default();
+        let rows = context.sql(&statement(
+            "SELECT table_name, stream_label, region FROM ddb_stream_catalog WHERE (?1 IS NULL OR table_name = ?1) AND (table_name > ?2 OR (table_name = ?2 AND stream_label > ?3)) AND (disabled_at_ms IS NULL OR disabled_at_ms > ?4) ORDER BY table_name, stream_label LIMIT ?5",
+            vec![
+                input.table_name.map_or(SqlValue::Null, SqlValue::Text),
+                SqlValue::Text(after_name),
+                SqlValue::Text(after_label),
+                SqlValue::Integer(context.now_ms().saturating_sub(RETENTION_MS)),
+                SqlValue::Integer(i64::from(input.limit) + 1),
+            ],
+        ))?;
+        let mut streams = Vec::with_capacity(rows[0].rows.len());
+        for row in &rows[0].rows {
+            let [
+                SqlValue::Text(table_name),
+                SqlValue::Text(label),
+                SqlValue::Text(region),
+            ] = row.as_slice()
+            else {
+                return Err(Error::Command("invalid stream listing row"));
+            };
+            streams.push(StreamCatalogSummary {
+                table_name: table_name.clone(),
+                label: label.clone(),
+                region: region.clone(),
+            });
+        }
+        let last_evaluated = if streams.len() > usize::from(input.limit) {
+            streams.pop();
+            streams
+                .last()
+                .map(|stream| (stream.table_name.clone(), stream.label.clone()))
+        } else {
+            None
+        };
+        Ok(Json(ListStreamCatalogPage {
+            streams,
+            last_evaluated,
+        }))
+    }
+}
 
 /// The immutable stream generation installed with a table generation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -71,14 +206,7 @@ impl Query for ReadAccountStreamJournal {
     type Output = Json<StreamJournalOutcome>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        let rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
-            vec![SqlValue::Text(input.table_id.clone())],
-        ))?;
-        let Some(table) = crate::table::decode_table(&rows[0])? else {
-            return Ok(Json(StreamJournalOutcome::Missing));
-        };
-        if table.stream.as_ref().map(|stream| stream.label.as_str()) != Some(input.label.as_str()) {
+        if !account_generation_exists(context, &input.table_id, &input.label)? {
             return Ok(Json(StreamJournalOutcome::Missing));
         }
         Ok(Json(read(context, input, false)?))
@@ -135,18 +263,27 @@ impl Query for ReadAccountStreamTail {
     type Output = Json<StreamTailOutcome>;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
-        let rows = context.sql(&statement(
-            "SELECT record FROM ddb_tables WHERE table_id = ?1",
-            vec![SqlValue::Text(input.table_id.clone())],
-        ))?;
-        let Some(table) = crate::table::decode_table(&rows[0])? else {
-            return Ok(Json(StreamTailOutcome::Missing));
-        };
-        if table.stream.as_ref().map(|stream| stream.label.as_str()) != Some(input.label.as_str()) {
+        if !account_generation_exists(context, &input.table_id, &input.label)? {
             return Ok(Json(StreamTailOutcome::Missing));
         }
         Ok(Json(StreamTailOutcome::Latest(tail(context, input)?)))
     }
+}
+
+fn account_generation_exists(
+    context: &mut QueryContext<'_>,
+    table_id: &str,
+    label: &str,
+) -> Result<bool> {
+    let rows = context.sql(&statement(
+        "SELECT 1 FROM ddb_stream_catalog WHERE table_id = ?1 AND stream_label = ?2 AND (disabled_at_ms IS NULL OR disabled_at_ms > ?3)",
+        vec![
+            SqlValue::Text(table_id.into()),
+            SqlValue::Text(label.into()),
+            SqlValue::Integer(context.now_ms().saturating_sub(RETENTION_MS)),
+        ],
+    ))?;
+    Ok(!rows[0].rows.is_empty())
 }
 
 /// Read one data Cell's latest sequence without scanning the journal.
@@ -189,8 +326,8 @@ impl Query for ReadPartitionStreamTail {
 
 fn tail(context: &mut QueryContext<'_>, input: StreamTailInput) -> Result<Option<String>> {
     let rows = context.sql(&statement(
-        "SELECT sequence_number FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 ORDER BY sequence_number DESC LIMIT 1",
-        vec![SqlValue::Text(input.table_id), SqlValue::Text(input.label)],
+        "SELECT sequence_number FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND created_at_ms > ?3 ORDER BY sequence_number DESC LIMIT 1",
+        vec![SqlValue::Text(input.table_id), SqlValue::Text(input.label), SqlValue::Integer(context.now_ms().saturating_sub(RETENTION_MS))],
     ))?;
     match rows[0].rows.first().map(Vec::as_slice) {
         Some([SqlValue::Text(sequence)]) => Ok(Some(sequence.clone())),
@@ -213,11 +350,12 @@ fn read(
     let mut exhausted = false;
     while records.len() < usize::from(input.limit) {
         let rows = context.sql(&statement(
-            "SELECT sequence_number, record FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 ORDER BY sequence_number LIMIT 1",
+            "SELECT sequence_number, record FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 AND created_at_ms > ?4 ORDER BY sequence_number LIMIT 1",
             vec![
                 SqlValue::Text(input.table_id.clone()),
                 SqlValue::Text(input.label.clone()),
                 SqlValue::Text(cursor.clone()),
+                SqlValue::Integer(context.now_ms().saturating_sub(RETENTION_MS)),
             ],
         ))?;
         let Some([SqlValue::Text(sequence), SqlValue::Blob(record)]) =
@@ -240,11 +378,12 @@ fn read(
     }
     if !exhausted && records.len() == usize::from(input.limit) {
         let rows = context.sql(&statement(
-            "SELECT 1 FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 ORDER BY sequence_number LIMIT 1",
+            "SELECT 1 FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 AND created_at_ms > ?4 ORDER BY sequence_number LIMIT 1",
             vec![
                 SqlValue::Text(input.table_id),
                 SqlValue::Text(input.label),
                 SqlValue::Text(cursor.clone()),
+                SqlValue::Integer(context.now_ms().saturating_sub(RETENTION_MS)),
             ],
         ))?;
         exhausted = rows[0].rows.is_empty();

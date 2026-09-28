@@ -481,11 +481,12 @@ are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). The contract is under review
 in ExtendDB PR #371; this implementation branch temporarily pins that commit.
 The native Cell write path now journals item changes atomically for an
 installed stream policy and exposes bounded owner Cell reads. CreateTable
-can install a stream policy; ListStreams and DescribeStream discover its current
-generation, and GetShardIterator/GetRecords read it. A signed DynamoDB SDK write
-and AWS CLI Streams read survived a hard server restart. UpdateTable stream
-transitions, retained generations after deletion, retention, and fleet-scale
-qualification remain open.
+can install a stream policy; ListStreams and DescribeStream discover current and
+deleted generations for 24 hours after deletion, and GetShardIterator/GetRecords
+read retained records during that window. Account Cell regression covers table
+name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
+server restart. UpdateTable stream transitions, physical collection of expired
+history, and fleet-scale qualification remain open.
 
 ## API coverage boundary
 
