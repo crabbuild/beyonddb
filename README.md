@@ -175,7 +175,7 @@ configures a fixed expiry index in each routed data Cell, backfills old items in
 bounded commands, and conditionally deletes expired items. Each tick processes
 at most one 64-Cell route page per table and 16 tables per account. An owner
 restart restores the settings, sweep and backfill cursors, and index state. The global TTL listing
-trait remains unsupported; the worker lists tables by locally owned account.
+trait remains unsupported; the worker lists tables through each configured account.
 UpdateTimeToLive primes at most one route page and returns while the worker
 reconciles the rest; disabling stops expiry sweeps without dropping the fixed
 data Cell index.
