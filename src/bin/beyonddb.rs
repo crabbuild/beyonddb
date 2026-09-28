@@ -402,6 +402,22 @@ async fn serve_ready(
             config.owned_accounts.clone(),
         )?;
         provisioner.install_range_rebalance_loop(&tasks)?;
+        let storage = CellStorage::new(client.clone(), config.region.clone());
+        let runtime = node.runtime();
+        let cancellation = tasks.cancellation_token();
+        tasks.spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_secs(30));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
+                    _ = ticks.tick() => {}
+                }
+                if let Err(error) = storage.sweep_active_partition_stream_records(&runtime).await {
+                    tracing::warn!(%error, "routed stream retention sweep failed");
+                }
+            }
+        })?;
         if !config.owned_accounts.is_empty() {
             let storage = CellStorage::new(client.clone(), config.region.clone());
             let accounts = config.owned_accounts.clone();
@@ -420,6 +436,9 @@ async fn serve_ready(
                         }
                         if let Err(error) = storage.sweep_account_ttl(account_id).await {
                             tracing::warn!(account_id, %error, "TTL sweep failed");
+                        }
+                        if let Err(error) = storage.sweep_account_stream_records(account_id).await {
+                            tracing::warn!(account_id, %error, "account stream retention sweep failed");
                         }
                     }
                 }

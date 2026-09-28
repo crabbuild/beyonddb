@@ -1096,6 +1096,21 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             |row| row.get(0),
         )
         .unwrap();
+    assert_eq!(
+        storage
+            .sweep_account_stream_records("123456789012")
+            .await
+            .unwrap(),
+        0
+    );
+    let retained_stream_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_stream_count, committed_stream_count);
     let shard_id = format!("shardId-{book_table_id}-account-2026-09-27T00:00:00.000");
     storage
         .validate_shard(
@@ -1248,6 +1263,29 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(routed_records.len(), 1);
+    let routed_owner =
+        beyonddb::data_target("123456789012", &routed_table.table_id, &[0; 16]).unwrap();
+    assert_eq!(
+        routed_storage
+            .sweep_partition_stream_records(&routed_owner)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        host.runtime()
+            .active_cell_targets()
+            .await
+            .unwrap()
+            .contains(&routed_owner)
+    );
+    assert_eq!(
+        routed_storage
+            .sweep_active_partition_stream_records(&host.runtime())
+            .await
+            .unwrap(),
+        0
+    );
     let (first_streams, cursor) = storage
         .list_streams("123456789012", None, 1, None)
         .await
