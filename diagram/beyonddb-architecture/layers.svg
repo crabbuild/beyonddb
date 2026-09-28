@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" role="img" aria-labelledby="title desc">
+  <title id="title">BeyondDB architecture on Cellule</title>
+  <desc id="desc">Signed DynamoDB clients pass through ExtendDB protocol handling, BeyondDB state and routing, and Cellule execution and publication to a conditional object store.</desc>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/></marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/></marker>
+    <style>
+      text { font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', monospace; }
+      .title { fill:#f8fafc; font-size:22px; font-weight:700; }
+      .subtitle { fill:#94a3b8; font-size:12px; }
+      .region-label { font-size:15px; font-weight:700; }
+      .component { fill:#f8fafc; font-size:12px; font-weight:600; }
+      .detail { fill:#94a3b8; font-size:10px; }
+      .small { fill:#cbd5e1; font-size:10px; }
+      .arrow { fill:none; stroke:#94a3b8; stroke-width:2; marker-end:url(#arrow); }
+    </style>
+  </defs>
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+  <text x="38" y="42" class="title">BeyondDB on Cellule</text>
+  <text x="38" y="65" class="subtitle">Protocol at the edge · state semantics in BeyondDB · fenced durability in Cellule</text>
+
+  <!-- Group boundaries -->
+  <rect x="262" y="118" width="238" height="370" rx="12" fill="#0b2330" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <rect x="529" y="118" width="343" height="370" rx="12" fill="#0a2926" stroke="#34d399" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <rect x="902" y="118" width="260" height="370" rx="12" fill="#231633" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="7,5"/>
+  <text x="282" y="144" class="region-label" fill="#22d3ee">ExtendDB</text>
+  <text x="549" y="144" class="region-label" fill="#34d399">BeyondDB</text>
+  <text x="922" y="144" class="region-label" fill="#a78bfa">Cellule</text>
+
+  <!-- Primary data flow behind boxes -->
+  <path d="M 221 303 H 262" class="arrow"/>
+  <path d="M 500 303 H 529" class="arrow"/>
+  <path d="M 872 303 H 902" class="arrow"/>
+  <path d="M 1032 488 V 534" fill="none" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrow-violet)"/>
+
+  <!-- Client -->
+  <rect x="40" y="252" width="181" height="102" rx="9" fill="#0f172a"/>
+  <rect x="40" y="252" width="181" height="102" rx="9" fill="rgba(30,41,59,0.55)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="130" y="292" class="component" text-anchor="middle">AWS SDK / CLI</text>
+  <text x="130" y="313" class="detail" text-anchor="middle">signed DynamoDB JSON</text>
+
+  <!-- ExtendDB internals -->
+  <rect x="282" y="174" width="198" height="62" rx="7" fill="#0f172a"/>
+  <rect x="282" y="174" width="198" height="62" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee"/>
+  <text x="381" y="199" class="component" text-anchor="middle">HTTP endpoint</text>
+  <text x="381" y="216" class="detail" text-anchor="middle">DynamoDB wire protocol</text>
+  <rect x="282" y="254" width="198" height="100" rx="7" fill="#0f172a"/>
+  <rect x="282" y="254" width="198" height="100" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee"/>
+  <text x="381" y="284" class="component" text-anchor="middle">Request engine</text>
+  <text x="381" y="304" class="detail" text-anchor="middle">SigV4 · IAM · validation</text>
+  <text x="381" y="321" class="detail" text-anchor="middle">conditions · expressions</text>
+  <rect x="282" y="372" width="198" height="62" rx="7" fill="#0f172a"/>
+  <rect x="282" y="372" width="198" height="62" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee"/>
+  <text x="381" y="397" class="component" text-anchor="middle">Storage contracts</text>
+  <text x="381" y="414" class="detail" text-anchor="middle">engine → backend traits</text>
+
+  <!-- BeyondDB internals -->
+  <rect x="549" y="174" width="303" height="62" rx="7" fill="#0f172a"/>
+  <rect x="549" y="174" width="303" height="62" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399"/>
+  <text x="700" y="199" class="component" text-anchor="middle">Cell-backed adapters</text>
+  <text x="700" y="216" class="detail" text-anchor="middle">StorageEngine · CatalogStore</text>
+  <rect x="549" y="254" width="303" height="100" rx="7" fill="#0f172a"/>
+  <rect x="549" y="254" width="303" height="100" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399"/>
+  <text x="700" y="284" class="component" text-anchor="middle">Routing and coordination</text>
+  <text x="700" y="304" class="detail" text-anchor="middle">directory · provisioning · transactions</text>
+  <text x="700" y="321" class="detail" text-anchor="middle">peer dispatch · recovery workers</text>
+  <rect x="549" y="372" width="303" height="62" rx="7" fill="#0f172a"/>
+  <rect x="549" y="372" width="303" height="62" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399"/>
+  <text x="700" y="397" class="component" text-anchor="middle">Cell state modules</text>
+  <text x="700" y="414" class="detail" text-anchor="middle">accounts · data · GSIs · credentials</text>
+
+  <!-- Cellule internals -->
+  <rect x="922" y="174" width="220" height="62" rx="7" fill="#0f172a"/>
+  <rect x="922" y="174" width="220" height="62" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa"/>
+  <text x="1032" y="199" class="component" text-anchor="middle">Authority and peers</text>
+  <text x="1032" y="216" class="detail" text-anchor="middle">lease · fencing · mTLS</text>
+  <rect x="922" y="254" width="220" height="100" rx="7" fill="#0f172a"/>
+  <rect x="922" y="254" width="220" height="100" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa"/>
+  <text x="1032" y="284" class="component" text-anchor="middle">Cell execution</text>
+  <text x="1032" y="304" class="detail" text-anchor="middle">one owner · SQLite command</text>
+  <text x="1032" y="321" class="detail" text-anchor="middle">atomic result and intents</text>
+  <rect x="922" y="372" width="220" height="62" rx="7" fill="#0f172a"/>
+  <rect x="922" y="372" width="220" height="62" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa"/>
+  <text x="1032" y="397" class="component" text-anchor="middle">LTX publication</text>
+  <text x="1032" y="414" class="detail" text-anchor="middle">durable root before reply</text>
+
+  <!-- Durable store and design note -->
+  <rect x="902" y="535" width="260" height="76" rx="9" fill="#0f172a"/>
+  <rect x="902" y="535" width="260" height="76" rx="9" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1032" y="566" class="component" text-anchor="middle">Object store</text>
+  <text x="1032" y="585" class="detail" text-anchor="middle">conditional authority + LTX roots</text>
+  <rect x="40" y="535" width="815" height="76" rx="9" fill="rgba(30,41,59,0.6)" stroke="#475569"/>
+  <text x="60" y="564" class="component">Application boundary</text>
+  <text x="60" y="584" class="small">BeyondDB defines DynamoDB state and routing; Cellule executes and durably publishes its Cell commands.</text>
+  <text x="40" y="641" class="detail">Read left to right for request handling; the object store holds published Cell state for fenced recovery.</text>
+</svg>
