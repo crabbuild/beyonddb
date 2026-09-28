@@ -2797,8 +2797,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         other => panic!("unexpected create outcome: {other:?}"),
     };
     let split = [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let left_id = [1; 16];
-    let right_id = [2; 16];
+    let left_id = [0; 16];
+    let mut right_id = [0; 16];
+    right_id[15] = 1;
     let left_target = data_target("123456789012", &table.id, &left_id).unwrap();
     let right_target = data_target("123456789012", &table.id, &right_id).unwrap();
     assert_ne!(left_target.cell_id(), right_target.cell_id());
@@ -4310,6 +4311,12 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .validate_shard("123456789012", stream_arn, &shard_id)
         .await
         .unwrap();
+    let (final_records, final_continuation) = storage
+        .get_stream_records("123456789012", &shard_id, None, 1_000)
+        .await
+        .unwrap();
+    assert!(!final_records.is_empty());
+    assert_eq!(final_continuation, StreamContinuation::End);
     assert_eq!(
         storage.latest_sequence_number(&shard_id).await.unwrap(),
         Some(last_sequence.clone())
@@ -4617,16 +4624,18 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         table.id,
         u128::from_be_bytes(next_route.partitions[first_child].partition_id)
     );
-    let (records, continuation) = storage
-        .get_stream_records("123456789012", &child_shard, None, 100)
-        .await
-        .unwrap();
-    assert!(records.is_empty());
-    assert_eq!(continuation, StreamContinuation::More(None));
-    assert_eq!(
-        storage.latest_sequence_number(&child_shard).await.unwrap(),
-        None
-    );
+    assert!(matches!(
+        storage
+            .get_stream_records("123456789012", &child_shard, None, 100)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
+    assert!(matches!(
+        storage
+            .validate_shard("123456789012", stream_arn, &child_shard)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
     let mut changed_item = first_item.clone();
     changed_item.insert("title".into(), AttributeValue::S("newer".into()));
     let conflict = child_client
@@ -4708,6 +4717,55 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .resume("123456789012", &plan)
         .await
         .unwrap();
+    let (records, continuation) = storage
+        .get_stream_records("123456789012", &child_shard, None, 100)
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+    assert_eq!(continuation, StreamContinuation::More(None));
+    storage
+        .validate_shard("123456789012", stream_arn, &child_shard)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.latest_sequence_number(&child_shard).await.unwrap(),
+        None
+    );
+    let described_stream = storage
+        .describe_stream(
+            "123456789012",
+            &extenddb_core::types::DescribeStreamInput {
+                stream_arn: stream_arn.into(),
+                limit: Some(2),
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(described_stream.shards[0].shard_id, shard_id);
+    assert_eq!(
+        described_stream.shards[0]
+            .sequence_number_range
+            .ending_sequence_number,
+        Some(last_sequence)
+    );
+    let next_page = storage
+        .describe_stream(
+            "123456789012",
+            &extenddb_core::types::DescribeStreamInput {
+                stream_arn: stream_arn.into(),
+                limit: Some(2),
+                exclusive_start_shard_id: described_stream.last_evaluated_shard_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_page.shards.len(), 2);
+    assert_eq!(
+        next_page.shards[0].parent_shard_id.as_deref(),
+        Some(shard_id.as_str())
+    );
+    assert_eq!(next_page.shards[1].parent_shard_id, None);
     let current_route = crate::single_leaf_route(&cell_client, &account, &table.id.clone()).await;
     assert_eq!(current_route, Some(next_route.clone()));
     for (hash, partition) in [

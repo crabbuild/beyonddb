@@ -398,6 +398,122 @@ async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
     }
 }
 
+fn streams_cli(public: SocketAddr, args: &[&str]) -> serde_json::Value {
+    let output = Command::new("aws")
+        .arg("dynamodbstreams")
+        .args(args)
+        .arg("--endpoint-url")
+        .arg(format!("http://{public}"))
+        .env("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+        .env(
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        )
+        .env("AWS_DEFAULT_REGION", "us-east-1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
+async fn signed_stream_records_survive_hard_server_restart() {
+    let ProcessFixture {
+        root: _root,
+        rustfs,
+        peer: _peer,
+        public,
+        config,
+        log,
+        s3,
+        mut child,
+        sdk,
+    } = process_fixture(2).await;
+    let table = sdk
+        .create_table()
+        .table_name("StreamProcess")
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .stream_specification(
+            aws_sdk_dynamodb::types::StreamSpecification::builder()
+                .stream_enabled(true)
+                .stream_view_type(aws_sdk_dynamodb::types::StreamViewType::KeysOnly)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let arn = table
+        .table_description()
+        .and_then(|description| description.latest_stream_arn())
+        .unwrap();
+    sdk.put_item()
+        .table_name("StreamProcess")
+        .item("id", AttributeValue::S("streamed".into()))
+        .send()
+        .await
+        .unwrap();
+    let listed = streams_cli(public, &["list-streams", "--table-name", "StreamProcess"]);
+    assert_eq!(listed["Streams"][0]["StreamArn"], arn);
+    let described = streams_cli(public, &["describe-stream", "--stream-arn", arn]);
+    let shards = described["StreamDescription"]["Shards"].as_array().unwrap();
+    assert_eq!(shards.len(), 2);
+    let records = |public| {
+        shards
+            .iter()
+            .flat_map(|shard| {
+                let id = shard["ShardId"].as_str().unwrap();
+                let iterator = streams_cli(
+                    public,
+                    &[
+                        "get-shard-iterator",
+                        "--stream-arn",
+                        arn,
+                        "--shard-id",
+                        id,
+                        "--shard-iterator-type",
+                        "TRIM_HORIZON",
+                    ],
+                );
+                let token = iterator["ShardIterator"].as_str().unwrap();
+                streams_cli(public, &["get-records", "--shard-iterator", token])["Records"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = records(public);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["dynamodb"]["Keys"]["id"]["S"], "streamed");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let mut restarted = start(&config, &log, false, s3);
+    wait_healthy(&mut restarted, public, &log);
+    assert_eq!(records(public), first);
+    stop(&mut restarted, &log);
+    drop(rustfs);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
 async fn bootstrap_sdk_write_survives_unclean_server_restart() {

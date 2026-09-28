@@ -24,8 +24,8 @@ use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     BillingMode, BillingModeSummary, CreateTableInput, DeleteTableInput, DescribeTableInput,
     IndexInfo, ListTablesInput as DdbListTablesInput, ListTablesOutput,
-    ProvisionedThroughputDescription, TableDescription, TableKeyInfo, TableStatus,
-    UpdateTableInput,
+    ProvisionedThroughputDescription, StreamSpecification, TableDescription, TableKeyInfo,
+    TableStatus, UpdateTableInput,
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
@@ -147,12 +147,11 @@ impl TableEngine for CellStorage {
                     })
                 })
                 || input.vector_indexes.as_ref().is_some_and(|v| !v.is_empty())
-                || input.stream_specification.is_some()
                 || input.sse_specification.is_some()
                 || input.on_demand_throughput.is_some()
             {
                 return Err(unsupported(
-                    "vector indexes, non-ALL local index projections, streams, SSE, or on-demand ceilings",
+                    "vector indexes, non-ALL local index projections, SSE, or on-demand ceilings",
                 ));
             }
             if self.initial_partitions.is_none()
@@ -165,6 +164,24 @@ impl TableEngine for CellStorage {
             }
             extenddb_core::validation::validate_create_table(&input, &LimitsConfig::default())
                 .map_err(|error| StorageError::Validation(error.to_string()))?;
+            let stream = match input.stream_specification.as_ref() {
+                Some(spec) if spec.stream_enabled => {
+                    let view_type = spec.stream_view_type.ok_or_else(|| {
+                        StorageError::Validation(
+                            "StreamViewType is required when streams are enabled".into(),
+                        )
+                    })?;
+                    let label = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    Some(crate::StreamConfig {
+                        view_type,
+                        region: self.region.clone(),
+                        label,
+                    })
+                }
+                _ => None,
+            };
             let target = target(&account_id)?;
             let name = input.table_name.clone();
             let spec = TableSpec {
@@ -189,7 +206,7 @@ impl TableEngine for CellStorage {
                     &account_id,
                     &name,
                 )),
-                stream: None,
+                stream,
             };
             let submitted = spec.clone();
             let record = match self
@@ -483,6 +500,10 @@ impl TableEngine for CellStorage {
                 table_name: record.table_name,
                 account_id,
                 table_id: record.id,
+                stream_specification: record.stream.as_ref().map(|stream| StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(stream.view_type),
+                }),
                 base_key_schema: record.key_schema.clone(),
                 key_schema: record.key_schema,
                 attribute_definitions: record.attribute_definitions,
@@ -625,6 +646,19 @@ fn description(
             billing_mode: BillingMode::PayPerRequest,
             last_update_to_pay_per_request_date_time: Some(since as f64 / 1_000.0),
         });
+    let stream_specification = record.stream.as_ref().map(|stream| StreamSpecification {
+        stream_enabled: true,
+        stream_view_type: Some(stream.view_type),
+    });
+    let latest_stream_arn = record.stream.as_ref().map(|stream| {
+        extenddb_storage::util::stream_arn(
+            &stream.region,
+            account_id,
+            &record.table_name,
+            &stream.label,
+        )
+    });
+    let latest_stream_label = record.stream.as_ref().map(|stream| stream.label.clone());
     TableDescription {
         global_secondary_indexes: (!record.global_secondary_indexes.is_empty()).then(|| {
             record
@@ -689,6 +723,9 @@ fn description(
         creation_date_time: record.created_at_ms as f64 / 1_000.0,
         table_arn: extenddb_storage::util::table_arn(region, account_id, &record.table_name),
         table_id: record.id,
+        stream_specification,
+        latest_stream_arn,
+        latest_stream_label,
         provisioned_throughput: ProvisionedThroughputDescription {
             read_capacity_units,
             write_capacity_units,

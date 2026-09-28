@@ -1,4 +1,7 @@
 //! ExtendDB item operations over account and published data Cell routes.
+//!
+//! The Cell's installed stream policy decides capture during the item command;
+//! an ExtendDB caller hint may be stale and cannot authorize or suppress it.
 
 mod routed;
 
@@ -20,7 +23,7 @@ use extenddb_storage::{
     TransactGetOp, TransactWriteOp,
 };
 
-use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
+use super::{CellStorage, cell_error, mutation_identity, target};
 use crate::TransactionToken;
 use crate::expression_wire::{WireCondition, WireUpdate};
 use crate::{
@@ -42,15 +45,11 @@ impl DataEngine for CellStorage {
         return_old: bool,
         condition: Option<&Expr>,
         maps: &ExpressionMaps,
-        stream: Option<&StreamCapture>,
+        _stream: Option<&StreamCapture>,
     ) -> BoxedFuture<'_, Result<Option<Item>, StorageError>> {
         let key_info = key_info.clone();
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
-        let streamed = stream.is_some();
         Box::pin(async move {
-            if streamed {
-                return Err(unsupported("streamed PutItem"));
-            }
             let key = extract_key(&item, &key_info.base_key_schema);
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let outcome = self
@@ -176,16 +175,12 @@ impl DataEngine for CellStorage {
         return_old: bool,
         condition: Option<&Expr>,
         maps: &ExpressionMaps,
-        stream: Option<&StreamCapture>,
+        _stream: Option<&StreamCapture>,
     ) -> BoxedFuture<'_, Result<Option<Item>, StorageError>> {
         let key_info = key_info.clone();
         let key = key.clone();
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
-        let streamed = stream.is_some();
         Box::pin(async move {
-            if streamed {
-                return Err(unsupported("streamed DeleteItem"));
-            }
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let outcome = self
                     .client
@@ -256,17 +251,13 @@ impl DataEngine for CellStorage {
         return_new: bool,
         condition: Option<&Expr>,
         maps: &ExpressionMaps,
-        stream: Option<&StreamCapture>,
+        _stream: Option<&StreamCapture>,
     ) -> BoxedFuture<'_, ItemPairResult> {
         let key_info = key_info.clone();
         let key = key.clone();
         let update = WireUpdate::from_core(actions, maps);
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
-        let streamed = stream.is_some();
         Box::pin(async move {
-            if streamed {
-                return Err(unsupported("streamed UpdateItem"));
-            }
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let input = PartitionUpdateInput {
                     table_id: key_info.table_id,
@@ -917,9 +908,8 @@ fn prepare_writes(
                 item,
                 condition,
                 maps,
-                stream,
                 ..
-            } if stream.is_none() => (
+            } => (
                 *key_info,
                 TransactionOperation::Put(PutItemInput {
                     table_name: key_info.table_name.clone(),
@@ -933,9 +923,8 @@ fn prepare_writes(
                 key,
                 condition,
                 maps,
-                stream,
                 ..
-            } if stream.is_none() => (
+            } => (
                 *key_info,
                 TransactionOperation::Delete(DeleteItemInput {
                     return_old: false,
@@ -951,9 +940,8 @@ fn prepare_writes(
                 actions,
                 condition,
                 maps,
-                stream,
                 ..
-            } if stream.is_none() => (
+            } => (
                 *key_info,
                 TransactionOperation::Update(UpdateItemInput {
                     table_name: key_info.table_name.clone(),
@@ -978,9 +966,6 @@ fn prepare_writes(
                     condition: WireCondition::from_core(condition, maps),
                 }),
             ),
-            _ => {
-                return Err(unsupported("streamed transaction write"));
-            }
         };
         if account_id
             .as_ref()

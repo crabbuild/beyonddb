@@ -6,8 +6,8 @@ branch. The older `extenddb-stream-completion.proposed.patch` records the
 original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
 the upstream PR supersedes it. Focused SQLite and engine tests, all three
 backend compile checks, and strict Clippy passed on current ExtendDB main.
-Signed SDK qualification of BeyondDB Streams is still pending. This branch now
-contains a native Cell journal slice, but the public Streams API remains blocked.
+The signed process smoke covers SDK CreateTable/PutItem and AWS CLI Streams
+discovery/read through a hard restart. Broader Streams qualification remains open.
 
 ## Native journal slice
 
@@ -22,23 +22,26 @@ Equal before and after images, and deletions of absent items, emit no record.
 Split import uses the item write helper without invoking the journal, so an
 imported copy does not appear as a new mutation.
 Native account and partition queries read that journal in sequence order with
-a 2 MiB response budget and an exclusive sequence cursor. The account test
+a 1 MiB record budget and an exclusive sequence cursor. The account test
 follows multiple pages after owner restoration; the routed test reads its owner
 Cell and confirms imported children have no journal records.
 The partition query also reads the Cell's durable split seal. The ExtendDB
-storage method maps an empty sealed page to `End` and an empty open page to
+storage method maps the final sealed page to `End` and an empty open page to
 `More(None)`, with a 23-digit sequence width and account-scoped routing. The
 routed test exercises both states and rejects a different account's shard.
 Known shard IDs are validated against the canonical stream ARN, account table
 generation, and installed data Cell. `LATEST` reads the owner Cell's indexed
 journal tail without scanning pages. Native account and routed tests cover
-validation and tail lookup; no public shard discovery issues these IDs yet.
+validation and tail lookup. DescribeStream walks installed roots and durable
+split seals to expose parent/child lineage with bounded response pages.
 
 This slice is exercised by the native account Cell test for insert, replay,
-equal-image Put, deletion, transaction commit, and rejection. It does not yet
-expose `CreateTable(StreamSpecification)`: the adapter still rejects that
-request, and public shard discovery remains unsupported. A native
-stream policy can be installed only by the direct Cell command during tests.
+equal-image Put, deletion, transaction commit, and rejection. The adapter now
+accepts `CreateTable(StreamSpecification)`, returns its stream ARN and view
+type in the table description, and passes streamed writes to the Cell command.
+ListStreams and DescribeStream discover current generations. A signed process
+smoke creates a routed table, reads its record, restarts the server hard, and
+reads the same record again.
 The current native read checks the installed table policy, so it cannot yet
 serve a retained generation after table deletion or policy replacement.
 The new SQL table changes the unreleased version-1 schema digest; no tagged
@@ -104,15 +107,14 @@ in the source Cell's seal command.
 
 The fork commit is a temporary dependency while the upstream PR is reviewed.
 BeyondDB must pin the merged upstream revision before release. PostgreSQL and
-MongoDB runtime tests and BeyondDB's signed SDK and process recovery gates
-remain to be run after the Cell-backed implementation exists.
+MongoDB runtime tests and BeyondDB's broader signed SDK matrix remain open.
 
 ## Remaining BeyondDB implementation
 
 This dependency fix is necessary but does not implement Streams by itself.
-BeyondDB still rejects public stream table creation and shard discovery. Its
-Cell-backed record reader is reachable only with a known, valid shard ID;
-retention and full public Streams behavior remain unfinished.
+BeyondDB supports current-generation creation, discovery, and record reads.
+Retained generations, policy transitions, retention, and full public Streams
+behavior remain unfinished.
 The implementation must cover all of these boundaries before support is claimed:
 
 1. Store stream identity, view type, generation, shard lineage, and lifetime
@@ -129,14 +131,16 @@ The implementation must cover all of these boundaries before support is claimed:
 4. Close the parent with its final records before activating child writers;
    publish retained shard discovery alongside the route switch. Preserve
    per-item ordering through the lineage without imposing one global writer.
-5. Implement account-scoped ListStreams, paginated DescribeStream, iterator
-   validation, sequence lookups, and bounded GetRecords. Enforce the response
-   byte budget as well as record count; this proposal only changes completion.
+5. Scale account-scoped ListStreams and paginated DescribeStream without
+   rescanning prior shards or every streamless table. Qualify iterator
+   validation, sequence lookups, and GetRecords response byte bounds against
+   DynamoDB's limits and the full upstream protocol suite.
 6. Add bounded retention and recovery for old stream generations, then qualify
    all view types, no-op/conditional writes, TTL identity, cross-Cell COMMIT and
    ABORT, split lineage, disable/re-enable, delete/recreate, and hard restart
    through signed clients. The current dependency's other Streams gaps, such
    as byte bounds and shard-filter support, also need qualification.
 
-The full API and 10,000-Cell/multi-TB objectives remain open. No Streams support
-or production-scale claim follows from this proposal.
+The full API and 10,000-Cell/multi-TB objectives remain open. The current
+generation read path is qualified by one signed process smoke, not by the full
+Streams compatibility or production-scale suite.

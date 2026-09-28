@@ -40,6 +40,8 @@ pub enum StreamJournalOutcome {
         last_sequence: Option<String>,
         /// A sealed source has no future item changes; a caller may stop after its last page.
         closed: bool,
+        /// No record follows this page within the installed generation.
+        exhausted: bool,
     },
     Missing,
 }
@@ -111,10 +113,13 @@ impl Query for ReadPartitionStreamJournal {
         {
             return Ok(Json(StreamJournalOutcome::Missing));
         }
-        let closed = matches!(
-            crate::partition::query_access(context)?,
-            crate::partition::AccessState::Sealed
-        );
+        let closed = match crate::partition::query_access(context)? {
+            crate::partition::AccessState::Serving => false,
+            crate::partition::AccessState::Sealed => true,
+            crate::partition::AccessState::Importing => {
+                return Ok(Json(StreamJournalOutcome::Missing));
+            }
+        };
         Ok(Json(read(context, input, closed)?))
     }
 }
@@ -172,6 +177,12 @@ impl Query for ReadPartitionStreamTail {
         {
             return Ok(Json(StreamTailOutcome::Missing));
         }
+        if matches!(
+            crate::partition::query_access(context)?,
+            crate::partition::AccessState::Importing
+        ) {
+            return Ok(Json(StreamTailOutcome::Missing));
+        }
         Ok(Json(StreamTailOutcome::Latest(tail(context, input)?)))
     }
 }
@@ -199,6 +210,7 @@ fn read(
     let mut cursor = input.after_sequence.unwrap_or_default();
     let mut records = Vec::new();
     let mut bytes = 0;
+    let mut exhausted = false;
     while records.len() < usize::from(input.limit) {
         let rows = context.sql(&statement(
             "SELECT sequence_number, record FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 ORDER BY sequence_number LIMIT 1",
@@ -211,10 +223,12 @@ fn read(
         let Some([SqlValue::Text(sequence), SqlValue::Blob(record)]) =
             rows[0].rows.first().map(Vec::as_slice)
         else {
+            exhausted = true;
             break;
         };
-        // Keep the serialized Cell response below its 4 MiB operation limit.
-        if bytes + record.len() > 2 * 1024 * 1024 {
+        // DynamoDB GetRecords pages stop at 1 MiB; this also stays below the
+        // Cell response limit after the surrounding query envelope is encoded.
+        if bytes + record.len() > 1024 * 1024 {
             if records.is_empty() {
                 return Err(Error::Command("stream record exceeds page budget"));
             }
@@ -224,11 +238,23 @@ fn read(
         cursor = sequence.clone();
         records.push(serde_json::from_slice(record)?);
     }
+    if !exhausted && records.len() == usize::from(input.limit) {
+        let rows = context.sql(&statement(
+            "SELECT 1 FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 ORDER BY sequence_number LIMIT 1",
+            vec![
+                SqlValue::Text(input.table_id),
+                SqlValue::Text(input.label),
+                SqlValue::Text(cursor.clone()),
+            ],
+        ))?;
+        exhausted = rows[0].rows.is_empty();
+    }
     let last_sequence = (!records.is_empty()).then_some(cursor);
     Ok(StreamJournalOutcome::Page {
         records,
         last_sequence,
         closed,
+        exhausted,
     })
 }
 

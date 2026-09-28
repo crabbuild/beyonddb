@@ -24,13 +24,14 @@ use cellule_runtime::{MutationIdentity, SqlWorkerPool};
 use cellule_store::Store;
 use extenddb_core::expression::{Expr, ExpressionMaps, KeyCondition, PathElement, UpdateAction};
 use extenddb_core::types::{
-    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput, Item,
-    KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    StreamEventName, StreamRecord, StreamViewType, TableStatus, UpdateTableInput,
+    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput,
+    DescribeStreamInput, Item, KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure,
+    ScalarAttributeType, StreamEventName, StreamRecord, StreamSpecification, StreamViewType,
+    TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
-    DataEngine, IdempotencyKey, MetadataEngine, StreamEngine, TableEngine, TransactGetOp,
-    TransactWriteOp, error::StorageError,
+    DataEngine, IdempotencyKey, MetadataEngine, StreamCapture, StreamContinuation, StreamEngine,
+    TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 
@@ -134,7 +135,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
         "us-east-1",
     )
-    .with_transaction_coordinators(provisioner);
+    .with_transaction_coordinators(provisioner.clone());
     let client = host
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
@@ -1090,6 +1091,154 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         storage.latest_sequence_number(&shard_id).await.unwrap(),
         tail
     );
+    let streamed = storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "Streamed".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::NewImage),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stream_label = streamed.latest_stream_label.as_deref().unwrap();
+    assert!(streamed.latest_stream_arn.is_some());
+    let stream_key = storage
+        .table_key_info("123456789012", "Streamed")
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_key.stream_specification,
+        streamed.stream_specification
+    );
+    let streamed_item = Item::from([("id".into(), AttributeValue::S("captured".into()))]);
+    storage
+        .put_item(
+            &stream_key,
+            streamed_item.clone(),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            Some(&StreamCapture {
+                view_type: StreamViewType::NewImage,
+                user_identity: None,
+                region: "us-east-1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let streamed_shard = format!("shardId-{}-account-{stream_label}", streamed.table_id);
+    let (listed, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed[0].stream_arn,
+        streamed.latest_stream_arn.clone().unwrap()
+    );
+    let described_stream = storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: streamed.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(described_stream.shards[0].shard_id, streamed_shard);
+    storage
+        .validate_shard(
+            "123456789012",
+            streamed.latest_stream_arn.as_deref().unwrap(),
+            &streamed_shard,
+        )
+        .await
+        .unwrap();
+    let (streamed_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        continuation,
+        StreamContinuation::More(Some(streamed_records[0].dynamodb.sequence_number.clone()))
+    );
+    assert_eq!(streamed_records[0].dynamodb.new_image, Some(streamed_item));
+    let routed_storage = CellStorage::new(
+        CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
+        "us-east-1",
+    )
+    .with_initial_partitions(provisioner);
+    let routed_table = routed_storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "RoutedStream".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::KeysOnly),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let routed_stream = routed_storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: routed_table.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(routed_stream.shards.len(), 1);
+    let routed_key = routed_storage
+        .table_key_info("123456789012", "RoutedStream")
+        .await
+        .unwrap();
+    routed_storage
+        .put_item(
+            &routed_key,
+            Item::from([("id".into(), AttributeValue::S("routed".into()))]),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            Some(&StreamCapture {
+                view_type: StreamViewType::KeysOnly,
+                user_identity: None,
+                region: "us-east-1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let (routed_records, _) = routed_storage
+        .get_stream_records("123456789012", &routed_stream.shards[0].shard_id, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(routed_records.len(), 1);
+    let (first_streams, cursor) = storage
+        .list_streams("123456789012", None, 1, None)
+        .await
+        .unwrap();
+    let (second_streams, _) = storage
+        .list_streams("123456789012", None, 1, cursor.as_deref())
+        .await
+        .unwrap();
+    assert_ne!(first_streams[0].stream_arn, second_streams[0].stream_arn);
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -1152,6 +1301,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             records,
             last_sequence,
             closed,
+            ..
         } = restored_streams.output.0
         else {
             panic!("restored stream generation is missing");

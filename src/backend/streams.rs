@@ -1,19 +1,24 @@
 //! DynamoDB Streams storage over account and routed owner Cells.
 
 use cellule_runtime::identity::{CellTarget, TenantId};
-use extenddb_core::types::{DescribeStreamInput, StreamDescription, StreamRecord};
+use extenddb_core::types::{
+    DescribeStreamInput, SequenceNumberRange, Shard, StreamDescription, StreamRecord, StreamStatus,
+    StreamSummary,
+};
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{
     BoxedFuture, StreamContinuation, StreamEngine, StreamListResult, StreamRecordsResult,
 };
 
 use crate::{
-    Json, ReadAccountStreamJournal, ReadAccountStreamTail, ReadPartitionState,
-    ReadPartitionStreamJournal, ReadPartitionStreamTail, StreamJournalInput, StreamJournalOutcome,
-    StreamTailInput, StreamTailOutcome, data_target,
+    Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionState, ReadAccountStreamJournal,
+    ReadAccountStreamTail, ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail,
+    StreamJournalInput, StreamJournalOutcome, StreamTailInput, StreamTailOutcome, data_target,
 };
 
 use super::{CellStorage, cell_error, target, unsupported};
+
+const FIRST_SEQUENCE: &str = "00000000000000000000001";
 
 enum StreamShard {
     Account {
@@ -28,6 +33,16 @@ enum StreamShard {
 }
 
 impl StreamShard {
+    fn id(table_id: &str, partition_id: Option<[u8; 16]>, label: &str) -> String {
+        match partition_id {
+            Some(partition_id) => format!(
+                "shardId-{table_id}-{:032x}-{label}",
+                u128::from_be_bytes(partition_id)
+            ),
+            None => format!("shardId-{table_id}-account-{label}"),
+        }
+    }
+
     fn parse(shard_id: &str) -> Option<Self> {
         let mut parts = shard_id.splitn(4, '-');
         if parts.next() != Some("shardId") {
@@ -93,6 +108,40 @@ impl StreamShard {
             }
         }
         .map_err(|_| StorageError::TableNotFound(self.table_id().into()))
+    }
+}
+
+impl CellStorage {
+    async fn stream_record(
+        &self,
+        account_id: &str,
+        arn: &str,
+    ) -> Result<(crate::TableRecord, String, StreamStatus), StorageError> {
+        let missing = || StorageError::TableNotFound(arn.into());
+        let (table_name, label) =
+            extenddb_storage::util::parse_stream_arn(arn).map_err(|_| missing())?;
+        if extenddb_storage::util::stream_arn(&self.region, account_id, &table_name, &label) != arn
+        {
+            return Err(missing());
+        }
+        let (record, status) = match self.lifecycle(account_id, &table_name).await? {
+            crate::TableLifecycle::Live(record) => {
+                let status = if matches!(record.placement, crate::TablePlacement::Routed { .. })
+                    && !self.route_active_for(account_id, &record.id).await?
+                {
+                    StreamStatus::Enabling
+                } else {
+                    StreamStatus::Enabled
+                };
+                (record, status)
+            }
+            crate::TableLifecycle::Deleting(record) => (record, StreamStatus::Disabling),
+            crate::TableLifecycle::Missing => return Err(missing()),
+        };
+        if record.stream.as_ref().map(|stream| stream.label.as_str()) != Some(label.as_str()) {
+            return Err(missing());
+        }
+        Ok((record, label, status))
     }
 }
 
@@ -162,8 +211,9 @@ impl StreamEngine for CellStorage {
                 StreamJournalOutcome::Page {
                     records,
                     closed: true,
+                    exhausted: true,
                     ..
-                } if records.is_empty() => Ok((records, StreamContinuation::End)),
+                } => Ok((records, StreamContinuation::End)),
                 StreamJournalOutcome::Page {
                     records,
                     last_sequence,
@@ -179,20 +229,234 @@ impl StreamEngine for CellStorage {
 
     fn describe_stream(
         &self,
-        _account_id: &str,
-        _input: &DescribeStreamInput,
+        account_id: &str,
+        input: &DescribeStreamInput,
     ) -> BoxedFuture<'_, Result<StreamDescription, StorageError>> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
+        let account_id = account_id.to_owned();
+        let stream_arn = input.stream_arn.clone();
+        let limit = input.limit.unwrap_or(100);
+        let start = input.exclusive_start_shard_id.clone();
+        Box::pin(async move {
+            let limit = usize::try_from(limit)
+                .ok()
+                .filter(|limit| (1..=100).contains(limit))
+                .ok_or_else(|| {
+                    StorageError::Validation("stream shard limit must be 1..=100".into())
+                })?;
+            let (record, label, status) = self.stream_record(&account_id, &stream_arn).await?;
+            let mut shards = Vec::with_capacity(limit);
+            let mut last_evaluated_shard_id = None;
+            let mut past_start = start.is_none();
+            let mut found_start = past_start;
+            let mut pending = if status == StreamStatus::Enabling {
+                Vec::new()
+            } else {
+                match record.placement {
+                    crate::TablePlacement::Account => vec![(None, None)],
+                    crate::TablePlacement::Routed { initial_partitions } => (0..initial_partitions)
+                        .rev()
+                        .map(|index| {
+                            let mut partition_id = [0; 16];
+                            partition_id[15] = u8::try_from(index).map_err(|_| {
+                                StorageError::Internal("invalid initial stream partition".into())
+                            })?;
+                            Ok((Some(partition_id), None))
+                        })
+                        .collect::<Result<Vec<_>, StorageError>>()?,
+                }
+            };
+            while let Some((partition_id, parent)) = pending.pop() {
+                let shard_id = StreamShard::id(&record.id, partition_id, &label);
+                let ending_sequence_number = if let Some(partition_id) = partition_id {
+                    let owner = data_target(&account_id, &record.id, &partition_id)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let state = self
+                        .client
+                        .query::<ReadPartitionState>(&owner, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0
+                        .ok_or_else(|| {
+                            StorageError::Transient("stream partition is not installed".into())
+                        })?;
+                    if state.spec.table.id != record.id || state.spec.partition_id != partition_id {
+                        return Err(StorageError::Internal(
+                            "stream partition identity differs".into(),
+                        ));
+                    }
+                    match state.state {
+                        PartitionState::Serving | PartitionState::Opened { .. } => None,
+                        PartitionState::Sealed(seal) => {
+                            pending.push((Some(seal.right_partition_id), Some(shard_id.clone())));
+                            pending.push((Some(seal.left_partition_id), Some(shard_id.clone())));
+                            Some(
+                                self.latest_sequence_number(&shard_id)
+                                    .await?
+                                    .unwrap_or_else(|| FIRST_SEQUENCE.into()),
+                            )
+                        }
+                        PartitionState::Importing { .. } | PartitionState::Activated { .. } => {
+                            return Err(StorageError::Transient(
+                                "stream split is still publishing".into(),
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
+                if !past_start {
+                    if start.as_deref() == Some(&shard_id) {
+                        past_start = true;
+                        found_start = true;
+                    }
+                    continue;
+                }
+                if shards.len() == limit {
+                    last_evaluated_shard_id =
+                        shards.last().map(|shard: &Shard| shard.shard_id.clone());
+                    break;
+                }
+                shards.push(Shard {
+                    shard_id,
+                    parent_shard_id: parent,
+                    sequence_number_range: SequenceNumberRange {
+                        starting_sequence_number: FIRST_SEQUENCE.into(),
+                        ending_sequence_number,
+                    },
+                });
+            }
+            if !found_start {
+                return Err(StorageError::Validation(
+                    "ExclusiveStartShardId is not in this stream".into(),
+                ));
+            }
+            Ok(StreamDescription {
+                stream_arn,
+                stream_label: label,
+                stream_status: status,
+                stream_view_type: record
+                    .stream
+                    .as_ref()
+                    .map(|stream| stream.view_type)
+                    .ok_or_else(|| StorageError::TableNotFound(record.table_name.clone()))?,
+                table_name: record.table_name,
+                key_schema: record.key_schema,
+                shards,
+                last_evaluated_shard_id,
+            })
+        })
     }
 
     fn list_streams(
         &self,
-        _account_id: &str,
-        _table_name: Option<&str>,
-        _limit: i64,
-        _exclusive_start_stream_arn: Option<&str>,
+        account_id: &str,
+        table_name: Option<&str>,
+        limit: i64,
+        exclusive_start_stream_arn: Option<&str>,
     ) -> BoxedFuture<'_, StreamListResult> {
-        Box::pin(async { Err(unsupported("DynamoDB Streams")) })
+        let account_id = account_id.to_owned();
+        let table_name = table_name.map(str::to_owned);
+        let start = exclusive_start_stream_arn.map(str::to_owned);
+        Box::pin(async move {
+            let limit = usize::try_from(limit)
+                .ok()
+                .filter(|limit| (1..=100).contains(limit))
+                .ok_or_else(|| {
+                    StorageError::Validation("stream listing limit must be 1..=100".into())
+                })?;
+            let start_name = match start {
+                Some(arn) => {
+                    let (record, _, _) = self.stream_record(&account_id, &arn).await?;
+                    if table_name
+                        .as_ref()
+                        .is_some_and(|name| name != &record.table_name)
+                    {
+                        return Err(StorageError::Validation(
+                            "stream cursor is outside table filter".into(),
+                        ));
+                    }
+                    Some(record.table_name)
+                }
+                None => None,
+            };
+            if let Some(name) = table_name {
+                if start_name.is_some() {
+                    return Ok((Vec::new(), None));
+                }
+                let record = match self.lifecycle(&account_id, &name).await? {
+                    crate::TableLifecycle::Live(record)
+                    | crate::TableLifecycle::Deleting(record) => record,
+                    crate::TableLifecycle::Missing => return Ok((Vec::new(), None)),
+                };
+                return Ok((
+                    record
+                        .stream
+                        .as_ref()
+                        .map(|stream| StreamSummary {
+                            stream_arn: extenddb_storage::util::stream_arn(
+                                &stream.region,
+                                &account_id,
+                                &record.table_name,
+                                &stream.label,
+                            ),
+                            stream_label: stream.label.clone(),
+                            table_name: record.table_name,
+                        })
+                        .into_iter()
+                        .collect(),
+                    None,
+                ));
+            }
+            let owner = target(&account_id)?;
+            let mut cursor = start_name;
+            let mut streams = Vec::with_capacity(limit);
+            loop {
+                let page = self
+                    .client
+                    .query::<ListTables>(
+                        &owner,
+                        None,
+                        Json(ListTablesInput {
+                            limit: 100,
+                            exclusive_start: cursor.clone(),
+                        }),
+                    )
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0;
+                let ListTablesOutcome::Page(page) = page else {
+                    return Err(StorageError::Internal("account table page rejected".into()));
+                };
+                for name in page.names {
+                    cursor = Some(name.clone());
+                    let record = self.record(&account_id, &name).await?;
+                    let Some(stream) = record.stream else {
+                        continue;
+                    };
+                    if streams.len() == limit {
+                        let last = streams
+                            .last()
+                            .map(|stream: &StreamSummary| stream.stream_arn.clone());
+                        return Ok((streams, last));
+                    }
+                    streams.push(StreamSummary {
+                        stream_arn: extenddb_storage::util::stream_arn(
+                            &stream.region,
+                            &account_id,
+                            &name,
+                            &stream.label,
+                        ),
+                        stream_label: stream.label,
+                        table_name: name,
+                    });
+                }
+                if page.last_evaluated.is_none() {
+                    return Ok((streams, None));
+                }
+            }
+        })
     }
 
     fn cleanup_expired_stream_records(
@@ -229,27 +493,15 @@ impl StreamEngine for CellStorage {
         let shard_id = shard_id.to_owned();
         Box::pin(async move {
             let missing = || StorageError::TableNotFound(stream_arn.clone());
-            let (table_name, label) =
-                extenddb_storage::util::parse_stream_arn(&stream_arn).map_err(|_| missing())?;
-            if extenddb_storage::util::stream_arn(&self.region, &account_id, &table_name, &label)
-                != stream_arn
-            {
+            let (record, label, status) = self.stream_record(&account_id, &stream_arn).await?;
+            if status == StreamStatus::Enabling {
                 return Err(missing());
             }
             let shard = StreamShard::parse(&shard_id).ok_or_else(missing)?;
             if shard.label() != label {
                 return Err(missing());
             }
-            let record = match self.lifecycle(&account_id, &table_name).await? {
-                crate::TableLifecycle::Live(record) | crate::TableLifecycle::Deleting(record) => {
-                    record
-                }
-                crate::TableLifecycle::Missing => return Err(missing()),
-            };
-            if record.id != shard.table_id()
-                || record.stream.as_ref().map(|stream| stream.label.as_str())
-                    != Some(label.as_str())
-            {
+            if record.id != shard.table_id() {
                 return Err(missing());
             }
             match (record.placement, shard) {
@@ -283,6 +535,10 @@ impl StreamEngine for CellStorage {
                             .as_ref()
                             .map(|stream| stream.label.as_str())
                             != Some(label.as_str())
+                        || matches!(
+                            status.state,
+                            PartitionState::Importing { .. } | PartitionState::Activated { .. }
+                        )
                     {
                         return Err(missing());
                     }

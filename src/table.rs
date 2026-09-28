@@ -89,7 +89,13 @@ impl TableSpec {
             && self.billing_mode == record.billing_mode
             && self.provisioned_throughput == record.provisioned_throughput
             && self.deletion_protection_enabled == record.deletion_protection_enabled
-            && self.stream == record.stream
+            // A retried CreateTable may generate a new label before recovering
+            // the first committed generation; only caller policy must match.
+            && self.stream.as_ref().map(|stream| (&stream.region, stream.view_type))
+                == record
+                    .stream
+                    .as_ref()
+                    .map(|stream| (&stream.region, stream.view_type))
     }
 }
 
