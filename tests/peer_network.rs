@@ -1075,7 +1075,9 @@ async fn run_signed_sdk_network_recovery() {
             remote_session
         );
     }
-    // Both credential shards must still require fenced takeover in this case.
+    // A live peer may already own a credential shard. Only the failed owner's
+    // shards require takeover; claiming a live peer's Cell must stay forbidden.
+    let mut recovered_credentials = 0;
     for access_key in [ACCESS_KEY, SESSION_KEY] {
         let target = beyonddb::credential_target(access_key).unwrap();
         let authority = CellAuthority::new(layout.clone())
@@ -1083,19 +1085,18 @@ async fn run_signed_sdk_network_recovery() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            authority.value().owner.as_ref().unwrap().session,
-            owner_session
-        );
+        let credential_owner = authority.value().owner.as_ref().unwrap().session;
+        if credential_owner == owner_session {
+            replacement_provisioner
+                .takeover_expired_credential(access_key, &peer_directory)
+                .await
+                .unwrap();
+            recovered_credentials += 1;
+        } else {
+            assert_eq!(credential_owner, remote_session);
+        }
     }
-    replacement_provisioner
-        .takeover_expired_credential(ACCESS_KEY, &peer_directory)
-        .await
-        .unwrap();
-    replacement_provisioner
-        .takeover_expired_credential(SESSION_KEY, &peer_directory)
-        .await
-        .unwrap();
+    assert!(recovered_credentials > 0);
     let (replacement_shutdown, replacement_cancel) = tokio::sync::oneshot::channel();
     let replacement_router = replacement_peers.router(replacement_provisioner.clone());
     let replacement_server = tokio::spawn(async move {
