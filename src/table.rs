@@ -69,6 +69,8 @@ pub struct TableSpec {
     pub initial_tags: Vec<Tag>,
     /// Canonical table ARN required when initial tags are supplied.
     pub resource_arn: Option<String>,
+    /// Optional stream generation installed with this table.
+    pub stream: Option<crate::stream_journal::StreamConfig>,
 }
 
 impl TableSpec {
@@ -87,6 +89,13 @@ impl TableSpec {
             && self.billing_mode == record.billing_mode
             && self.provisioned_throughput == record.provisioned_throughput
             && self.deletion_protection_enabled == record.deletion_protection_enabled
+            // A retried CreateTable may generate a new label before recovering
+            // the first committed generation; only caller policy must match.
+            && self.stream.as_ref().map(|stream| (&stream.region, stream.view_type))
+                == record
+                    .stream
+                    .as_ref()
+                    .map(|stream| (&stream.region, stream.view_type))
     }
 }
 
@@ -132,6 +141,8 @@ pub struct TableRecord {
     pub deletion_protection_enabled: bool,
     /// Logical time when the current on-demand mode started.
     pub pay_per_request_since_ms: Option<i64>,
+    /// Stream policy copied into each data Cell at installation.
+    pub stream: Option<crate::stream_journal::StreamConfig>,
 }
 
 /// Create one table and its key contract atomically.
@@ -203,15 +214,29 @@ impl Command for CreateTable {
             deletion_protection_enabled: input.deletion_protection_enabled,
             pay_per_request_since_ms: (input.billing_mode == BillingMode::PayPerRequest)
                 .then_some(context.now_ms()),
+            stream: input.stream,
         };
+        let encoded = serde_json::to_vec(&record)?;
         context.sql(&statement(
             "INSERT INTO ddb_tables (table_name, table_id, record) VALUES (?1, ?2, ?3)",
             vec![
                 SqlValue::Text(input.table_name),
                 SqlValue::Text(table_id),
-                SqlValue::Blob(serde_json::to_vec(&record)?),
+                SqlValue::Blob(encoded.clone()),
             ],
         ))?;
+        if let Some(stream) = &record.stream {
+            context.sql(&statement(
+                "INSERT INTO ddb_stream_catalog (table_id, table_name, stream_label, region, record) VALUES (?1, ?2, ?3, ?4, ?5)",
+                vec![
+                    SqlValue::Text(record.id.clone()),
+                    SqlValue::Text(record.table_name.clone()),
+                    SqlValue::Text(stream.label.clone()),
+                    SqlValue::Text(stream.region.clone()),
+                    SqlValue::Blob(encoded),
+                ],
+            ))?;
+        }
         if matches!(record.placement, TablePlacement::Routed { .. }) {
             // Persist lifecycle ownership before provisioning independent roots.
             // Deletion must fence even an installer that never publishes its copy.
@@ -380,6 +405,7 @@ impl Command for UpdateTable {
             deletion_protection_enabled: table.deletion_protection_enabled,
             initial_tags: Vec::new(),
             resource_arn: None,
+            stream: table.stream.clone(),
         };
         if !valid_table_spec(&spec) {
             return Ok(CommandResult::Rejected(Json(
@@ -596,6 +622,15 @@ fn table_id(context: &CommandContext<'_, '_>, name: &str) -> String {
 }
 
 fn valid_table_spec(spec: &TableSpec) -> bool {
+    if spec.stream.as_ref().is_some_and(|stream| {
+        stream.region.is_empty()
+            || stream.label.is_empty()
+            || stream.region.len() > 64
+            || stream.label.len() > 128
+            || stream.label.contains('|')
+    }) {
+        return false;
+    }
     if let TablePlacement::Routed { initial_partitions } = spec.placement
         && (initial_partitions == 0
             || initial_partitions > 256

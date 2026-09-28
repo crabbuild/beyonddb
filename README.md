@@ -476,10 +476,20 @@ initial admission and owner recovery through those paths.
 
 ## Streams dependency contract
 
-The closed-shard completion proposal and full Streams implementation boundaries
-are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). Its accompanying patch is
-unapplied and awaits explicit dependency-change approval. Public Streams
-operations remain unsupported.
+The closed-shard completion contract and full Streams implementation boundaries
+are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). The contract is under review
+in [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372).
+BeyondDB pins the identical commit in the crabbuild-owned
+[ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1), so upstream
+release timing does not block this service.
+The native Cell write path now journals item changes atomically for an
+installed stream policy and exposes bounded owner Cell reads. CreateTable
+can install a stream policy; ListStreams and DescribeStream discover current and
+deleted generations for 24 hours after deletion, and GetShardIterator/GetRecords
+read retained records during that window. Account Cell regression covers table
+name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
+server restart. UpdateTable stream transitions, physical collection of expired
+history, and fleet-scale qualification remain open.
 
 ## API coverage boundary
 
@@ -557,10 +567,11 @@ The public adapter routes all transactional writes through the coordinator,
 including account participants before route activation. All transactional reads
 use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
-coordinator protocol cost. Online global-index changes, non-ALL local index projections,
-and streamed writes remain unsupported. Local secondary indexes with ALL
-projection support account/routed Query and Scan, strong reads, numeric sort
-ordering with base-sort tie-breakers, and base-plus-index continuation keys.
+coordinator protocol cost. Online global-index changes and non-ALL local index
+projections remain unsupported. Streamed writes use the installed Cell policy.
+Local secondary indexes with ALL projection support account/routed Query and Scan,
+strong reads, numeric sort ordering with base-sort tie-breakers, and base-plus-index
+continuation keys.
 Sparse entries are absent until their index key exists. Ordinary writes,
 transactions, TTL deletion, and split import maintain index entries in the
 same Cell command as base items. Indexed Query fences the HASH group's prepared

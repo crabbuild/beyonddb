@@ -84,6 +84,15 @@ impl Command for PutItem {
             }
         }
         write_item(context, &table, &key, &input.item)?;
+        crate::stream_journal::append(
+            context,
+            &table.id,
+            &table.key_schema,
+            table.stream.as_ref(),
+            old.as_ref(),
+            Some(&input.item),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
             old,
         ))))
@@ -156,6 +165,15 @@ impl Command for DeleteItem {
             }
         }
         delete_item(context, &table, &key)?;
+        crate::stream_journal::append(
+            context,
+            &table.id,
+            &table.key_schema,
+            table.stream.as_ref(),
+            old.as_ref(),
+            None,
+            0,
+        )?;
         Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
             if input.return_old { old } else { None },
         ))))
@@ -254,6 +272,15 @@ impl Command for UpdateItem {
             )));
         }
         write_item(context, &table, &key, &new)?;
+        crate::stream_journal::append(
+            context,
+            &table.id,
+            &table.key_schema,
+            table.stream.as_ref(),
+            old.as_ref(),
+            Some(&new),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(UpdateItemOutcome::Applied {
             old,
             new,

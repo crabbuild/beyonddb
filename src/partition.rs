@@ -35,11 +35,12 @@ use key::index_key;
 
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         cellule_runtime::primitives::capacity::SCHEMA,
         crate::participant::SCHEMA,
         crate::secondary_index::SCHEMA,
         crate::global_index::outbox::SCHEMA,
+        crate::stream_journal::SCHEMA,
         include_str!("partition_schema.sql")
     )
 });
@@ -76,7 +77,7 @@ static COMMANDS: [OperationDescriptor; 19] = [
     operation(18),
     operation(19),
 ];
-static QUERIES: [OperationDescriptor; 14] = [
+static QUERIES: [OperationDescriptor; 16] = [
     operation(1),
     operation(2),
     operation(3),
@@ -91,6 +92,8 @@ static QUERIES: [OperationDescriptor; 14] = [
     crate::global_index::outbox::chunk_operation(13),
     operation(14),
     operation(15),
+    operation(16),
+    operation(17),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -117,6 +120,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("partition.rs"));
+                source.update(include_bytes!("stream_journal.rs"));
                 source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
@@ -176,6 +180,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<ReleasePartitionTransactionReads>()?;
         registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;
         registry.bind_query::<crate::statistics::ReadPartitionStatistics>()?;
+        registry.bind_query::<crate::ReadPartitionStreamJournal>()?;
+        registry.bind_query::<crate::ReadPartitionStreamTail>()?;
         registry.bind_query::<PartitionGet>()?;
         registry.bind_query::<PartitionScan>()?;
         registry.bind_query::<PartitionExport>()?;
@@ -984,6 +990,15 @@ impl Command for PartitionPut {
             }
         }
         write_item(context, key, &input.item, &spec.table, Some(spec.epoch))?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            Some(&input.item),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
             old,
         ))))
@@ -1105,6 +1120,15 @@ impl Command for PartitionDelete {
             }
         }
         delete_item(context, &spec.table, &key, spec.epoch)?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            None,
+            0,
+        )?;
         Ok(CommandResult::Success(Json(
             PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
         )))
@@ -1258,6 +1282,15 @@ impl Command for PartitionUpdate {
             )));
         }
         write_item(context, key, &new, &spec.table, Some(spec.epoch))?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            Some(&new),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(
             PartitionUpdateOutcome::Applied { old, new },
         )))

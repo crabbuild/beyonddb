@@ -1,11 +1,55 @@
-# Streams implementation: closed-shard contract proposal
+# Streams implementation: closed-shard contract
 
-Status: **proposal only**. `extenddb-stream-completion.proposed.patch` is an
-unapplied diff against ExtendDB `bdb7b3df4ace3b80a6e928f144036d056aec0327`, the
-revision currently pinned by BeyondDB. It does not change Cargo resolution or
-install a dependency override. It has been parsed/formatted with Rustfmt and
-passes `git apply --check` against that revision. Compilation, its proposed
-tests, and SDK qualification remain pending approval and execution.
+Status: [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372) is
+open. BeyondDB pins the identical commit on crabbuild's
+[ExtendDB fork branch](https://github.com/crabbuild/extenddb/pull/1).
+The older `extenddb-stream-completion.proposed.patch` records the
+original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
+the upstream PR supersedes it. Focused SQLite and engine tests, all three
+backend compile checks, and strict Clippy passed on current ExtendDB main.
+The signed process smoke covers SDK CreateTable/PutItem and AWS CLI Streams
+discovery/read through a hard restart. Broader Streams qualification remains open.
+
+## Native journal slice
+
+`src/stream_journal.rs` appends a record to the item owner's SQL Cell in the
+same command as a direct Put, Update, or Delete. Both account and routed data
+Cells install `src/stream_journal.sql`. The table's installed stream policy is
+read inside the command, so a stale caller hint cannot suppress capture.
+Committed same-Cell and participant transaction writes use the same append
+path; rejected and aborted transactions do not apply staged images. Each
+command sequence plus operation ordinal gives a stable record position.
+Equal before and after images, and deletions of absent items, emit no record.
+Split import uses the item write helper without invoking the journal, so an
+imported copy does not appear as a new mutation.
+Native account and partition queries read that journal in sequence order with
+a 1 MiB record budget and an exclusive sequence cursor. The account test
+follows multiple pages after owner restoration; the routed test reads its owner
+Cell and confirms imported children have no journal records.
+The partition query also reads the Cell's durable split seal. The ExtendDB
+storage method maps the final sealed page to `End` and an empty open page to
+`More(None)`, with a 23-digit sequence width and account-scoped routing. The
+routed test exercises both states and rejects a different account's shard.
+Known shard IDs are validated against the canonical stream ARN, account table
+generation, and installed data Cell. `LATEST` reads the owner Cell's indexed
+journal tail without scanning pages. Native account and routed tests cover
+validation and tail lookup. DescribeStream walks installed roots and durable
+split seals to expose parent/child lineage with bounded response pages.
+
+This slice is exercised by the native account Cell test for insert, replay,
+equal-image Put, deletion, transaction commit, and rejection. The adapter now
+accepts `CreateTable(StreamSpecification)`, returns its stream ARN and view
+type in the table description, and passes streamed writes to the Cell command.
+ListStreams and DescribeStream use a generation catalog committed with table
+creation. DeleteTable marks that generation disabled before removing the table
+record. Catalog reads and record queries apply a 24-hour visibility cutoff;
+the old stream remains readable after deletion and table name reuse. The
+account Cell test covers this lifecycle. A signed process smoke creates a
+routed table, reads its record, restarts the server hard, and reads the same
+record again. Physical collection of expired catalog and journal rows is still
+needed to bound storage; policy replacement remains unsupported.
+The new SQL table changes the unreleased version-1 schema digest; no tagged
+BeyondDB release or upgrade contract exists yet.
 
 ## Why this dependency change is necessary
 
@@ -17,7 +61,7 @@ and ordering in [DynamoDB Streams](https://docs.aws.amazon.com/amazondynamodb/la
 `GetRecords` must stop returning an iterator when a closed shard is exhausted;
 see the [NextShardIterator response contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html).
 
-The pinned ExtendDB contract cannot express this:
+The previously pinned ExtendDB contract could not express this:
 
 - `crates/storage/src/lib.rs:159` returns `(records, Option<String>)`. The
   implementation uses that option for the last sequence returned, despite its
@@ -48,14 +92,12 @@ The patch covers every producer and consumer found in the pinned source:
 | PostgreSQL | Read ending sequence with the shard's table ID, retain the catalog ownership check, and use the same lookahead rule. |
 | MongoDB | Read ending sequence from the already-fetched shard document, retain account validation, and use the same lookahead rule. |
 | Page limits | Validate 1–1000 records before lookahead; fetch at most limit + 1 and return at most limit. |
-| BeyondDB | Its current unsupported `StreamEngine` methods already use the result alias. Implement Cell-backed pages against the new explicit continuation after the dependency is validated. |
+| BeyondDB | The branch reads Cell-backed pages through the explicit continuation. It reports `End` after an empty sealed page and `More` while the shard remains open. |
 
-Two proposed handler tests cover closed-shard termination and open-page cursor
-preservation/advancement with timestamp renewal. Two proposed SQLite tests
-cover an empty open/closed shard, a closed shard with multiple pages including
-an exactly-full final page, and account isolation. These tests are **not yet
-compiled or run**. PostgreSQL/MongoDB require their backend integration gates;
-compiling their adapters alone will not establish their runtime behavior.
+The upstream PR tests closed-shard termination, open-page cursor behavior,
+SQLite pagination, and account isolation. Focused tests passed against the
+fork commit, but PostgreSQL/MongoDB still require their backend integration
+gates; compiling their adapters alone does not establish runtime behavior.
 
 **Is this the best fix?** An explicit continuation state removes the ambiguity
 at the owning contract. It preserves both valid empty-open polling and final
@@ -65,24 +107,19 @@ engine consumer. The closing writer must publish its final records before the
 ending marker and never append afterward; BeyondDB must enforce that ordering
 in the source Cell's seal command.
 
-## Approval boundary
+## Upstream integration
 
-Root `AGENTS.md` requires explicit approval for dependency patches, overrides,
-or vendoring. Applying this proposal to ExtendDB and changing BeyondDB's
-resolved dependency therefore requires that approval. The proposal is reviewable
-before approval; the Cargo manifests, lockfile, and cached dependency source
-remain unchanged. No upstream pull request or message has been sent.
-
-After approval: prepare an isolated ExtendDB checkout on the workspace volume,
-apply and compile the change, run its handler and backend tests, fix any issues,
-then update BeyondDB to the tested immutable revision and rerun its signed SDK
-and process recovery gates. An upstream PR requires authorization to publish it;
-this proposal does not assume that authorization.
+The crabbuild fork commit is a reviewed, immutable dependency while the
+upstream PR is open. BeyondDB can release against this pin; move to an upstream
+revision after its contract is merged and qualified. PostgreSQL and MongoDB
+runtime tests and BeyondDB's broader signed SDK matrix remain open.
 
 ## Remaining BeyondDB implementation
 
 This dependency fix is necessary but does not implement Streams by itself.
-BeyondDB still explicitly rejects streamed writes and Streams API operations.
+BeyondDB supports generation creation, discovery, and record reads through a
+24-hour visibility window after deletion. Policy transitions, physical
+collection, and full public Streams behavior remain unfinished.
 The implementation must cover all of these boundaries before support is claimed:
 
 1. Store stream identity, view type, generation, shard lineage, and lifetime
@@ -99,14 +136,16 @@ The implementation must cover all of these boundaries before support is claimed:
 4. Close the parent with its final records before activating child writers;
    publish retained shard discovery alongside the route switch. Preserve
    per-item ordering through the lineage without imposing one global writer.
-5. Implement account-scoped ListStreams, paginated DescribeStream, iterator
-   validation, sequence lookups, and bounded GetRecords. Enforce the response
-   byte budget as well as record count; this proposal only changes completion.
+5. Scale account-scoped ListStreams and paginated DescribeStream without
+   rescanning prior shards or every streamless table. Qualify iterator
+   validation, sequence lookups, and GetRecords response byte bounds against
+   DynamoDB's limits and the full upstream protocol suite.
 6. Add bounded retention and recovery for old stream generations, then qualify
    all view types, no-op/conditional writes, TTL identity, cross-Cell COMMIT and
    ABORT, split lineage, disable/re-enable, delete/recreate, and hard restart
    through signed clients. The current dependency's other Streams gaps, such
    as byte bounds and shard-filter support, also need qualification.
 
-The full API and 10,000-Cell/multi-TB objectives remain open. No Streams support
-or production-scale claim follows from this proposal.
+The full API and 10,000-Cell/multi-TB objectives remain open. The current
+generation read path is qualified by one signed process smoke, not by the full
+Streams compatibility or production-scale suite.

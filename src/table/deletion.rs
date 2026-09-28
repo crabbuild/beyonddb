@@ -110,6 +110,17 @@ impl Command for DeleteTable {
                 "INSERT INTO ddb_table_deletions (table_id) VALUES (?1)",
                 vec![SqlValue::Text(table.id.clone())],
             ))?;
+            if table.stream.is_some() {
+                let disabled = context.sql(&statement(
+                    "UPDATE ddb_stream_catalog SET disabled_at_ms = ?1 WHERE table_id = ?2 AND disabled_at_ms IS NULL",
+                    vec![SqlValue::Integer(context.now_ms()), SqlValue::Text(table.id.clone())],
+                ))?[0].rows_affected;
+                if disabled != 1 {
+                    return Err(Error::Command(
+                        "stream generation is missing during deletion",
+                    ));
+                }
+            }
         }
         cleanup(context, &table.id)?;
         Ok(CommandResult::Success(Json(DeleteTableOutcome::Deleted(

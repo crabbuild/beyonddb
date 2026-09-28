@@ -141,6 +141,7 @@ async fn capacity_case(
                     deletion_protection_enabled: false,
                     initial_tags: vec![],
                     resource_arn: None,
+                    stream: None,
                 }),
             )
             .await

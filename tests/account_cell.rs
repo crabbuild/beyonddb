@@ -5,7 +5,8 @@ use beyonddb::{
     CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionQueryInput,
-    PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadTtlSchedule, ReadTtlSweep,
+    PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadAccountStreamJournal,
+    ReadTtlSchedule, ReadTtlSweep, StreamConfig, StreamJournalInput, StreamJournalOutcome,
     TableSpec, TransactWrite, TransactWriteInput, TransactionOperation, TransactionOutcome,
     UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
@@ -23,13 +24,14 @@ use cellule_runtime::{MutationIdentity, SqlWorkerPool};
 use cellule_store::Store;
 use extenddb_core::expression::{Expr, ExpressionMaps, KeyCondition, PathElement, UpdateAction};
 use extenddb_core::types::{
-    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput, Item,
-    KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
+    AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput,
+    DescribeStreamInput, Item, KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure,
+    ScalarAttributeType, StreamEventName, StreamRecord, StreamSpecification, StreamViewType,
     TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
-    DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp, TransactWriteOp,
-    error::StorageError,
+    DataEngine, IdempotencyKey, MetadataEngine, StreamCapture, StreamContinuation, StreamEngine,
+    TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 
@@ -133,7 +135,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
         "us-east-1",
     )
-    .with_transaction_coordinators(provisioner);
+    .with_transaction_coordinators(provisioner.clone());
     let client = host
         .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
         .unwrap();
@@ -156,6 +158,11 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         deletion_protection_enabled: false,
         initial_tags: Vec::new(),
         resource_arn: None,
+        stream: Some(StreamConfig {
+            view_type: StreamViewType::NewAndOldImages,
+            region: "us-east-1".into(),
+            label: "2026-09-27T00:00:00.000".into(),
+        }),
     };
     let created = client
         .command::<CreateTable>(&target, identity(4), Json(schema.clone()))
@@ -261,6 +268,20 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(read.output.0, GetItemOutcome::Found(Some(item.clone())));
 
+    client
+        .command::<PutItem>(
+            &target,
+            identity(7),
+            Json(PutItemInput {
+                table_name: "Books".into(),
+                table_id: book_table_id.clone(),
+                item: item.clone(),
+                condition: None,
+            }),
+        )
+        .await
+        .unwrap();
+
     let deleted = client
         .command::<DeleteItem>(
             &target,
@@ -276,6 +297,25 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(deleted.output.0, ItemMutationOutcome::Applied(Some(item)));
+    let connection = cellule_ltx::rusqlite::Connection::open_with_flags(
+        directory.path().join("account.sqlite"),
+        cellule_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut query = connection
+        .prepare(
+            "SELECT record FROM ddb_stream_records WHERE table_id = ?1 ORDER BY sequence_number",
+        )
+        .unwrap();
+    let records = query
+        .query_map([&book_table_id], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|row| serde_json::from_slice::<StreamRecord>(&row.unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].event_name, StreamEventName::Insert);
+    assert_eq!(records[1].event_name, StreamEventName::Remove);
+    assert_eq!(records[0].dynamodb.new_image, records[1].dynamodb.old_image);
 
     let author_table = storage
         .create_table(
@@ -480,6 +520,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
     let book_key = Item::from([("id".into(), AttributeValue::S("book-2".into()))]);
     let author_key = Item::from([("id".into(), AttributeValue::S("author-1".into()))]);
     let invalid_key = Item::from([("wrong".into(), AttributeValue::S("author-1".into()))]);
+    let stream_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     let attempted = client
         .command::<TransactWrite>(
             &target,
@@ -507,6 +554,16 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         Err(InvocationError::Rejected(committed))
             if matches!(committed.output.0, TransactionOutcome::Rejected { index: 1, .. })
     ));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+                [&book_table_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        stream_count
+    );
 
     let absent = client
         .query::<GetItem>(
@@ -546,6 +603,16 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(committed.output.0, TransactionOutcome::Applied);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+                [&book_table_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        stream_count + 1
+    );
     assert_eq!(
         storage
             .transact_get_items(&[
@@ -997,6 +1064,256 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             &AttributeValue::N("-2".into())
         ]
     );
+    let committed_stream_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tail: Option<String> = connection
+        .query_row(
+            "SELECT max(sequence_number) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let shard_id = format!("shardId-{book_table_id}-account-2026-09-27T00:00:00.000");
+    storage
+        .validate_shard(
+            "123456789012",
+            "arn:aws:dynamodb:us-east-1:123456789012:table/Books/stream/2026-09-27T00:00:00.000",
+            &shard_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.latest_sequence_number(&shard_id).await.unwrap(),
+        tail
+    );
+    let streamed = storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "Streamed".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::NewImage),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stream_label = streamed.latest_stream_label.as_deref().unwrap();
+    assert!(streamed.latest_stream_arn.is_some());
+    let stream_key = storage
+        .table_key_info("123456789012", "Streamed")
+        .await
+        .unwrap();
+    assert_eq!(
+        stream_key.stream_specification,
+        streamed.stream_specification
+    );
+    let streamed_item = Item::from([("id".into(), AttributeValue::S("captured".into()))]);
+    storage
+        .put_item(
+            &stream_key,
+            streamed_item.clone(),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            Some(&StreamCapture {
+                view_type: StreamViewType::NewImage,
+                user_identity: None,
+                region: "us-east-1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let streamed_shard = format!("shardId-{}-account-{stream_label}", streamed.table_id);
+    let (listed, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed[0].stream_arn,
+        streamed.latest_stream_arn.clone().unwrap()
+    );
+    let described_stream = storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: streamed.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(described_stream.shards[0].shard_id, streamed_shard);
+    storage
+        .validate_shard(
+            "123456789012",
+            streamed.latest_stream_arn.as_deref().unwrap(),
+            &streamed_shard,
+        )
+        .await
+        .unwrap();
+    let (streamed_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        continuation,
+        StreamContinuation::More(Some(streamed_records[0].dynamodb.sequence_number.clone()))
+    );
+    assert_eq!(streamed_records[0].dynamodb.new_image, Some(streamed_item));
+    let routed_storage = CellStorage::new(
+        CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
+        "us-east-1",
+    )
+    .with_initial_partitions(provisioner);
+    let routed_table = routed_storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "RoutedStream".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::KeysOnly),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let routed_stream = routed_storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: routed_table.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(routed_stream.shards.len(), 1);
+    let routed_key = routed_storage
+        .table_key_info("123456789012", "RoutedStream")
+        .await
+        .unwrap();
+    routed_storage
+        .put_item(
+            &routed_key,
+            Item::from([("id".into(), AttributeValue::S("routed".into()))]),
+            false,
+            None,
+            &ExpressionMaps::default(),
+            Some(&StreamCapture {
+                view_type: StreamViewType::KeysOnly,
+                user_identity: None,
+                region: "us-east-1".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let (routed_records, _) = routed_storage
+        .get_stream_records("123456789012", &routed_stream.shards[0].shard_id, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(routed_records.len(), 1);
+    let (first_streams, cursor) = storage
+        .list_streams("123456789012", None, 1, None)
+        .await
+        .unwrap();
+    let (second_streams, _) = storage
+        .list_streams("123456789012", None, 1, cursor.as_deref())
+        .await
+        .unwrap();
+    assert_ne!(first_streams[0].stream_arn, second_streams[0].stream_arn);
+    storage
+        .delete_table(
+            "123456789012",
+            DeleteTableInput {
+                table_name: "Streamed".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let (retained, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    let retained_description = storage
+        .describe_stream(
+            "123456789012",
+            &DescribeStreamInput {
+                stream_arn: streamed.latest_stream_arn.clone().unwrap(),
+                limit: None,
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_description.stream_status,
+        extenddb_core::types::StreamStatus::Disabled
+    );
+    let (retained_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(retained_records.len(), 1);
+    assert_eq!(continuation, StreamContinuation::End);
+    storage
+        .create_table(
+            "123456789012",
+            CreateTableInput {
+                table_name: "Streamed".into(),
+                key_schema: schema.key_schema.clone(),
+                attribute_definitions: schema.attribute_definitions.clone(),
+                billing_mode: Some(BillingMode::PayPerRequest),
+                stream_specification: Some(StreamSpecification {
+                    stream_enabled: true,
+                    stream_view_type: Some(StreamViewType::KeysOnly),
+                }),
+                ..CreateTableInput::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (generations, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 100, None)
+        .await
+        .unwrap();
+    assert_eq!(generations.len(), 2);
+    let (first_generation, cursor) = storage
+        .list_streams("123456789012", Some("Streamed"), 1, None)
+        .await
+        .unwrap();
+    let (next_generation, _) = storage
+        .list_streams("123456789012", Some("Streamed"), 1, cursor.as_deref())
+        .await
+        .unwrap();
+    assert_ne!(
+        first_generation[0].stream_arn,
+        next_generation[0].stream_arn
+    );
+    let (old_records, continuation) = storage
+        .get_stream_records("123456789012", &streamed_shard, None, 100)
+        .await
+        .unwrap();
+    assert_eq!(old_records.len(), 1);
+    assert_eq!(continuation, StreamContinuation::End);
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -1039,6 +1356,39 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             target.application(),
         )
         .unwrap();
+    let mut after_sequence = None;
+    let mut restored_stream_count = 0;
+    loop {
+        let restored_streams = restored_client
+            .query::<ReadAccountStreamJournal>(
+                &target,
+                None,
+                Json(StreamJournalInput {
+                    table_id: book_table_id.clone(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                    after_sequence,
+                    limit: 1_000,
+                }),
+            )
+            .await
+            .unwrap();
+        let StreamJournalOutcome::Page {
+            records,
+            last_sequence,
+            closed,
+            ..
+        } = restored_streams.output.0
+        else {
+            panic!("restored stream generation is missing");
+        };
+        assert!(!closed);
+        restored_stream_count += i64::try_from(records.len()).unwrap();
+        let Some(next) = last_sequence else {
+            break;
+        };
+        after_sequence = Some(next);
+    }
+    assert_eq!(restored_stream_count, committed_stream_count);
     let restored_sweep = restored_client
         .query::<ReadTtlSweep>(&target, None, Json("Books".into()))
         .await

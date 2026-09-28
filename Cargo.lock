@@ -1460,7 +1460,7 @@ dependencies = [
 [[package]]
 name = "extenddb-auth"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "async-trait",
  "axum",
@@ -1480,7 +1480,7 @@ dependencies = [
 [[package]]
 name = "extenddb-cache"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "futures",
  "moka",
@@ -1492,7 +1492,7 @@ dependencies = [
 [[package]]
 name = "extenddb-config"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "anyhow",
  "config",
@@ -1506,7 +1506,7 @@ dependencies = [
 [[package]]
 name = "extenddb-core"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "base64 0.22.1",
  "bigdecimal",
@@ -1520,7 +1520,7 @@ dependencies = [
 [[package]]
 name = "extenddb-engine"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "extenddb-server"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1577,7 +1577,7 @@ dependencies = [
 [[package]]
 name = "extenddb-storage"
 version = "0.1.12"
-source = "git+https://github.com/ExtendDB/extenddb.git?rev=bdb7b3df4ace3b80a6e928f144036d056aec0327#bdb7b3df4ace3b80a6e928f144036d056aec0327"
+source = "git+https://github.com/crabbuild/extenddb.git?rev=7eaa89b437feed0af0f05883d3f1493f86c6fc6d#7eaa89b437feed0af0f05883d3f1493f86c6fc6d"
 dependencies = [
  "aes-gcm",
  "async-trait",

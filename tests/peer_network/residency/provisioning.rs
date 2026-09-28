@@ -726,6 +726,7 @@ async fn unpublished(
                 resource_arn: Some(format!(
                     "arn:aws:dynamodb:us-east-1:123456789012:table/{name}"
                 )),
+                stream: None,
             }),
         )
         .await

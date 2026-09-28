@@ -17,6 +17,7 @@ mod secondary_index;
 mod server;
 mod split;
 mod statistics;
+mod stream_journal;
 mod table;
 mod tags;
 mod transaction_coordinator;
@@ -42,6 +43,12 @@ pub use server::{
     measured_node_capacity, shutdown_serving_node,
 };
 pub use split::*;
+pub use stream_journal::{
+    ListStreamCatalog, ListStreamCatalogInput, ListStreamCatalogPage, ReadAccountStreamJournal,
+    ReadAccountStreamTail, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
+    StreamCatalogEntry, StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome,
+    StreamTailInput, StreamTailOutcome,
+};
 pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
@@ -85,11 +92,12 @@ const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         cellule_runtime::primitives::capacity::SCHEMA,
         participant::SCHEMA,
         secondary_index::SCHEMA,
         global_index::outbox::SCHEMA,
+        stream_journal::SCHEMA,
         include_str!("schema.sql")
     )
 });
@@ -162,7 +170,7 @@ static COMMANDS: [OperationDescriptor; 26] = [
     },
     operation(43),
 ];
-static QUERIES: [OperationDescriptor; 25] = [
+static QUERIES: [OperationDescriptor; 29] = [
     operation(4),
     operation(7),
     operation(8),
@@ -191,6 +199,10 @@ static QUERIES: [OperationDescriptor; 25] = [
     participant::phase_operation(39),
     operation(42),
     operation(43),
+    operation(44),
+    operation(45),
+    operation(46),
+    operation(47),
 ];
 
 /// Statically linked account application.
@@ -305,6 +317,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("statistics.rs"));
+                source.update(include_bytes!("stream_journal.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("table/deletion.rs"));
                 source.update(include_bytes!("global_index.rs"));
@@ -352,6 +365,10 @@ impl cellule_runtime::registry::CellModule for AccountModule {
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         registry.bind_command::<statistics::PublishStatistics>()?;
         registry.bind_query::<statistics::ReadAccountStatistics>()?;
+        registry.bind_query::<ReadAccountStreamJournal>()?;
+        registry.bind_query::<ReadAccountStreamTail>()?;
+        registry.bind_query::<ReadStreamCatalog>()?;
+        registry.bind_query::<ListStreamCatalog>()?;
         registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;

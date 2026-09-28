@@ -96,14 +96,15 @@ use beyonddb::{
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     PublishedNodeLease, PutItem, PutItemInput, ReadCoordinatorParticipant,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionState, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadTransactionInput, ReadTtlSchedule, ReadTtlSweep,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare, RecordParticipantResolution,
-    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, TableRoute,
-    TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput, account_target,
-    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
-    initialize_account, initialize_coordinator, initialize_partition,
+    ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionTransaction,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadTransactionInput,
+    ReadTtlSchedule, ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
+    RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
+    ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
+    SealPartitionOutcome, SplitPlan, StreamConfig, StreamJournalInput, StreamJournalOutcome,
+    TableRoute, TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput,
+    account_target, build_http_state, coordinator_target, credential_target, data_key_hash,
+    data_target, initialize_account, initialize_coordinator, initialize_partition,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;
@@ -134,14 +135,14 @@ use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DescribeTableInput, Item,
     KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    TableStatus,
+    StreamViewType, TableStatus,
 };
 use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
 use extenddb_storage::management_store::OpError;
 use extenddb_storage::{
-    BoxedFuture, DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp,
-    TransactWriteOp, error::StorageError,
+    BoxedFuture, DataEngine, IdempotencyKey, MetadataEngine, StreamContinuation, StreamEngine,
+    TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
 use object_store::memory::InMemory;
 use tokio_util::sync::CancellationToken;
@@ -490,6 +491,17 @@ fn key_in_range(
     panic!("failed to find a key in the requested range")
 }
 
+fn stream_count(path: &std::path::Path, table_id: &str) -> i64 {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [table_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn peer_scope_allows_account_and_credentials_but_rejects_foreign_cells() {
     let scope = BeyonddbPeerScope;
@@ -616,6 +628,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await
@@ -922,6 +935,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                     deletion_protection_enabled: false,
                     initial_tags: Vec::new(),
                     resource_arn: None,
+                    stream: None,
                 }),
             )
             .await
@@ -969,6 +983,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await
@@ -2766,6 +2781,11 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: Some(StreamConfig {
+                    view_type: StreamViewType::KeysOnly,
+                    region: "us-east-1".into(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                }),
             }),
         )
         .await
@@ -2777,8 +2797,9 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         other => panic!("unexpected create outcome: {other:?}"),
     };
     let split = [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let left_id = [1; 16];
-    let right_id = [2; 16];
+    let left_id = [0; 16];
+    let mut right_id = [0; 16];
+    right_id[15] = 1;
     let left_target = data_target("123456789012", &table.id, &left_id).unwrap();
     let right_target = data_target("123456789012", &table.id, &right_id).unwrap();
     assert_ne!(left_target.cell_id(), right_target.cell_id());
@@ -3471,6 +3492,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     ));
     let left_key = key_in_range(&table.id, &table.key_schema, true, 0);
     let right_key = key_in_range(&table.id, &table.key_schema, false, 0);
+    let left_streams = stream_count(&directory.path().join("left.sqlite"), &table.id);
+    let right_streams = stream_count(&directory.path().join("right.sqlite"), &table.id);
     for (target, key, epoch, byte) in [
         (&left_target, &left_key, partitions[0].epoch, 18),
         (&right_target, &right_key, partitions[1].epoch, 19),
@@ -3524,6 +3547,30 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             }
         );
     }
+    assert_eq!(
+        stream_count(&directory.path().join("left.sqlite"), &table.id),
+        left_streams + 1
+    );
+    assert_eq!(
+        stream_count(&directory.path().join("right.sqlite"), &table.id),
+        right_streams + 1
+    );
+    let left_page = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            None,
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(left_page.output.0, StreamJournalOutcome::Page { records, .. } if i64::try_from(records.len()).unwrap() == left_streams + 1)
+    );
     let second_left_key = key_in_range(&table.id, &table.key_schema, true, 100);
     client
         .command::<PartitionPut>(
@@ -4216,6 +4263,82 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         source_status.output.0.unwrap().state,
         PartitionState::Sealed(seal.clone())
     );
+    let sealed_page = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            Some(sealed.receipt),
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: None,
+                limit: 1_000,
+            }),
+        )
+        .await
+        .unwrap();
+    let StreamJournalOutcome::Page {
+        closed: true,
+        last_sequence: Some(last_sequence),
+        ..
+    } = sealed_page.output.0
+    else {
+        panic!("sealed source must retain its journal");
+    };
+    let exhausted = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            Some(sealed.receipt),
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: Some(last_sequence.clone()),
+                limit: 1_000,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(exhausted.output.0, StreamJournalOutcome::Page { records, closed: true, .. } if records.is_empty())
+    );
+    let shard_id = format!(
+        "shardId-{}-{:032x}-2026-09-27T00:00:00.000",
+        table.id,
+        u128::from_be_bytes(left_id)
+    );
+    let stream_arn =
+        "arn:aws:dynamodb:us-east-1:123456789012:table/Books/stream/2026-09-27T00:00:00.000";
+    storage
+        .validate_shard("123456789012", stream_arn, &shard_id)
+        .await
+        .unwrap();
+    let (final_records, final_continuation) = storage
+        .get_stream_records("123456789012", &shard_id, None, 1_000)
+        .await
+        .unwrap();
+    assert!(!final_records.is_empty());
+    assert_eq!(final_continuation, StreamContinuation::End);
+    assert_eq!(
+        storage.latest_sequence_number(&shard_id).await.unwrap(),
+        Some(last_sequence.clone())
+    );
+    assert!(matches!(
+        storage
+            .validate_shard("999999999999", stream_arn, &shard_id)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
+    let (records, continuation) = storage
+        .get_stream_records("123456789012", &shard_id, Some(&last_sequence), 100)
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+    assert_eq!(continuation, StreamContinuation::End);
+    assert!(matches!(
+        storage
+            .get_stream_records("999999999999", &shard_id, None, 100)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
     let replayed = client
         .command::<SealPartition>(&left_target, identity(45), Json(seal.clone()))
         .await
@@ -4488,6 +4611,31 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .await
         .unwrap();
     assert_eq!(duplicate.output.0, PartitionImportOutcome::Imported);
+    assert_eq!(
+        stream_count(&directory.path().join("child-left.sqlite"), &table.id),
+        0
+    );
+    assert_eq!(
+        stream_count(&directory.path().join("child-right.sqlite"), &table.id),
+        0
+    );
+    let child_shard = format!(
+        "shardId-{}-{:032x}-2026-09-27T00:00:00.000",
+        table.id,
+        u128::from_be_bytes(next_route.partitions[first_child].partition_id)
+    );
+    assert!(matches!(
+        storage
+            .get_stream_records("123456789012", &child_shard, None, 100)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
+    assert!(matches!(
+        storage
+            .validate_shard("123456789012", stream_arn, &child_shard)
+            .await,
+        Err(StorageError::TableNotFound(_))
+    ));
     let mut changed_item = first_item.clone();
     changed_item.insert("title".into(), AttributeValue::S("newer".into()));
     let conflict = child_client
@@ -4569,6 +4717,55 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .resume("123456789012", &plan)
         .await
         .unwrap();
+    let (records, continuation) = storage
+        .get_stream_records("123456789012", &child_shard, None, 100)
+        .await
+        .unwrap();
+    assert!(records.is_empty());
+    assert_eq!(continuation, StreamContinuation::More(None));
+    storage
+        .validate_shard("123456789012", stream_arn, &child_shard)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.latest_sequence_number(&child_shard).await.unwrap(),
+        None
+    );
+    let described_stream = storage
+        .describe_stream(
+            "123456789012",
+            &extenddb_core::types::DescribeStreamInput {
+                stream_arn: stream_arn.into(),
+                limit: Some(2),
+                exclusive_start_shard_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(described_stream.shards[0].shard_id, shard_id);
+    assert_eq!(
+        described_stream.shards[0]
+            .sequence_number_range
+            .ending_sequence_number,
+        Some(last_sequence)
+    );
+    let next_page = storage
+        .describe_stream(
+            "123456789012",
+            &extenddb_core::types::DescribeStreamInput {
+                stream_arn: stream_arn.into(),
+                limit: Some(2),
+                exclusive_start_shard_id: described_stream.last_evaluated_shard_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(next_page.shards.len(), 2);
+    assert_eq!(
+        next_page.shards[0].parent_shard_id.as_deref(),
+        Some(shard_id.as_str())
+    );
+    assert_eq!(next_page.shards[1].parent_shard_id, None);
     let current_route = crate::single_leaf_route(&cell_client, &account, &table.id.clone()).await;
     assert_eq!(current_route, Some(next_route.clone()));
     for (hash, partition) in [

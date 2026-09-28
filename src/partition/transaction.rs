@@ -284,15 +284,29 @@ fn apply_staged(
     epoch: u64,
     staged: Vec<StagedImage>,
 ) -> Result<()> {
-    for image in staged {
+    for (ordinal, image) in staged.into_iter().enumerate() {
         if image.effect != StagedEffect::Write {
             continue;
         }
-        if let Some(item) = image.image {
-            write_item(context, image.key, &item, table, Some(epoch))?;
+        let old = if table.stream.is_some() {
+            command_item(context, &image.key)?
+        } else {
+            None
+        };
+        if let Some(item) = image.image.as_ref() {
+            write_item(context, image.key.clone(), item, table, Some(epoch))?;
         } else {
             super::delete_item(context, table, &image.key, epoch)?;
         }
+        crate::stream_journal::append(
+            context,
+            &table.id,
+            &table.key_schema,
+            table.stream.as_ref(),
+            old.as_ref(),
+            image.image.as_ref(),
+            ordinal,
+        )?;
     }
     Ok(())
 }

@@ -139,7 +139,7 @@ fn stage(
 }
 
 fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Result<()> {
-    for image in staged {
+    for (ordinal, image) in staged.into_iter().enumerate() {
         if image.effect != StagedEffect::Write {
             continue;
         }
@@ -150,11 +150,25 @@ fn apply(context: &mut CommandContext<'_, '_>, staged: Vec<StagedImage>) -> Resu
             ))?[0],
         )?
         .ok_or(Error::Command("prepared table is missing"))?;
-        if let Some(item) = image.image {
-            write_item(context, &table, &image.key, &item)?;
+        let old = if table.stream.is_some() {
+            command_item(context, &table.id, &image.key)?
+        } else {
+            None
+        };
+        if let Some(item) = image.image.as_ref() {
+            write_item(context, &table, &image.key, item)?;
         } else {
             delete_item(context, &table, &image.key)?;
         }
+        crate::stream_journal::append(
+            context,
+            &table.id,
+            &table.key_schema,
+            table.stream.as_ref(),
+            old.as_ref(),
+            image.image.as_ref(),
+            ordinal,
+        )?;
     }
     Ok(())
 }
