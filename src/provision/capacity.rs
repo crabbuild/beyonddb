@@ -54,6 +54,7 @@ impl CellInitialPartitionProvisioner {
                     Json(ListTablesInput {
                         limit: 1,
                         exclusive_start: cursor.as_ref().map(|cursor| cursor.table_name.clone()),
+                        live_only: false,
                     }),
                 )
                 .await

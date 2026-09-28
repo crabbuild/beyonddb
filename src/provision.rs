@@ -347,6 +347,7 @@ impl CellInitialPartitionProvisioner {
                     Json(ListTablesInput {
                         limit: 100,
                         exclusive_start: after_table,
+                        live_only: false,
                     }),
                 )
                 .await

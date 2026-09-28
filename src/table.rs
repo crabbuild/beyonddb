@@ -441,6 +441,8 @@ pub struct ListTablesInput {
     pub limit: i64,
     /// Resume strictly after this table name.
     pub exclusive_start: Option<String>,
+    /// Exclude generations marked for deletion when scanning serving work.
+    pub live_only: bool,
 }
 
 /// One page of table names in binary UTF-8 order.
@@ -467,7 +469,7 @@ pub struct ListTables;
 impl Query for ListTables {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 8;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<ListTablesInput>;
     type Output = Json<ListTablesOutcome>;
 
@@ -476,8 +478,15 @@ impl Query for ListTables {
             return Ok(Json(ListTablesOutcome::InvalidLimit));
         }
         let start = input.exclusive_start.map_or(SqlValue::Null, SqlValue::Text);
+        // Public listing includes deleting names; serving sweeps must skip them
+        // or old generations can consume every projection pass.
+        let sql = if input.live_only {
+            "SELECT table_name FROM ddb_live_tables WHERE (?1 IS NULL OR table_name > ?1) ORDER BY table_name LIMIT ?2"
+        } else {
+            "SELECT table_name FROM ddb_tables WHERE (?1 IS NULL OR table_name > ?1) ORDER BY table_name LIMIT ?2"
+        };
         let result = context.sql(&statement(
-            "SELECT table_name FROM ddb_tables WHERE (?1 IS NULL OR table_name > ?1) ORDER BY table_name LIMIT ?2",
+            sql,
             vec![start, SqlValue::Integer(input.limit + 1)],
         ))?;
         let mut names = Vec::with_capacity(result[0].rows.len());

@@ -692,6 +692,15 @@ pytest cache writes in the upstream checkout. Omit test selectors to collect the
 whole Python suite; it stops at the first failure. Passing selected files does
 not establish full DynamoDB compatibility.
 
+At pinned ExtendDB revision `bdb7b3df4ace3b80a6e928f144036d056aec0327`,
+the unchanged boto3 GSI file passed all 11 cases against the compiled server
+and fresh RustFS after the live-table projection sweep correction. The account
+Cell regression verifies that deleting generations remain in public listing
+but are excluded from serving sweeps. A preceding combined transaction/GSI run
+passed 16 transaction cases, then returned `ServiceUnavailable` on GSI table
+creation as the node fenced under mailbox pressure. The isolated GSI run passed;
+the longer-run admission and lease failure remains unqualified.
+
 The persisted creation-placement field changes the unreleased table-record
 format, including embedded base/index specifications. Existing development
 roots require reprovisioning before running this revision.

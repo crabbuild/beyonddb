@@ -269,7 +269,7 @@ impl CellStorage {
                     result = async {
                         if sweep.is_none() {
                             let page = storage.client.query::<ListTables>(&target(&account)?, None,
-                                Json(ListTablesInput { limit: 1, exclusive_start: after.clone() }))
+                                Json(ListTablesInput { limit: 1, exclusive_start: after.clone(), live_only: true }))
                                 .await.map_err(cell_error)?.output.0;
                             let ListTablesOutcome::Page(page) = page else {
                                 return Err(StorageError::Internal("invalid statistics table page".into()));
