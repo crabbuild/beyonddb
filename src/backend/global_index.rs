@@ -326,6 +326,7 @@ impl CellStorage {
                     Json(crate::ListTablesInput {
                         limit: 1,
                         exclusive_start: cursor.after_table.clone(),
+                        live_only: true,
                     }),
                 )
                 .await

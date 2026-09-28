@@ -776,6 +776,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             Json(ListTablesInput {
                 limit: 1,
                 exclusive_start: None,
+                live_only: false,
             }),
         )
         .await
@@ -792,6 +793,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             Json(ListTablesInput {
                 limit: 1,
                 exclusive_start: first_page.last_evaluated,
+                live_only: false,
             }),
         )
         .await
@@ -830,6 +832,22 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(removed.table_status, TableStatus::Deleting);
+    let live_page = client
+        .query::<ListTables>(
+            &target,
+            None,
+            Json(ListTablesInput {
+                limit: 1,
+                exclusive_start: None,
+                live_only: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        live_page.output.0,
+        ListTablesOutcome::Page(page) if page.names == ["Books"] && page.last_evaluated.is_none()
+    ));
     let present_condition = Expr::Function {
         name: "attribute_exists".into(),
         args: vec![Expr::Path(vec![PathElement::Attribute("id".into())])],

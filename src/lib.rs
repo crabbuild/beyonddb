@@ -173,7 +173,10 @@ static COMMANDS: [OperationDescriptor; 26] = [
 static QUERIES: [OperationDescriptor; 29] = [
     operation(4),
     operation(7),
-    operation(8),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(8)
+    },
     operation(9),
     operation(10),
     operation(13),

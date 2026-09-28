@@ -379,6 +379,7 @@ impl TableEngine for CellStorage {
                     Json(ListTablesInput {
                         limit: i64::from(input.limit.unwrap_or(100)),
                         exclusive_start: input.exclusive_start_table_name,
+                        live_only: false,
                     }),
                 )
                 .await
