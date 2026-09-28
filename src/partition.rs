@@ -35,11 +35,12 @@ use key::index_key;
 
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         cellule_runtime::primitives::capacity::SCHEMA,
         crate::participant::SCHEMA,
         crate::secondary_index::SCHEMA,
         crate::global_index::outbox::SCHEMA,
+        crate::stream_journal::SCHEMA,
         include_str!("partition_schema.sql")
     )
 });
@@ -117,6 +118,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("partition.rs"));
+                source.update(include_bytes!("stream_journal.rs"));
                 source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
@@ -984,6 +986,15 @@ impl Command for PartitionPut {
             }
         }
         write_item(context, key, &input.item, &spec.table, Some(spec.epoch))?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            Some(&input.item),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
             old,
         ))))
@@ -1105,6 +1116,15 @@ impl Command for PartitionDelete {
             }
         }
         delete_item(context, &spec.table, &key, spec.epoch)?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            None,
+            0,
+        )?;
         Ok(CommandResult::Success(Json(
             PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
         )))
@@ -1258,6 +1278,15 @@ impl Command for PartitionUpdate {
             )));
         }
         write_item(context, key, &new, &spec.table, Some(spec.epoch))?;
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            Some(&new),
+            0,
+        )?;
         Ok(CommandResult::Success(Json(
             PartitionUpdateOutcome::Applied { old, new },
         )))

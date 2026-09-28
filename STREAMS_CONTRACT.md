@@ -6,7 +6,29 @@ branch. The older `extenddb-stream-completion.proposed.patch` records the
 original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
 the upstream PR supersedes it. Focused SQLite and engine tests, all three
 backend compile checks, and strict Clippy passed on current ExtendDB main.
-Signed SDK qualification of BeyondDB Streams is still pending.
+Signed SDK qualification of BeyondDB Streams is still pending. This branch now
+contains a native Cell journal slice, but the public Streams API remains blocked.
+
+## Native journal slice
+
+`src/stream_journal.rs` appends a record to the item owner's SQL Cell in the
+same command as a direct Put, Update, or Delete. Both account and routed data
+Cells install `src/stream_journal.sql`. The table's installed stream policy is
+read inside the command, so a stale caller hint cannot suppress capture.
+Committed same-Cell and participant transaction writes use the same append
+path; rejected and aborted transactions do not apply staged images. Each
+command sequence plus operation ordinal gives a stable record position.
+Equal before and after images, and deletions of absent items, emit no record.
+Split import uses the item write helper without invoking the journal, so an
+imported copy does not appear as a new mutation.
+
+This slice is exercised by the native account Cell test for insert, replay,
+equal-image Put, deletion, transaction commit, and rejection. It does not yet
+expose `CreateTable(StreamSpecification)`: the adapter still rejects that
+request, and the ExtendDB Streams read methods remain unsupported. A native
+stream policy can be installed only by the direct Cell command during tests.
+The new SQL table changes the unreleased version-1 schema digest; no tagged
+BeyondDB release or upgrade contract exists yet.
 
 ## Why this dependency change is necessary
 
@@ -76,7 +98,7 @@ remain to be run after the Cell-backed implementation exists.
 ## Remaining BeyondDB implementation
 
 This dependency fix is necessary but does not implement Streams by itself.
-BeyondDB still explicitly rejects streamed writes and Streams API operations.
+BeyondDB still explicitly rejects public streamed writes and Streams API operations.
 The implementation must cover all of these boundaries before support is claimed:
 
 1. Store stream identity, view type, generation, shard lineage, and lifetime

@@ -6,8 +6,8 @@ use beyonddb::{
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionQueryInput,
     PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadTtlSchedule, ReadTtlSweep,
-    TableSpec, TransactWrite, TransactWriteInput, TransactionOperation, TransactionOutcome,
-    UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    StreamConfig, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
+    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;
@@ -25,7 +25,7 @@ use extenddb_core::expression::{Expr, ExpressionMaps, KeyCondition, PathElement,
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput, Item,
     KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    TableStatus, UpdateTableInput,
+    StreamEventName, StreamRecord, StreamViewType, TableStatus, UpdateTableInput,
 };
 use extenddb_storage::{
     DataEngine, IdempotencyKey, MetadataEngine, TableEngine, TransactGetOp, TransactWriteOp,
@@ -156,6 +156,11 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         deletion_protection_enabled: false,
         initial_tags: Vec::new(),
         resource_arn: None,
+        stream: Some(StreamConfig {
+            view_type: StreamViewType::NewAndOldImages,
+            region: "us-east-1".into(),
+            label: "2026-09-27T00:00:00.000".into(),
+        }),
     };
     let created = client
         .command::<CreateTable>(&target, identity(4), Json(schema.clone()))
@@ -261,6 +266,20 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(read.output.0, GetItemOutcome::Found(Some(item.clone())));
 
+    client
+        .command::<PutItem>(
+            &target,
+            identity(7),
+            Json(PutItemInput {
+                table_name: "Books".into(),
+                table_id: book_table_id.clone(),
+                item: item.clone(),
+                condition: None,
+            }),
+        )
+        .await
+        .unwrap();
+
     let deleted = client
         .command::<DeleteItem>(
             &target,
@@ -276,6 +295,25 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(deleted.output.0, ItemMutationOutcome::Applied(Some(item)));
+    let connection = cellule_ltx::rusqlite::Connection::open_with_flags(
+        directory.path().join("account.sqlite"),
+        cellule_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut query = connection
+        .prepare(
+            "SELECT record FROM ddb_stream_records WHERE table_id = ?1 ORDER BY sequence_number",
+        )
+        .unwrap();
+    let records = query
+        .query_map([&book_table_id], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|row| serde_json::from_slice::<StreamRecord>(&row.unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].event_name, StreamEventName::Insert);
+    assert_eq!(records[1].event_name, StreamEventName::Remove);
+    assert_eq!(records[0].dynamodb.new_image, records[1].dynamodb.old_image);
 
     let author_table = storage
         .create_table(
@@ -480,6 +518,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
     let book_key = Item::from([("id".into(), AttributeValue::S("book-2".into()))]);
     let author_key = Item::from([("id".into(), AttributeValue::S("author-1".into()))]);
     let invalid_key = Item::from([("wrong".into(), AttributeValue::S("author-1".into()))]);
+    let stream_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     let attempted = client
         .command::<TransactWrite>(
             &target,
@@ -507,6 +552,16 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         Err(InvocationError::Rejected(committed))
             if matches!(committed.output.0, TransactionOutcome::Rejected { index: 1, .. })
     ));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+                [&book_table_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        stream_count
+    );
 
     let absent = client
         .query::<GetItem>(
@@ -546,6 +601,16 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(committed.output.0, TransactionOutcome::Applied);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+                [&book_table_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        stream_count + 1
+    );
     assert_eq!(
         storage
             .transact_get_items(&[

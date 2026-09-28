@@ -18,6 +18,7 @@ fn table_class_quota_expires_each_change_at_the_thirty_day_boundary() {
         provisioned_throughput: None,
         deletion_protection_enabled: false,
         pay_per_request_since_ms: Some(0),
+        stream: None,
     };
     let change = TableSettings {
         table_class: Some(TableClass::StandardInfrequentAccess),

@@ -100,10 +100,10 @@ use beyonddb::{
     ReadPendingCrossCellTransactionsInput, ReadTransactionInput, ReadTtlSchedule, ReadTtlSweep,
     ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare, RecordParticipantResolution,
     ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, TableRoute,
-    TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput, account_target,
-    build_http_state, coordinator_target, credential_target, data_key_hash, data_target,
-    initialize_account, initialize_coordinator, initialize_partition,
+    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, StreamConfig,
+    TableRoute, TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput,
+    account_target, build_http_state, coordinator_target, credential_target, data_key_hash,
+    data_target, initialize_account, initialize_coordinator, initialize_partition,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;
@@ -134,7 +134,7 @@ use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DescribeTableInput, Item,
     KeySchemaElement, KeyType, ReturnValuesOnConditionCheckFailure, ScalarAttributeType,
-    TableStatus,
+    StreamViewType, TableStatus,
 };
 use extenddb_engine::OperationContext;
 use extenddb_storage::authorization_store::AuthorizationStore;
@@ -490,6 +490,17 @@ fn key_in_range(
     panic!("failed to find a key in the requested range")
 }
 
+fn stream_count(path: &std::path::Path, table_id: &str) -> i64 {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [table_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn peer_scope_allows_account_and_credentials_but_rejects_foreign_cells() {
     let scope = BeyonddbPeerScope;
@@ -616,6 +627,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await
@@ -922,6 +934,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                     deletion_protection_enabled: false,
                     initial_tags: Vec::new(),
                     resource_arn: None,
+                    stream: None,
                 }),
             )
             .await
@@ -969,6 +982,7 @@ async fn route_pages_cover_many_ranges_without_full_route_result() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await
@@ -2766,6 +2780,11 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: Some(StreamConfig {
+                    view_type: StreamViewType::KeysOnly,
+                    region: "us-east-1".into(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                }),
             }),
         )
         .await
@@ -3471,6 +3490,8 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     ));
     let left_key = key_in_range(&table.id, &table.key_schema, true, 0);
     let right_key = key_in_range(&table.id, &table.key_schema, false, 0);
+    let left_streams = stream_count(&directory.path().join("left.sqlite"), &table.id);
+    let right_streams = stream_count(&directory.path().join("right.sqlite"), &table.id);
     for (target, key, epoch, byte) in [
         (&left_target, &left_key, partitions[0].epoch, 18),
         (&right_target, &right_key, partitions[1].epoch, 19),
@@ -3524,6 +3545,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
             }
         );
     }
+    assert_eq!(
+        stream_count(&directory.path().join("left.sqlite"), &table.id),
+        left_streams + 1
+    );
+    assert_eq!(
+        stream_count(&directory.path().join("right.sqlite"), &table.id),
+        right_streams + 1
+    );
     let second_left_key = key_in_range(&table.id, &table.key_schema, true, 100);
     client
         .command::<PartitionPut>(
@@ -4488,6 +4517,14 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
         .await
         .unwrap();
     assert_eq!(duplicate.output.0, PartitionImportOutcome::Imported);
+    assert_eq!(
+        stream_count(&directory.path().join("child-left.sqlite"), &table.id),
+        0
+    );
+    assert_eq!(
+        stream_count(&directory.path().join("child-right.sqlite"), &table.id),
+        0
+    );
     let mut changed_item = first_item.clone();
     changed_item.insert("title".into(), AttributeValue::S("newer".into()));
     let conflict = child_client

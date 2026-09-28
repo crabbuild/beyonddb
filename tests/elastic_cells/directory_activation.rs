@@ -56,6 +56,7 @@ async fn activation_replay_compares_large_base_and_index_directories() {
         deletion_protection_enabled: false,
         initial_tags: Vec::new(),
         resource_arn: None,
+        stream: None,
     };
     let table = match client
         .command::<CreateTable>(&account, mutation(), Json(spec))

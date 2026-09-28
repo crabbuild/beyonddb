@@ -164,6 +164,7 @@ async fn coordinator_history_outgrows_residency_and_released_read_recovers() {
                 deletion_protection_enabled: false,
                 initial_tags: vec![],
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await

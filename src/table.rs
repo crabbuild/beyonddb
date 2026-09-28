@@ -69,6 +69,8 @@ pub struct TableSpec {
     pub initial_tags: Vec<Tag>,
     /// Canonical table ARN required when initial tags are supplied.
     pub resource_arn: Option<String>,
+    /// Optional stream generation installed with this table.
+    pub stream: Option<crate::stream_journal::StreamConfig>,
 }
 
 impl TableSpec {
@@ -87,6 +89,7 @@ impl TableSpec {
             && self.billing_mode == record.billing_mode
             && self.provisioned_throughput == record.provisioned_throughput
             && self.deletion_protection_enabled == record.deletion_protection_enabled
+            && self.stream == record.stream
     }
 }
 
@@ -132,6 +135,8 @@ pub struct TableRecord {
     pub deletion_protection_enabled: bool,
     /// Logical time when the current on-demand mode started.
     pub pay_per_request_since_ms: Option<i64>,
+    /// Stream policy copied into each data Cell at installation.
+    pub stream: Option<crate::stream_journal::StreamConfig>,
 }
 
 /// Create one table and its key contract atomically.
@@ -203,6 +208,7 @@ impl Command for CreateTable {
             deletion_protection_enabled: input.deletion_protection_enabled,
             pay_per_request_since_ms: (input.billing_mode == BillingMode::PayPerRequest)
                 .then_some(context.now_ms()),
+            stream: input.stream,
         };
         context.sql(&statement(
             "INSERT INTO ddb_tables (table_name, table_id, record) VALUES (?1, ?2, ?3)",
@@ -380,6 +386,7 @@ impl Command for UpdateTable {
             deletion_protection_enabled: table.deletion_protection_enabled,
             initial_tags: Vec::new(),
             resource_arn: None,
+            stream: table.stream.clone(),
         };
         if !valid_table_spec(&spec) {
             return Ok(CommandResult::Rejected(Json(
@@ -596,6 +603,14 @@ fn table_id(context: &CommandContext<'_, '_>, name: &str) -> String {
 }
 
 fn valid_table_spec(spec: &TableSpec) -> bool {
+    if spec.stream.as_ref().is_some_and(|stream| {
+        stream.region.is_empty()
+            || stream.label.is_empty()
+            || stream.region.len() > 64
+            || stream.label.len() > 128
+    }) {
+        return false;
+    }
     if let TablePlacement::Routed { initial_partitions } = spec.placement
         && (initial_partitions == 0
             || initial_partitions > 256

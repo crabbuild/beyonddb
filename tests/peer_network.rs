@@ -411,6 +411,7 @@ async fn run_signed_sdk_network_recovery() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await
@@ -506,6 +507,7 @@ async fn run_signed_sdk_network_recovery() {
                 deletion_protection_enabled: false,
                 initial_tags: Vec::new(),
                 resource_arn: None,
+                stream: None,
             }),
         )
         .await

@@ -17,6 +17,7 @@ mod secondary_index;
 mod server;
 mod split;
 mod statistics;
+mod stream_journal;
 mod table;
 mod tags;
 mod transaction_coordinator;
@@ -42,6 +43,7 @@ pub use server::{
     measured_node_capacity, shutdown_serving_node,
 };
 pub use split::*;
+pub use stream_journal::StreamConfig;
 pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
@@ -85,11 +87,12 @@ const APPLICATION: ApplicationId = ApplicationId::from_bytes([0x42; 16]);
 pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
-        "{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}",
         cellule_runtime::primitives::capacity::SCHEMA,
         participant::SCHEMA,
         secondary_index::SCHEMA,
         global_index::outbox::SCHEMA,
+        stream_journal::SCHEMA,
         include_str!("schema.sql")
     )
 });
@@ -305,6 +308,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
                 let mut source = blake3::Hasher::new();
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("statistics.rs"));
+                source.update(include_bytes!("stream_journal.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("table/deletion.rs"));
                 source.update(include_bytes!("global_index.rs"));

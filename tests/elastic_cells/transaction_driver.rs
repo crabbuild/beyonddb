@@ -57,6 +57,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         provisioned_throughput: None,
         deletion_protection_enabled: false,
         pay_per_request_since_ms: Some(1000),
+        stream: None,
     };
     let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
     let storage = CellStorage::new(client.clone(), "us-east-1");

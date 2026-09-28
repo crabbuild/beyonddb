@@ -109,6 +109,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
                     deletion_protection_enabled: false,
                     initial_tags: vec![],
                     resource_arn: None,
+                    stream: None,
                 }),
             )
             .await

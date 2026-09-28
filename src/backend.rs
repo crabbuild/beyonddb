@@ -188,6 +188,7 @@ impl TableEngine for CellStorage {
                     &account_id,
                     &name,
                 )),
+                stream: None,
             };
             let submitted = spec.clone();
             let record = match self
