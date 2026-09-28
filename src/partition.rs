@@ -126,6 +126,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("partition.rs"));
                 source.update(include_bytes!("stream_journal.rs"));
+                source.update(include_bytes!("stream_retention.rs"));
                 source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));

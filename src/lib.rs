@@ -18,6 +18,7 @@ mod server;
 mod split;
 mod statistics;
 mod stream_journal;
+mod stream_retention;
 mod table;
 mod tags;
 mod transaction_coordinator;
@@ -44,12 +45,14 @@ pub use server::{
 };
 pub use split::*;
 pub use stream_journal::{
-    HasExpiredAccountStreamRecords, HasExpiredPartitionStreamRecords, ListStreamCatalog,
-    ListStreamCatalogInput, ListStreamCatalogPage, PruneAccountStreamRecords,
-    PrunePartitionStreamRecords, ReadAccountStreamJournal, ReadAccountStreamTail,
-    ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog, StreamCatalogEntry,
-    StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
-    StreamTailOutcome,
+    ListStreamCatalog, ListStreamCatalogInput, ListStreamCatalogPage, ReadAccountStreamJournal,
+    ReadAccountStreamTail, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
+    StreamCatalogEntry, StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome,
+    StreamTailInput, StreamTailOutcome,
+};
+pub use stream_retention::{
+    AdvanceStreamGcShard, HasExpiredAccountStreamRecords, HasExpiredPartitionStreamRecords,
+    PruneAccountStreamRecords, PrunePartitionStreamRecords, ReadStreamGcShard,
 };
 pub use table::*;
 pub use transaction_coordinator::*;
@@ -125,7 +128,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 27] = [
+static COMMANDS: [OperationDescriptor; 28] = [
     operation(1),
     operation(2),
     operation(3),
@@ -172,8 +175,9 @@ static COMMANDS: [OperationDescriptor; 27] = [
     },
     operation(43),
     operation(44),
+    operation(45),
 ];
-static QUERIES: [OperationDescriptor; 30] = [
+static QUERIES: [OperationDescriptor; 31] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -210,6 +214,7 @@ static QUERIES: [OperationDescriptor; 30] = [
     operation(46),
     operation(47),
     operation(48),
+    operation(49),
 ];
 
 /// Statically linked account application.
@@ -325,6 +330,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
                 source.update(include_bytes!("lib.rs"));
                 source.update(include_bytes!("statistics.rs"));
                 source.update(include_bytes!("stream_journal.rs"));
+                source.update(include_bytes!("stream_retention.rs"));
                 source.update(include_bytes!("table.rs"));
                 source.update(include_bytes!("table/deletion.rs"));
                 source.update(include_bytes!("global_index.rs"));
@@ -371,10 +377,12 @@ impl cellule_runtime::registry::CellModule for AccountModule {
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         registry.bind_command::<PruneAccountStreamRecords>()?;
+        registry.bind_command::<AdvanceStreamGcShard>()?;
         registry.bind_command::<statistics::PublishStatistics>()?;
         registry.bind_query::<statistics::ReadAccountStatistics>()?;
         registry.bind_query::<ReadAccountStreamJournal>()?;
         registry.bind_query::<HasExpiredAccountStreamRecords>()?;
+        registry.bind_query::<ReadStreamGcShard>()?;
         registry.bind_query::<ReadAccountStreamTail>()?;
         registry.bind_query::<ReadStreamCatalog>()?;
         registry.bind_query::<ListStreamCatalog>()?;

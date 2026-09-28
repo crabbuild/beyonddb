@@ -1,6 +1,11 @@
 //! DynamoDB Streams storage over account and routed owner Cells.
 
-use cellule_runtime::CellRuntime;
+use crate::{
+    Json, ListStreamCatalog, ListStreamCatalogInput, PartitionState, ReadAccountStreamJournal,
+    ReadAccountStreamTail, ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail,
+    ReadStreamCatalog, StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
+    StreamTailOutcome, data_target,
+};
 use cellule_runtime::identity::{CellTarget, TenantId};
 use extenddb_core::types::{
     DescribeStreamInput, SequenceNumberRange, Shard, StreamDescription, StreamRecord, StreamStatus,
@@ -10,18 +15,8 @@ use extenddb_storage::error::StorageError;
 use extenddb_storage::{
     BoxedFuture, StreamContinuation, StreamEngine, StreamListResult, StreamRecordsResult,
 };
-use futures_util::{StreamExt, stream};
 
-use crate::{
-    DATA_NAMESPACE, HasExpiredAccountStreamRecords, HasExpiredPartitionStreamRecords, Json,
-    ListStreamCatalog, ListStreamCatalogInput, PartitionState, PruneAccountStreamRecords,
-    PrunePartitionStreamRecords, ReadAccountStreamJournal, ReadAccountStreamTail,
-    ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
-    StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput, StreamTailOutcome,
-    data_target,
-};
-
-use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
+use super::{CellStorage, cell_error, target, unsupported};
 
 const FIRST_SEQUENCE: &str = "00000000000000000000001";
 
@@ -117,100 +112,6 @@ impl StreamShard {
 }
 
 impl CellStorage {
-    /// Sweep active routed owner Cells on this node with bounded concurrency.
-    pub async fn sweep_active_partition_stream_records(
-        &self,
-        runtime: &CellRuntime,
-    ) -> Result<u64, StorageError> {
-        let targets = runtime
-            .active_cell_targets()
-            .await
-            .map_err(|error| StorageError::Transient(error.to_string()))?;
-        let mut sweeps = stream::iter(
-            targets
-                .into_iter()
-                .filter(|target| target.namespace() == DATA_NAMESPACE),
-        )
-        .map(|target| async move { self.sweep_partition_stream_records(&target).await })
-        .buffer_unordered(8);
-        let mut total = 0_u64;
-        let mut first_error = None;
-        while let Some(result) = sweeps.next().await {
-            match result {
-                Ok(deleted) => total = total.saturating_add(deleted),
-                Err(error) => {
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        first_error.map_or(Ok(total), Err)
-    }
-
-    /// Reclaim expired history in one active routed owner Cell.
-    pub async fn sweep_partition_stream_records(
-        &self,
-        owner: &CellTarget,
-    ) -> Result<u64, StorageError> {
-        let expired = self
-            .client
-            .query::<HasExpiredPartitionStreamRecords>(owner, None, Json(()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
-        if !expired {
-            return Ok(0);
-        }
-        let mut total = 0;
-        for _ in 0..16 {
-            let deleted = self
-                .client
-                .command::<PrunePartitionStreamRecords>(owner, mutation_identity()?, Json(()))
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
-            total += deleted;
-            if deleted < crate::stream_journal::PRUNE_BATCH as u64 {
-                break;
-            }
-        }
-        Ok(total)
-    }
-
-    /// Reclaim bounded expired account-local stream history, including deleted generations.
-    pub async fn sweep_account_stream_records(
-        &self,
-        account_id: &str,
-    ) -> Result<u64, StorageError> {
-        let account = target(account_id)?;
-        let mut total = 0;
-        let expired = self
-            .client
-            .query::<HasExpiredAccountStreamRecords>(&account, None, Json(()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0;
-        if !expired {
-            return Ok(0);
-        }
-        for _ in 0..16 {
-            let deleted = self
-                .client
-                .command::<PruneAccountStreamRecords>(&account, mutation_identity()?, Json(()))
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
-            total += deleted;
-            if deleted < crate::stream_journal::PRUNE_BATCH as u64 {
-                break;
-            }
-        }
-        Ok(total)
-    }
-
     async fn stream_record(
         &self,
         account_id: &str,
