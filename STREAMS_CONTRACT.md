@@ -1,8 +1,8 @@
 # Streams implementation: closed-shard contract
 
 Status: [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372) is
-open. BeyondDB pins the identical commit on crabbuild's
-[ExtendDB fork branch](https://github.com/crabbuild/extenddb/pull/1).
+open. BeyondDB pins the identical commit merged through crabbuild's
+[ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1).
 The older `extenddb-stream-completion.proposed.patch` records the
 original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
 the upstream PR supersedes it. Focused SQLite and engine tests, all three
@@ -46,8 +46,10 @@ record. Catalog reads and record queries apply a 24-hour visibility cutoff;
 the old stream remains readable after deletion and table name reuse. The
 account Cell test covers this lifecycle. A signed process smoke creates a
 routed table, reads its record, restarts the server hard, and reads the same
-record again. Physical collection of expired catalog and journal rows is still
-needed to bound storage; policy replacement remains unsupported.
+record again. A supervised account Cell command now deletes expired journal
+rows in bounded batches, including those from deleted table generations.
+Collection of routed Cell journals and expired catalog rows remains open;
+policy replacement remains unsupported.
 The TTL worker submits a marked delete to the routed owner Cell. That Cell
 checks its current TTL policy and the item's expiry before committing the
 deletion and stream record together. Its REMOVE record carries the

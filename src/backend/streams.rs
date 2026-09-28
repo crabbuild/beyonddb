@@ -11,13 +11,14 @@ use extenddb_storage::{
 };
 
 use crate::{
-    Json, ListStreamCatalog, ListStreamCatalogInput, PartitionState, ReadAccountStreamJournal,
-    ReadAccountStreamTail, ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail,
-    ReadStreamCatalog, StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
-    StreamTailOutcome, data_target,
+    HasExpiredAccountStreamRecords, Json, ListStreamCatalog, ListStreamCatalogInput,
+    PartitionState, PruneAccountStreamRecords, ReadAccountStreamJournal, ReadAccountStreamTail,
+    ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
+    StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput, StreamTailOutcome,
+    data_target,
 };
 
-use super::{CellStorage, cell_error, target, unsupported};
+use super::{CellStorage, cell_error, mutation_identity, target, unsupported};
 
 const FIRST_SEQUENCE: &str = "00000000000000000000001";
 
@@ -113,6 +114,39 @@ impl StreamShard {
 }
 
 impl CellStorage {
+    /// Reclaim bounded expired account-local stream history, including deleted generations.
+    pub async fn sweep_account_stream_records(
+        &self,
+        account_id: &str,
+    ) -> Result<u64, StorageError> {
+        let account = target(account_id)?;
+        let mut total = 0;
+        let expired = self
+            .client
+            .query::<HasExpiredAccountStreamRecords>(&account, None, Json(()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        if !expired {
+            return Ok(0);
+        }
+        for _ in 0..16 {
+            let deleted = self
+                .client
+                .command::<PruneAccountStreamRecords>(&account, mutation_identity()?, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            total += deleted;
+            if deleted < crate::stream_journal::PRUNE_BATCH as u64 {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
     async fn stream_record(
         &self,
         account_id: &str,

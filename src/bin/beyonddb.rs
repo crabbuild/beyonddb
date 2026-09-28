@@ -421,6 +421,9 @@ async fn serve_ready(
                         if let Err(error) = storage.sweep_account_ttl(account_id).await {
                             tracing::warn!(account_id, %error, "TTL sweep failed");
                         }
+                        if let Err(error) = storage.sweep_account_stream_records(account_id).await {
+                            tracing::warn!(account_id, %error, "account stream retention sweep failed");
+                        }
                     }
                 }
             })?;

@@ -44,7 +44,8 @@ pub use server::{
 };
 pub use split::*;
 pub use stream_journal::{
-    ListStreamCatalog, ListStreamCatalogInput, ListStreamCatalogPage, ReadAccountStreamJournal,
+    HasExpiredAccountStreamRecords, ListStreamCatalog, ListStreamCatalogInput,
+    ListStreamCatalogPage, PruneAccountStreamRecords, ReadAccountStreamJournal,
     ReadAccountStreamTail, ReadPartitionStreamJournal, ReadPartitionStreamTail, ReadStreamCatalog,
     StreamCatalogEntry, StreamCatalogKey, StreamConfig, StreamJournalInput, StreamJournalOutcome,
     StreamTailInput, StreamTailOutcome,
@@ -123,7 +124,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 26] = [
+static COMMANDS: [OperationDescriptor; 27] = [
     operation(1),
     operation(2),
     operation(3),
@@ -169,8 +170,9 @@ static COMMANDS: [OperationDescriptor; 26] = [
         ..participant::phase_operation(34)
     },
     operation(43),
+    operation(44),
 ];
-static QUERIES: [OperationDescriptor; 29] = [
+static QUERIES: [OperationDescriptor; 30] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -206,6 +208,7 @@ static QUERIES: [OperationDescriptor; 29] = [
     operation(45),
     operation(46),
     operation(47),
+    operation(48),
 ];
 
 /// Statically linked account application.
@@ -366,9 +369,11 @@ impl cellule_runtime::registry::CellModule for AccountModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
+        registry.bind_command::<PruneAccountStreamRecords>()?;
         registry.bind_command::<statistics::PublishStatistics>()?;
         registry.bind_query::<statistics::ReadAccountStatistics>()?;
         registry.bind_query::<ReadAccountStreamJournal>()?;
+        registry.bind_query::<HasExpiredAccountStreamRecords>()?;
         registry.bind_query::<ReadAccountStreamTail>()?;
         registry.bind_query::<ReadStreamCatalog>()?;
         registry.bind_query::<ListStreamCatalog>()?;
