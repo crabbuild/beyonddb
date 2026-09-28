@@ -152,9 +152,9 @@ async fn settled_recovery_survives_restart_but_later_begin_is_not_skipped() {
         SessionId::from_bytes([250; 16]),
         &directory.path().join("restored"),
     );
-    let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     provisioner
-        .recover_registered_account(ACCOUNT, account_handle, &client, &storage, &nodes)
+        .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
         .await
         .unwrap();
     for (target, epoch) in &before {

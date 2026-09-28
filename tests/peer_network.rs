@@ -1006,27 +1006,36 @@ async fn run_signed_sdk_network_recovery() {
     )
     .unwrap();
     let replacement_client = replacement_peers.client(replacement_provisioner.clone());
-    // Recovery must start from the failed owner's account, not an earlier move.
+    // Capacity admission can move or retire the account before the data owner
+    // fails. Recovery must still discover its ranges through the current owner.
     let current_account = CellAuthority::new(layout.clone())
         .load(account.cell_id())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        current_account.value().owner.as_ref().unwrap().session,
-        owner_session
-    );
-    let replacement_account = replacement_provisioner
-        .takeover_expired_account("123456789012", &peer_directory)
-        .await
-        .unwrap();
+    match current_account
+        .value()
+        .owner
+        .as_ref()
+        .map(|owner| owner.session)
+    {
+        Some(session) if session == owner_session => {
+            replacement_provisioner
+                .takeover_expired_account("123456789012", &peer_directory)
+                .await
+                .unwrap();
+        }
+        Some(session) if session == remote_session => {}
+        None => {
+            replacement_provisioner
+                .admit_account("123456789012")
+                .await
+                .unwrap();
+        }
+        Some(other) => panic!("unexpected account owner: {other:?}"),
+    }
     replacement_provisioner
-        .recover_registered_partitions(
-            "123456789012",
-            replacement_account.clone(),
-            &replacement_client,
-            &peer_directory,
-        )
+        .recover_registered_partitions("123456789012", &replacement_client, &peer_directory)
         .await
         .unwrap();
     for partition in &other_partitions {
@@ -1043,22 +1052,15 @@ async fn run_signed_sdk_network_recovery() {
             replacement_session
         );
     }
-    let local_account = replacement
-        .application_handle::<Beyonddb>(
-            CellClient::local(application.registry(), replacement_account),
-            account.tenant(),
-            account.application(),
-        )
-        .unwrap();
-    let table = local_account
+    let table = replacement_client
         .query::<DescribeTable>(&account, None, Json("NetworkData".into()))
         .await
         .unwrap()
         .output
         .0
         .unwrap();
-    // Startup inspection precedes the replacement listener. Resolve its local
-    // account directly while retaining peer routing for independently owned leaves.
+    // Startup inspection precedes the replacement listener. Peer routing keeps
+    // metadata available when the account moved before this node recovered.
     let route = crate::single_leaf_route(&replacement_client, &account, &table.id.clone())
         .await
         .unwrap();

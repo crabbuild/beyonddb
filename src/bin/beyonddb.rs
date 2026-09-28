@@ -313,12 +313,10 @@ async fn serve_ready(
         .with_initial_partition_count(config.initial_partitions)?
         .with_peers(peers.clone()),
     );
-    let mut owned_accounts = Vec::with_capacity(config.owned_accounts.len());
     for account_id in &config.owned_accounts {
-        let account = provisioner
-            .recover_owned_account(account_id, &directory)
+        provisioner
+            .recover_configured_account(account_id, &directory)
             .await?;
-        owned_accounts.push((account_id, account));
     }
     for key_id in &config.owned_access_keys {
         provisioner
@@ -377,15 +375,9 @@ async fn serve_ready(
     });
     let recovery: ServerResult<()> = async {
         let storage = CellStorage::new(client.clone(), config.region.clone());
-        for (account_id, account) in owned_accounts {
+        for account_id in &config.owned_accounts {
             provisioner
-                .recover_registered_account(
-                    account_id,
-                    account.clone(),
-                    &client,
-                    &storage,
-                    &directory,
-                )
+                .recover_registered_account(account_id, &client, &storage, &directory)
                 .await?;
             provisioner.install_account_capacity_loop(
                 &tasks,

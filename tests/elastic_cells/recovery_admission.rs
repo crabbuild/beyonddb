@@ -70,7 +70,7 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
         )
         .unwrap(),
     );
-    let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
     let storage =
         CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
@@ -182,13 +182,7 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
     if startup {
         assert!(
             provisioner
-                .recover_registered_account(
-                    ACCOUNT,
-                    account_handle.clone(),
-                    &client,
-                    &storage,
-                    &nodes
-                )
+                .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
                 .await
                 .is_err(),
             "startup cannot report ready after failed participant admission"
@@ -316,7 +310,7 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
     objects.unblock_body_reads_for(&blocked);
     if startup {
         provisioner
-            .recover_registered_account(ACCOUNT, account_handle, &client, &storage, &nodes)
+            .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
             .await
             .unwrap();
     } else {

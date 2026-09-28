@@ -12,6 +12,7 @@ use cellule_runtime::{
 pub(super) struct Remote {
     pub(super) node: CellNode,
     _tasks: Arc<CellNodeTaskGroup>,
+    provisioner: Arc<CellInitialPartitionProvisioner>,
     pub(super) session: SessionId,
     endpoint: String,
     lease: CancellationToken,
@@ -85,6 +86,7 @@ impl Remote {
         Self {
             node: remote,
             _tasks,
+            provisioner,
             session,
             endpoint,
             lease,
@@ -100,6 +102,68 @@ impl Remote {
     pub(super) fn stop_listener(&self) {
         self.server.abort();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_reads_routes_from_live_remote_account() {
+    let fixture = Fixture::new().await;
+    let remote = Remote::new(&fixture).await;
+    let account = fixture
+        .provisioner
+        .admit_account("123456789012")
+        .await
+        .unwrap();
+    account.drain().await.unwrap();
+    remote
+        .provisioner
+        .admit_account("123456789012")
+        .await
+        .unwrap();
+    let target = fixture.data[0].0.cell_id();
+    let expected = fixture.data[0].1.clone();
+    fixture.data[0].0.drain().await.unwrap();
+
+    fixture
+        .provisioner
+        .recover_configured_account("123456789012", &fixture.directory)
+        .await
+        .unwrap();
+    let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
+    fixture
+        .provisioner
+        .recover_registered_account(
+            "123456789012",
+            &fixture.client,
+            &storage,
+            &fixture.directory,
+        )
+        .await
+        .unwrap();
+
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let account_owner = authority.load(account.cell_id()).await.unwrap().unwrap();
+    assert_eq!(
+        account_owner.value().owner.as_ref().unwrap().session,
+        remote.session
+    );
+    let data_owner = authority.load(target).await.unwrap().unwrap();
+    assert_eq!(
+        data_owner.value().owner.as_ref().unwrap().session,
+        fixture.session
+    );
+    let read = fixture
+        .sdk
+        .get_item()
+        .table_name("Residency")
+        .key("id", expected["id"].clone())
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.item.as_ref(), Some(&expected));
+
+    remote.shutdown().await;
+    fixture.shutdown().await;
 }
 
 pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client {
@@ -324,19 +388,14 @@ async fn sdk_initial_base_and_index_ranges_use_remote_owners() {
     remote.server.abort();
     let _ = remote.server.await;
     wait_for_expiry(&fixture, remote.session).await;
-    let account_handle = fixture
+    let _account_handle = fixture
         .provisioner
         .admit_account("123456789012")
         .await
         .unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions(
-            "123456789012",
-            account_handle,
-            &fixture.client,
-            &fixture.directory,
-        )
+        .recover_registered_partitions("123456789012", &fixture.client, &fixture.directory)
         .await
         .unwrap();
     assert_index(&sdk).await;

@@ -146,8 +146,8 @@ elastic-Cell, peer-network, and process tests against pinned Cellule. The former
 Crab monorepo's qualification results are historical. Ordinary `cargo test`
 does not run the ignored process tests.
 
-This server uses an explicit list of locally owned account and credential
-Cells. On startup it recovers configured account and credential Cells, then
+This server uses an explicit list of configured accounts and locally owned
+credential Cells. On startup it recovers configured account and credential Cells, then
 pages base/index directory leaves and the account coordinator registry. Idle or expired owners can
 be recovered at a new peer endpoint; live remote owners remain in place. Every
 takeover still requires node-session fencing and a Cell authority CAS. Recovery
@@ -175,7 +175,7 @@ configures a fixed expiry index in each routed data Cell, backfills old items in
 bounded commands, and conditionally deletes expired items. Each tick processes
 at most one 64-Cell route page per table and 16 tables per account. An owner
 restart restores the settings, sweep and backfill cursors, and index state. The global TTL listing
-trait remains unsupported; the worker lists tables by locally owned account.
+trait remains unsupported; the worker lists tables through each configured account.
 UpdateTimeToLive primes at most one route page and returns while the worker
 reconciles the rest; disabling stops expiry sweeps without dropping the fixed
 data Cell index.

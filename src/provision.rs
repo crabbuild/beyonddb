@@ -169,14 +169,25 @@ impl CellInitialPartitionProvisioner {
     }
 
     /// Admit a configured account or recover its published root after a crash.
-    pub async fn recover_owned_account(
+    /// A live peer keeps its ownership while this node recovers registered work.
+    pub async fn recover_configured_account(
         &self,
         account_id: &str,
         nodes: &NodeDirectory,
-    ) -> Result<CellHandle, StorageError> {
+    ) -> Result<(), StorageError> {
         let target = account_target(account_id).map_err(provision_error)?;
-        self.recover_owned(&target, crate::MODULE, nodes, initialize_account)
+        if CellAuthority::new(self.layout.clone())
+            .load(target.cell_id())
             .await
+            .map_err(provision_error)?
+            .is_none()
+        {
+            self.admit_account(account_id).await?;
+            return Ok(());
+        }
+        self.recover_discovered_owner(&target, crate::MODULE, initialize_account, nodes)
+            .await?;
+        Ok(())
     }
 
     /// Admit a configured credential shard or recover it after a crash.
@@ -327,20 +338,20 @@ impl CellInitialPartitionProvisioner {
 
     /// Recover idle or expired routed ranges for a configured account.
     ///
-    /// The caller selects this node as the account's recovery owner. Live remote
-    /// owners remain in place; local capacity and fenced takeover still gate admission.
+    /// Account metadata may have moved to a live peer. The caller selects this
+    /// node for range recovery; live remote owners remain in place.
     pub async fn recover_registered_partitions(
         &self,
         account_id: &str,
-        account_handle: CellHandle,
         routed_client: &CellClient,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = CellClient::local(self.application.registry(), account_handle);
         let mut after_table = None;
         loop {
-            let page = client
+            // Routing metadata must come from its current owner, or an account
+            // move can strand otherwise recoverable data and index ranges.
+            let page = routed_client
                 .query::<ListTables>(
                     &account,
                     None,
@@ -357,7 +368,7 @@ impl CellInitialPartitionProvisioner {
                 return Err(StorageError::Internal("invalid recovery table page".into()));
             };
             for name in page.names {
-                let Some(table) = client
+                let Some(table) = routed_client
                     .query::<DescribeTable>(&account, None, Json(name))
                     .await
                     .map_err(cell_error)?

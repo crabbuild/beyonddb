@@ -66,7 +66,7 @@ async fn configured_recovery_resumes_claimed_roots_before_sdk_requests() {
         interrupt_acquisition(&fixture, handle).await;
     }
     provisioner
-        .recover_owned_account(ACCOUNT, &fixture.directory)
+        .recover_configured_account(ACCOUNT, &fixture.directory)
         .await
         .unwrap();
     provisioner
@@ -185,10 +185,10 @@ async fn discovered_recovery_resumes_claimed_ranges_before_sdk_requests() {
         targets.push(target);
     }
     assert_eq!(targets.len(), 4);
-    let account = fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account = fixture.provisioner.admit_account(ACCOUNT).await.unwrap();
     fixture
         .provisioner
-        .recover_registered_partitions(ACCOUNT, account, &fixture.client, &fixture.directory)
+        .recover_registered_partitions(ACCOUNT, &fixture.client, &fixture.directory)
         .await
         .unwrap();
     // A local-only client cannot rescue a skipped activation through SDK routing.

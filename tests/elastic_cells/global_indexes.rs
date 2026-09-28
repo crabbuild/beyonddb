@@ -297,9 +297,9 @@ async fn journal_recovers_partial_projection_and_fences_delayed_images() {
         SessionId::from_bytes([90; 16]),
         &directory.path().join("second"),
     );
-    let account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
+    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
     provisioner
-        .recover_registered_partitions(ACCOUNT, account_handle, &client, &nodes)
+        .recover_registered_partitions(ACCOUNT, &client, &nodes)
         .await
         .unwrap();
     assert!(
