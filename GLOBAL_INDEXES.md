@@ -144,10 +144,10 @@ pages to restore read availability even without pending writes. Each iteration
 visits at most one page (64 ranges), with four range attempts in flight. It
 advances before admission so a failed range is revisited on a later sweep.
 Sweep cursors are transient; projection versions and journal contents are durable.
-The projection and statistics sweeps list only live table generations. Deleting
-generations remain visible to public listing and deletion recovery, but their
-records are unavailable to projection. Skipping them lets later live tables
-receive journal replay even when retired directories take time to drain.
+The projection and statistics sweeps list only live table generations. Public
+listing and deletion recovery include generations while deletion is pending,
+but their records are unavailable to projection. Skipping them lets later live
+tables receive journal replay even when retired directories take time to drain.
 
 Serving discovery uses the existing provisioner's fenced owner recovery for
 both sources and index ranges. Idle Cells restore from published roots. Live
