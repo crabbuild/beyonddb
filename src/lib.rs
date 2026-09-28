@@ -43,7 +43,10 @@ pub use server::{
     measured_node_capacity, shutdown_serving_node,
 };
 pub use split::*;
-pub use stream_journal::StreamConfig;
+pub use stream_journal::{
+    ReadAccountStreamJournal, ReadPartitionStreamJournal, StreamConfig, StreamJournalInput,
+    StreamJournalOutcome,
+};
 pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
@@ -165,7 +168,7 @@ static COMMANDS: [OperationDescriptor; 26] = [
     },
     operation(43),
 ];
-static QUERIES: [OperationDescriptor; 25] = [
+static QUERIES: [OperationDescriptor; 26] = [
     operation(4),
     operation(7),
     operation(8),
@@ -194,6 +197,7 @@ static QUERIES: [OperationDescriptor; 25] = [
     participant::phase_operation(39),
     operation(42),
     operation(43),
+    operation(44),
 ];
 
 /// Statically linked account application.
@@ -356,6 +360,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
     fn register(self, registry: &mut RegistryBuilder) -> Result<()> {
         registry.bind_command::<statistics::PublishStatistics>()?;
         registry.bind_query::<statistics::ReadAccountStatistics>()?;
+        registry.bind_query::<ReadAccountStreamJournal>()?;
         registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;

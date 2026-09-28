@@ -96,11 +96,12 @@ use beyonddb::{
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     PublishedNodeLease, PutItem, PutItemInput, ReadCoordinatorParticipant,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionState, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadTransactionInput, ReadTtlSchedule, ReadTtlSweep,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare, RecordParticipantResolution,
-    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    RoutePageInput, RoutePageOutcome, SealPartition, SealPartitionOutcome, SplitPlan, StreamConfig,
+    ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionTransaction,
+    ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadTransactionInput,
+    ReadTtlSchedule, ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
+    RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
+    ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
+    SealPartitionOutcome, SplitPlan, StreamConfig, StreamJournalInput, StreamJournalOutcome,
     TableRoute, TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput,
     account_target, build_http_state, coordinator_target, credential_target, data_key_hash,
     data_target, initialize_account, initialize_coordinator, initialize_partition,
@@ -3552,6 +3553,22 @@ async fn data_ranges_use_independent_cells_and_survive_owner_restart() {
     assert_eq!(
         stream_count(&directory.path().join("right.sqlite"), &table.id),
         right_streams + 1
+    );
+    let left_page = client
+        .query::<ReadPartitionStreamJournal>(
+            &left_target,
+            None,
+            Json(StreamJournalInput {
+                table_id: table.id.clone(),
+                label: "2026-09-27T00:00:00.000".into(),
+                after_sequence: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(left_page.output.0, StreamJournalOutcome::Page { records, .. } if i64::try_from(records.len()).unwrap() == left_streams + 1)
     );
     let second_left_key = key_in_range(&table.id, &table.key_schema, true, 100);
     client

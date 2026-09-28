@@ -480,8 +480,9 @@ The closed-shard completion contract and full Streams implementation boundaries
 are in [STREAMS_CONTRACT.md](STREAMS_CONTRACT.md). The contract is under review
 in ExtendDB PR #371; this implementation branch temporarily pins that commit.
 The native Cell write path now journals item changes atomically for an
-installed stream policy. Public stream creation, discovery, reads, retention,
-and signed SDK qualification remain unsupported.
+installed stream policy and exposes a bounded internal read query. Public
+stream creation, discovery, reads, retention, and signed SDK qualification
+remain unsupported.
 
 ## API coverage boundary
 

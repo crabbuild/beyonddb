@@ -5,9 +5,10 @@ use beyonddb::{
     CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionQueryInput,
-    PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadTtlSchedule, ReadTtlSweep,
-    StreamConfig, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
-    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadAccountStreamJournal,
+    ReadTtlSchedule, ReadTtlSweep, StreamConfig, StreamJournalInput, StreamJournalOutcome,
+    TableSpec, TransactWrite, TransactWriteInput, TransactionOperation, TransactionOutcome,
+    UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;
@@ -1062,6 +1063,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             &AttributeValue::N("-2".into())
         ]
     );
+    let committed_stream_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
+            [&book_table_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     handle.drain().await.unwrap();
     host.shutdown().await.unwrap();
 
@@ -1104,6 +1112,36 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             target.application(),
         )
         .unwrap();
+    let mut after_sequence = None;
+    let mut restored_stream_count = 0;
+    loop {
+        let restored_streams = restored_client
+            .query::<ReadAccountStreamJournal>(
+                &target,
+                None,
+                Json(StreamJournalInput {
+                    table_id: book_table_id.clone(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                    after_sequence,
+                    limit: 1_000,
+                }),
+            )
+            .await
+            .unwrap();
+        let StreamJournalOutcome::Page {
+            records,
+            last_sequence,
+        } = restored_streams.output.0
+        else {
+            panic!("restored stream generation is missing");
+        };
+        restored_stream_count += i64::try_from(records.len()).unwrap();
+        let Some(next) = last_sequence else {
+            break;
+        };
+        after_sequence = Some(next);
+    }
+    assert_eq!(restored_stream_count, committed_stream_count);
     let restored_sweep = restored_client
         .query::<ReadTtlSweep>(&target, None, Json("Books".into()))
         .await

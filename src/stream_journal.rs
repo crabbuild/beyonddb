@@ -1,6 +1,6 @@
 //! Item changes retained in the Cell that committed them.
 
-use cellule_runtime::registry::CommandContext;
+use cellule_runtime::registry::{CommandContext, Query, QueryContext};
 use extenddb_core::types::{
     Item, KeySchemaElement, StreamEventName, StreamRecord, StreamRecordData, StreamViewType,
     extract_key, item_size_bytes,
@@ -8,7 +8,7 @@ use extenddb_core::types::{
 use serde::{Deserialize, Serialize};
 
 use crate::table::statement;
-use crate::{Result, SqlValue};
+use crate::{DATA_MODULE, Error, Json, MODULE, Result, SqlValue};
 
 pub(crate) const SCHEMA: &str = include_str!("stream_journal.sql");
 
@@ -21,6 +21,121 @@ pub struct StreamConfig {
     pub region: String,
     /// Generation label used by stream discovery.
     pub label: String,
+}
+
+/// A bounded read from one stream generation in its owner Cell.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StreamJournalInput {
+    pub table_id: String,
+    pub label: String,
+    pub after_sequence: Option<String>,
+    pub limit: u16,
+}
+
+/// Records available from one Cell, or a stale table/generation identity.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum StreamJournalOutcome {
+    Page {
+        records: Vec<StreamRecord>,
+        last_sequence: Option<String>,
+    },
+    Missing,
+}
+
+/// Read an account-local stream generation after checking its table identity.
+pub struct ReadAccountStreamJournal;
+
+impl Query for ReadAccountStreamJournal {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 44;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<StreamJournalInput>;
+    type Output = Json<StreamJournalOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT record FROM ddb_tables WHERE table_id = ?1",
+            vec![SqlValue::Text(input.table_id.clone())],
+        ))?;
+        let Some(table) = crate::table::decode_table(&rows[0])? else {
+            return Ok(Json(StreamJournalOutcome::Missing));
+        };
+        if table.stream.as_ref().map(|stream| stream.label.as_str()) != Some(input.label.as_str()) {
+            return Ok(Json(StreamJournalOutcome::Missing));
+        }
+        Ok(Json(read(context, input)?))
+    }
+}
+
+/// Read a routed stream generation from the Cell that committed its items.
+pub struct ReadPartitionStreamJournal;
+
+impl Query for ReadPartitionStreamJournal {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 16;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<StreamJournalInput>;
+    type Output = Json<StreamJournalOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT spec FROM ddb_partition WHERE singleton = 1",
+            vec![],
+        ))?;
+        let Some(spec) = crate::partition::decode_spec(&rows[0])? else {
+            return Ok(Json(StreamJournalOutcome::Missing));
+        };
+        if spec.table.id != input.table_id
+            || spec
+                .table
+                .stream
+                .as_ref()
+                .map(|stream| stream.label.as_str())
+                != Some(input.label.as_str())
+        {
+            return Ok(Json(StreamJournalOutcome::Missing));
+        }
+        Ok(Json(read(context, input)?))
+    }
+}
+
+fn read(context: &mut QueryContext<'_>, input: StreamJournalInput) -> Result<StreamJournalOutcome> {
+    if input.limit == 0 || input.limit > 1_000 {
+        return Err(Error::Command("stream record limit is outside 1..=1000"));
+    }
+    let mut cursor = input.after_sequence.unwrap_or_default();
+    let mut records = Vec::new();
+    let mut bytes = 0;
+    while records.len() < usize::from(input.limit) {
+        let rows = context.sql(&statement(
+            "SELECT sequence_number, record FROM ddb_stream_records WHERE table_id = ?1 AND stream_label = ?2 AND sequence_number > ?3 ORDER BY sequence_number LIMIT 1",
+            vec![
+                SqlValue::Text(input.table_id.clone()),
+                SqlValue::Text(input.label.clone()),
+                SqlValue::Text(cursor.clone()),
+            ],
+        ))?;
+        let Some([SqlValue::Text(sequence), SqlValue::Blob(record)]) =
+            rows[0].rows.first().map(Vec::as_slice)
+        else {
+            break;
+        };
+        // Keep the serialized Cell response below its 4 MiB operation limit.
+        if bytes + record.len() > 2 * 1024 * 1024 {
+            if records.is_empty() {
+                return Err(Error::Command("stream record exceeds page budget"));
+            }
+            break;
+        }
+        bytes += record.len();
+        cursor = sequence.clone();
+        records.push(serde_json::from_slice(record)?);
+    }
+    let last_sequence = (!records.is_empty()).then_some(cursor);
+    Ok(StreamJournalOutcome::Page {
+        records,
+        last_sequence,
+    })
 }
 
 pub(crate) fn append(

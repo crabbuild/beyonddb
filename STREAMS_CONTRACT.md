@@ -21,12 +21,18 @@ command sequence plus operation ordinal gives a stable record position.
 Equal before and after images, and deletions of absent items, emit no record.
 Split import uses the item write helper without invoking the journal, so an
 imported copy does not appear as a new mutation.
+Native account and partition queries read that journal in sequence order with
+a 2 MiB response budget and an exclusive sequence cursor. The account test
+follows multiple pages after owner restoration; the routed test reads its owner
+Cell and confirms imported children have no journal records.
 
 This slice is exercised by the native account Cell test for insert, replay,
 equal-image Put, deletion, transaction commit, and rejection. It does not yet
 expose `CreateTable(StreamSpecification)`: the adapter still rejects that
 request, and the ExtendDB Streams read methods remain unsupported. A native
 stream policy can be installed only by the direct Cell command during tests.
+The current native read checks the installed table policy, so it cannot yet
+serve a retained generation after table deletion or policy replacement.
 The new SQL table changes the unreleased version-1 schema digest; no tagged
 BeyondDB release or upgrade contract exists yet.
 
