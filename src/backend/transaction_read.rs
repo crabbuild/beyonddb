@@ -7,11 +7,12 @@ use futures_util::{StreamExt, stream};
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     BeginReadResultRelease, CoordinatorDecision, CoordinatorParticipantTarget,
-    CoordinatorPhaseInput, CoordinatorPhaseOutcome, GetItemInput, Json,
-    ReadAccountTransactionResult, ReadCoordinatorParticipantInput, ReadPartitionTransactionResult,
-    ReadTransactionInput, ReadTransactionResultInput, RecordReadResultRelease,
-    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, TransactionFailure,
-    TransactionOperation, TransactionReadResult, account_target, coordinator_target, data_target,
+    CoordinatorPhaseOutcome, GetItemInput, Json, ReadAccountTransactionResult,
+    ReadCoordinatorParticipantInput, ReadPartitionTransactionResult, ReadResultRelease,
+    ReadTransactionInput, ReadTransactionResultInput, RecordReadResultReleases,
+    RecordReadResultReleasesInput, ReleaseAccountTransactionReads,
+    ReleasePartitionTransactionReads, TransactionFailure, TransactionOperation,
+    TransactionReadResult, account_target, coordinator_target, data_target,
 };
 
 #[derive(Clone)]
@@ -186,7 +187,6 @@ impl CellStorage {
         let cleanup = stream::iter(participant_targets.into_iter().map(|(position, target)| {
             let coordinator = coordinator.clone();
             let identity = identity.clone();
-            let account_id = account_id.to_owned();
             async move {
                 let participant_cell = match &target {
                     ReadTarget::Account(target) | ReadTarget::Data(target) => {
@@ -226,38 +226,40 @@ impl CellStorage {
                         "participant rejected read result release".into(),
                     ));
                 }
-                let recorded = self
-                    .client
-                    .command::<RecordReadResultRelease>(
-                        &coordinator,
-                        mutation_identity()?,
-                        Json(CoordinatorPhaseInput {
-                            account_id,
-                            transaction_id: identity.transaction_id,
-                            routing_key: identity.routing_key,
-                            position,
-                            participant_cell,
-                            sequence: released.receipt.commit_sequence,
-                        }),
-                    )
-                    .await
-                    .map_err(cell_error)?;
-                if !matches!(
-                    recorded.output.0,
-                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                ) {
-                    return Err(StorageError::Internal(
-                        "coordinator rejected read result release".into(),
-                    ));
-                }
-                Ok::<_, StorageError>(())
+                Ok::<_, StorageError>(ReadResultRelease {
+                    position,
+                    participant_cell,
+                    sequence: released.receipt.commit_sequence,
+                })
             }
         }))
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
-        for result in cleanup {
-            result?;
+        let releases = cleanup.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let recorded = self
+            .client
+            .command::<RecordReadResultReleases>(
+                &coordinator,
+                mutation_identity()?,
+                Json(RecordReadResultReleasesInput {
+                    account_id: account_id.to_owned(),
+                    transaction_id: identity.transaction_id,
+                    routing_key: identity.routing_key,
+                    releases,
+                }),
+            )
+            .await
+            .map_err(cell_error)?;
+        if recorded.output.0.iter().any(|outcome| {
+            !matches!(
+                outcome,
+                CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+            )
+        }) {
+            return Err(StorageError::Internal(
+                "coordinator rejected read result release".into(),
+            ));
         }
         validate_read_size(items)
     }

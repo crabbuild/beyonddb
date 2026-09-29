@@ -520,6 +520,28 @@ impl Command for TransactWrite {
     }
 }
 
+/// Account-local transactional writes that do not return condition-failure images.
+pub struct TransactWriteNoReturn;
+
+impl Command for TransactWriteNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 53;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactWriteInput>;
+    type Output = Json<TransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let outcome = transaction::write_without_old_images(context, input.operations)?;
+        if outcome != TransactionOutcome::Applied {
+            return Ok(CommandResult::Rejected(Json(outcome)));
+        }
+        Ok(CommandResult::Success(Json(TransactionOutcome::Applied)))
+    }
+}
+
 pub(crate) mod transaction;
 pub use transaction::{
     PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,

@@ -63,36 +63,59 @@ impl Command for PartitionTransactWrite {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(spec) = super::indexes::command_spec(context)? else {
-            return Ok(rejected(PartitionTransactWriteOutcome::NotInstalled));
-        };
-        if spec.table.id != input.table_id {
-            return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
-        }
-        if spec.epoch != input.epoch {
-            return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
-        }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => return Ok(rejected(PartitionTransactWriteOutcome::Sealed)),
-            AccessState::Importing => return Ok(rejected(PartitionTransactWriteOutcome::NotReady)),
-        }
-        if input.operations.is_empty() || input.operations.len() > 100 {
-            return Ok(validation(
-                0,
-                "transaction operation count is outside 1..=100",
-            ));
-        }
-
-        let staged = match stage_operations(context, &spec, input.operations)? {
-            Ok(staged) => staged,
-            Err(reason) => return Ok(rejected(reason.single_outcome())),
-        };
-        apply_staged(context, &spec.table, spec.epoch, staged)?;
-        Ok(CommandResult::Success(Json(
-            PartitionTransactWriteOutcome::Applied,
-        )))
+        execute_write(context, input, false)
     }
+}
+
+/// Partition-local transactional writes that do not return condition-failure images.
+pub struct PartitionTransactWriteNoReturn;
+
+impl Command for PartitionTransactWriteNoReturn {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 24;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PartitionTransactWriteInput>;
+    type Output = Json<PartitionTransactWriteOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_write(context, input, true)
+    }
+}
+
+fn execute_write(
+    context: &mut CommandContext<'_, '_>,
+    input: PartitionTransactWriteInput,
+    strip_old_images: bool,
+) -> Result<CommandResult<Json<PartitionTransactWriteOutcome>>> {
+    let Some(spec) = super::indexes::command_spec(context)? else {
+        return Ok(rejected(PartitionTransactWriteOutcome::NotInstalled));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(rejected(PartitionTransactWriteOutcome::StaleRoute));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => return Ok(rejected(PartitionTransactWriteOutcome::Sealed)),
+        AccessState::Importing => return Ok(rejected(PartitionTransactWriteOutcome::NotReady)),
+    }
+    if input.operations.is_empty() || input.operations.len() > 100 {
+        return Ok(validation(
+            0,
+            "transaction operation count is outside 1..=100",
+        ));
+    }
+
+    let staged = match stage_operations(context, &spec, input.operations)? {
+        Ok(staged) => staged,
+        Err(reason) => return Ok(rejected(reason.single_outcome(strip_old_images))),
+    };
+    apply_staged(context, &spec.table, spec.epoch, staged)?;
+    Ok(CommandResult::Success(Json(
+        PartitionTransactWriteOutcome::Applied,
+    )))
 }
 
 /// Result of an atomic read batch confined to one data Cell.
@@ -214,13 +237,18 @@ enum StageError {
 }
 
 impl StageError {
-    fn single_outcome(self) -> PartitionTransactWriteOutcome {
+    fn single_outcome(self, strip_old_images: bool) -> PartitionTransactWriteOutcome {
         match self {
             Self::StaleRoute => PartitionTransactWriteOutcome::StaleRoute,
             Self::WrongPartition => PartitionTransactWriteOutcome::WrongPartition,
-            Self::Rejected { index, reason } => {
-                PartitionTransactWriteOutcome::Rejected { index, reason }
-            }
+            Self::Rejected { index, reason } => PartitionTransactWriteOutcome::Rejected {
+                index,
+                reason: if strip_old_images {
+                    without_old_image(reason)
+                } else {
+                    reason
+                },
+            },
         }
     }
 
@@ -232,6 +260,13 @@ impl StageError {
                 PrepareTransactionOutcome::Rejected { index, reason }
             }
         }
+    }
+}
+
+fn without_old_image(reason: TransactionFailure) -> TransactionFailure {
+    match reason {
+        TransactionFailure::ConditionFailed(_) => TransactionFailure::ConditionFailed(None),
+        reason => reason,
     }
 }
 

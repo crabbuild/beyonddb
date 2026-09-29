@@ -185,6 +185,26 @@ pub(super) fn write(
     Ok(TransactionOutcome::Applied)
 }
 
+pub(super) fn write_without_old_images(
+    context: &mut CommandContext<'_, '_>,
+    operations: Vec<TransactionOperation>,
+) -> Result<TransactionOutcome> {
+    Ok(match write(context, operations)? {
+        TransactionOutcome::Applied => TransactionOutcome::Applied,
+        TransactionOutcome::Rejected { index, reason } => TransactionOutcome::Rejected {
+            index,
+            reason: without_old_image(reason),
+        },
+    })
+}
+
+pub(super) fn without_old_image(reason: TransactionFailure) -> TransactionFailure {
+    match reason {
+        TransactionFailure::ConditionFailed(_) => TransactionFailure::ConditionFailed(None),
+        reason => reason,
+    }
+}
+
 /// Result of an atomic read batch confined to one account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransactionReadOutcome {

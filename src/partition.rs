@@ -53,7 +53,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 23] = [
+static COMMANDS: [OperationDescriptor; 24] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -83,6 +83,7 @@ static COMMANDS: [OperationDescriptor; 23] = [
     no_return_operation(21),
     no_return_operation(22),
     operation(23),
+    crate::no_return_transaction_operation(24),
 ];
 static QUERIES: [OperationDescriptor; 17] = [
     operation(1),
@@ -196,6 +197,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<ActivateImportedPartition>()?;
         registry.bind_command::<OpenPartition>()?;
         registry.bind_command::<PartitionTransactWrite>()?;
+        registry.bind_command::<PartitionTransactWriteNoReturn>()?;
         registry.bind_command::<PartitionTransactRead>()?;
         registry.bind_command::<ConfigurePartitionTtl>()?;
         registry.bind_command::<BackfillPartitionTtl>()?;

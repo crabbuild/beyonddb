@@ -33,12 +33,13 @@ use crate::{
     PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
     PartitionPutNoReturn, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
     PartitionQueryOutcome, PartitionTransactRead, PartitionTransactReadOutcome,
-    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn, PartitionUpdateOutcome,
-    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
-    SortComparison, SortPredicate, TransactRead, TransactWrite, TransactWriteInput,
-    TransactionFailure, TransactionOperation, TransactionOutcome, TransactionReadOutcome,
-    UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
+    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
+    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
+    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
+    ScanItemsOutcome, SortComparison, SortPredicate, TransactRead, TransactWrite,
+    TransactWriteInput, TransactWriteNoReturn, TransactionFailure, TransactionOperation,
+    TransactionOutcome, TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn,
+    UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -1084,16 +1085,27 @@ impl CellStorage {
         match participant.target {
             crate::CoordinatorParticipantTarget::Account => {
                 let target = target(account_id)?;
-                let result = self
-                    .client
-                    .command::<TransactWrite>(
-                        &target,
-                        mutation_identity()?,
-                        Json(TransactWriteInput {
-                            operations: participant_operations,
-                        }),
-                    )
-                    .await;
+                let result = if return_old_on_failure.iter().all(|return_old| !return_old) {
+                    self.client
+                        .command::<TransactWriteNoReturn>(
+                            &target,
+                            mutation_identity()?,
+                            Json(TransactWriteInput {
+                                operations: participant_operations.clone(),
+                            }),
+                        )
+                        .await
+                } else {
+                    self.client
+                        .command::<TransactWrite>(
+                            &target,
+                            mutation_identity()?,
+                            Json(TransactWriteInput {
+                                operations: participant_operations,
+                            }),
+                        )
+                        .await
+                };
                 match result {
                     Ok(committed) => match committed.output.0 {
                         TransactionOutcome::Applied => Ok(true),
@@ -1119,18 +1131,31 @@ impl CellStorage {
             } => {
                 let target = crate::data_target(account_id, &table_id, &partition_id)
                     .map_err(|error| StorageError::Internal(error.to_string()))?;
-                let result = self
-                    .client
-                    .command::<PartitionTransactWrite>(
-                        &target,
-                        mutation_identity()?,
-                        Json(PartitionTransactWriteInput {
-                            table_id,
-                            epoch,
-                            operations: participant_operations,
-                        }),
-                    )
-                    .await;
+                let result = if return_old_on_failure.iter().all(|return_old| !return_old) {
+                    self.client
+                        .command::<PartitionTransactWriteNoReturn>(
+                            &target,
+                            mutation_identity()?,
+                            Json(PartitionTransactWriteInput {
+                                table_id,
+                                epoch,
+                                operations: participant_operations.clone(),
+                            }),
+                        )
+                        .await
+                } else {
+                    self.client
+                        .command::<PartitionTransactWrite>(
+                            &target,
+                            mutation_identity()?,
+                            Json(PartitionTransactWriteInput {
+                                table_id,
+                                epoch,
+                                operations: participant_operations,
+                            }),
+                        )
+                        .await
+                };
                 match result {
                     Ok(committed) => local_partition_transaction_result(
                         committed.output.0,
