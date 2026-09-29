@@ -379,7 +379,7 @@ pub(super) fn partition_update_rejection(outcome: PartitionUpdateOutcome) -> Sto
         | PartitionUpdateOutcome::Sealed
         | PartitionUpdateOutcome::NotReady
         | PartitionUpdateOutcome::WrongPartition => stale_partition(),
-        PartitionUpdateOutcome::Applied { .. } => {
+        PartitionUpdateOutcome::Applied { .. } | PartitionUpdateOutcome::AppliedNoReturn => {
             StorageError::Internal("unexpected rejected partition update".into())
         }
     }

@@ -80,8 +80,8 @@ static COMMANDS: [OperationDescriptor; 22] = [
     operation(18),
     operation(19),
     operation(20),
-    operation(21),
-    operation(22),
+    no_return_operation(21),
+    no_return_operation(22),
 ];
 static QUERIES: [OperationDescriptor; 17] = [
     operation(1),
@@ -111,6 +111,17 @@ const fn operation(id: u32) -> OperationDescriptor {
         schema_max: 1,
         input_limit: OPERATION_BYTES,
         output_limit: OPERATION_BYTES,
+    }
+}
+
+const fn no_return_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 1024 * 1024,
+        output_limit: 64 * 1024,
     }
 }
 
@@ -1233,6 +1244,8 @@ impl PartitionUpdateInput {
 pub enum PartitionUpdateOutcome {
     /// The update committed with both item images.
     Applied { old: Option<Item>, new: Item },
+    /// The update committed without returning either item image.
+    AppliedNoReturn,
     /// No partition contract is installed.
     NotInstalled,
     /// The table ID or data Cell epoch is stale.
@@ -1382,12 +1395,11 @@ fn execute_partition_update(
         Some(&new),
         0,
     )?;
-    Ok(CommandResult::Success(Json(
-        PartitionUpdateOutcome::Applied {
-            old: if return_images { old } else { None },
-            new,
-        },
-    )))
+    Ok(CommandResult::Success(Json(if return_images {
+        PartitionUpdateOutcome::Applied { old, new }
+    } else {
+        PartitionUpdateOutcome::AppliedNoReturn
+    })))
 }
 
 /// Read one item from a routed partition.

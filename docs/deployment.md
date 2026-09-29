@@ -28,8 +28,12 @@ Prepare these resources before starting the server:
 - A 32-byte binary encryption key file. Losing it makes stored access-key
   secrets unreadable. It is shared by nodes in one fleet.
 - A writable scratch directory and enough RAM and disk for the configured
-  Cell and capture budgets. `disk_budget_bytes` and
-  `split_threshold_bytes` must be positive.
+  Cell and capture budgets. `disk_budget_bytes`, `node_retained_bytes`, and
+  `split_threshold_bytes` must be positive. `node_retained_bytes` bounds
+  in-flight Cell command and publication state; it defaults to 1 GiB so a
+  write-heavy node does not hit the runtime mailbox ceiling before durable
+  publication catches up. Lower it on a memory-constrained node or raise it
+  for a larger workload after measuring memory use.
 
 ### Local object-store fixture
 
@@ -121,6 +125,7 @@ Save the next JSON block as `config.json` in the repository root. Replace its ob
   "node_id": "01994f26-5966-7b20-8b58-2fddf198a321",
   "data_dir": "/srv/beyonddb/scratch",
   "disk_budget_bytes": 107374182400,
+  "node_retained_bytes": 1073741824,
   "encryption_key_file": "/etc/beyonddb/encryption.key",
   "region": "us-east-1",
   "peer_bind": "127.0.0.1:9001",

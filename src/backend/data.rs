@@ -95,6 +95,7 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             let key = extract_key(&item, &key_info.base_key_schema);
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let no_return = !return_old && condition.is_none();
                 let input = Json(PartitionPutInput {
                     table_id: key_info.table_id.clone(),
                     epoch,
@@ -122,7 +123,7 @@ impl DataEngine for CellStorage {
                         }
                         Err(error) => return Err(cell_error(error)),
                     }
-                } else {
+                } else if no_return {
                     match self
                         .client
                         .command::<PartitionPutNoReturn>(&partition, mutation_identity()?, input)
@@ -143,10 +144,32 @@ impl DataEngine for CellStorage {
                         }
                         Err(error) => return Err(cell_error(error)),
                     }
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionPut>(&partition, mutation_identity()?, input)
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionPutOutcome::Applied(_) => None,
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition put result".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_put_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
                 };
                 return Ok(if return_old { old } else { None });
             }
             let target = target(&key_info.account_id)?;
+            let no_return = !return_old && condition.is_none();
             let input = PutItemInput {
                 table_name: key_info.table_name.clone(),
                 table_id: key_info.table_id.clone(),
@@ -172,10 +195,29 @@ impl DataEngine for CellStorage {
                     }
                     Err(error) => return Err(cell_error(error)),
                 }
-            } else {
+            } else if no_return {
                 match self
                     .client
                     .command::<PutItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(_) => None,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            } else {
+                match self
+                    .client
+                    .command::<PutItem>(&target, mutation_identity()?, Json(input))
                     .await
                 {
                     Ok(committed) => match committed.output.0 {
@@ -356,6 +398,7 @@ impl DataEngine for CellStorage {
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let no_return = !return_old && !return_new && condition.is_none();
                 let input = PartitionUpdateInput {
                     table_id: key_info.table_id.clone(),
                     epoch,
@@ -384,7 +427,7 @@ impl DataEngine for CellStorage {
                         }
                         Err(error) => return Err(cell_error(error)),
                     }
-                } else {
+                } else if no_return {
                     match self
                         .client
                         .command::<PartitionUpdateNoReturn>(
@@ -395,10 +438,31 @@ impl DataEngine for CellStorage {
                         .await
                     {
                         Ok(committed) => match committed.output.0 {
-                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            PartitionUpdateOutcome::AppliedNoReturn => (None, Item::new()),
                             _ => {
                                 return Err(StorageError::Internal(
                                     "unexpected partition update".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_update_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition update result".into(),
                                 ));
                             }
                         },
@@ -416,6 +480,7 @@ impl DataEngine for CellStorage {
                 ));
             }
             let target = target(&key_info.account_id)?;
+            let no_return = !return_old && !return_new && condition.is_none();
             let input = UpdateItemInput {
                 table_name: key_info.table_name.clone(),
                 table_id: key_info.table_id.clone(),
@@ -442,10 +507,29 @@ impl DataEngine for CellStorage {
                     }
                     Err(error) => return Err(cell_error(error)),
                 }
-            } else {
+            } else if no_return {
                 match self
                     .client
                     .command::<UpdateItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::AppliedNoReturn => (None, Item::new()),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            } else {
+                match self
+                    .client
+                    .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
                     .await
                 {
                     Ok(committed) => match committed.output.0 {
@@ -1020,7 +1104,7 @@ fn update_rejection(outcome: UpdateItemOutcome, table_name: &str) -> StorageErro
         }
         UpdateItemOutcome::ConditionFailed(old) => StorageError::ConditionFailed(old),
         UpdateItemOutcome::InvalidExpression(message) => StorageError::Validation(message),
-        UpdateItemOutcome::Applied { .. } => {
+        UpdateItemOutcome::Applied { .. } | UpdateItemOutcome::AppliedNoReturn => {
             StorageError::Internal("unexpected rejected update result".into())
         }
     }

@@ -231,6 +231,8 @@ pub enum UpdateItemOutcome {
     Conflict,
     /// The update committed with both item images.
     Applied { old: Option<Item>, new: Item },
+    /// The update committed without returning either item image.
+    AppliedNoReturn,
     /// The table does not exist.
     TableNotFound,
     /// The key or resulting item violates the table contract.
@@ -343,9 +345,10 @@ fn execute_update_item(
         Some(&new),
         0,
     )?;
-    Ok(CommandResult::Success(Json(UpdateItemOutcome::Applied {
-        old: if return_images { old } else { None },
-        new,
+    Ok(CommandResult::Success(Json(if return_images {
+        UpdateItemOutcome::Applied { old, new }
+    } else {
+        UpdateItemOutcome::AppliedNoReturn
     })))
 }
 

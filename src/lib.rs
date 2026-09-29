@@ -107,6 +107,11 @@ static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     )
 });
 const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
+// Unconditional no-return mutations do not carry item images in their result.
+// Keep their mailbox reservation small so concurrent writes are not limited by
+// the generic 4 MiB command envelope.
+const NO_RETURN_INPUT_BYTES: u32 = 1024 * 1024;
+const NO_RETURN_OUTPUT_BYTES: u32 = 64 * 1024;
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NAMESPACE,
@@ -125,6 +130,17 @@ const fn operation(id: u32) -> OperationDescriptor {
         schema_max: 1,
         input_limit: OPERATION_BYTES,
         output_limit: OPERATION_BYTES,
+    }
+}
+
+const fn no_return_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: NO_RETURN_INPUT_BYTES,
+        output_limit: NO_RETURN_OUTPUT_BYTES,
     }
 }
 
@@ -176,8 +192,8 @@ static COMMANDS: [OperationDescriptor; 30] = [
     operation(43),
     operation(44),
     operation(45),
-    operation(50),
-    operation(51),
+    no_return_operation(50),
+    no_return_operation(51),
 ];
 static QUERIES: [OperationDescriptor; 31] = [
     operation(4),
