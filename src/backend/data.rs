@@ -28,18 +28,19 @@ use super::{CellStorage, cell_error, mutation_identity, target};
 use crate::TransactionToken;
 use crate::expression_wire::{WireCondition, WireUpdate};
 use crate::{
-    ConditionCheckInput, DeleteItem, DeleteItemInput, GetItem, GetItemInput, GetItemOutcome,
-    ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
-    PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
-    PartitionPutNoReturn, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
-    PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
-    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
-    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
-    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
-    ScanItemsOutcome, SortComparison, SortPredicate, TransactReadQuery, TransactWrite,
-    TransactWriteInput, TransactWriteNoReturn, TransactionFailure, TransactionOperation,
-    TransactionOutcome, TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn,
-    UpdateItemOutcome, data_key_hash,
+    ConditionCheckInput, DeleteItem, DeleteItemInput, DeleteItemNoReturn, GetItem, GetItemInput,
+    GetItemOutcome, ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput,
+    PartitionDeleteNoReturn, PartitionDeleteOutcome, PartitionGet, PartitionGetInput,
+    PartitionGetOutcome, PartitionPut, PartitionPutInput, PartitionPutNoReturn,
+    PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
+    PartitionTransactReadOutcome, PartitionTransactReadQuery, PartitionTransactWrite,
+    PartitionTransactWriteInput, PartitionTransactWriteNoReturn, PartitionTransactWriteOutcome,
+    PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn, PartitionUpdateOutcome,
+    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
+    SortComparison, SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput,
+    TransactWriteNoReturn, TransactionFailure, TransactionOperation, TransactionOutcome,
+    TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome,
+    data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -418,10 +419,16 @@ impl DataEngine for CellStorage {
                     condition,
                     ttl: false,
                 });
-                let outcome = self
-                    .client
-                    .command::<PartitionDelete>(&partition, mutation_identity()?, input)
-                    .await;
+                let no_return = !return_old && input.0.condition.is_none();
+                let outcome = if no_return {
+                    self.client
+                        .command::<PartitionDeleteNoReturn>(&partition, mutation_identity()?, input)
+                        .await
+                } else {
+                    self.client
+                        .command::<PartitionDelete>(&partition, mutation_identity()?, input)
+                        .await
+                };
                 let old = match outcome {
                     Ok(committed) => match committed.output.0 {
                         PartitionDeleteOutcome::Applied(old) => old,
@@ -447,11 +454,17 @@ impl DataEngine for CellStorage {
                 key,
                 condition,
             };
-            let old = match self
-                .client
-                .command::<DeleteItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
+            let no_return = !return_old && input.condition.is_none();
+            let outcome = if no_return {
+                self.client
+                    .command::<DeleteItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+            } else {
+                self.client
+                    .command::<DeleteItem>(&target, mutation_identity()?, Json(input))
+                    .await
+            };
+            let old = match outcome {
                 Ok(committed) => match committed.output.0 {
                     ItemMutationOutcome::Applied(old) => old,
                     _ => {

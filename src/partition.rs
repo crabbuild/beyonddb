@@ -53,7 +53,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 24] = [
+static COMMANDS: [OperationDescriptor; 25] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -84,6 +84,10 @@ static COMMANDS: [OperationDescriptor; 24] = [
     no_return_operation(22),
     operation(23),
     crate::no_return_transaction_operation(24),
+    OperationDescriptor {
+        codec_version: 2,
+        ..no_return_operation(52)
+    },
 ];
 static QUERIES: [OperationDescriptor; 18] = [
     operation(1),
@@ -191,6 +195,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionPut>()?;
         registry.bind_command::<PartitionPutNoReturn>()?;
         registry.bind_command::<PartitionDelete>()?;
+        registry.bind_command::<PartitionDeleteNoReturn>()?;
         registry.bind_command::<PartitionUpdate>()?;
         registry.bind_command::<PartitionUpdateNoReturn>()?;
         registry.bind_command::<SealPartition>()?;
@@ -1123,6 +1128,24 @@ impl Command for PartitionDelete {
     ) -> Result<CommandResult<Self::Output>> {
         let return_old = input.return_old;
         execute_partition_delete(context, input, return_old)
+    }
+}
+
+/// Delete a partition item without reserving an item-sized result envelope.
+pub struct PartitionDeleteNoReturn;
+
+impl Command for PartitionDeleteNoReturn {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 52;
+    const CODEC_VERSION: u32 = 2;
+    type Input = Json<PartitionDeleteInput>;
+    type Output = Json<PartitionDeleteOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_partition_delete(context, input, false)
     }
 }
 

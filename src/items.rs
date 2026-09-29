@@ -164,6 +164,24 @@ impl Command for DeleteItem {
     }
 }
 
+/// Delete an item without reserving an item-sized result envelope.
+pub struct DeleteItemNoReturn;
+
+impl Command for DeleteItemNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 55;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<DeleteItemInput>;
+    type Output = Json<ItemMutationOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_delete_item(context, input, false)
+    }
+}
+
 fn execute_delete_item(
     context: &mut CommandContext<'_, '_>,
     input: DeleteItemInput,
