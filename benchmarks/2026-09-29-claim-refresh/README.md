@@ -11,13 +11,15 @@ exact host state or code revision.
 - Mac14,13: 12 logical CPUs, 32 GiB RAM. Other virtual machines and Rust
   builds were active. The one-minute host load average was 16.8 at the start
   of run 1 and 35.1 at the start of run 2, and rose above 30 during testing.
-- A new pinned RustFS container and bucket for each run. Containers were
-  stopped after the tests.
+- A new RustFS container and bucket for each run, pinned to image
+  `ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858`.
+  Containers were stopped after the tests.
 - BeyondDB `af8fab7`, `cargo build --locked --release --bin beyonddb`, four
   initial partitions, `auth_cache_enabled: true`, 12 SQL workers, 128 active
   Cell slots, and a 1 GiB node retained-byte budget.
 - One PAY_PER_REQUEST table with a string `pk`, no indexes or Streams, 64
-  seeded 1 KiB items, signed boto3 requests, and zero SDK retries.
+  seeded items with a 1 KiB `payload` attribute, signed boto3 requests, and
+  zero SDK retries.
 - `scripts/bench.py` used five seconds per API and client count, testing one
   then eight clients. Batch and transaction calls contained two items.
 
