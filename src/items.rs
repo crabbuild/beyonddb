@@ -546,7 +546,7 @@ pub(crate) mod transaction;
 pub use transaction::{
     PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
     ReadAccountTransactionResult, ReleaseAccountTransactionReads, ResolveAccountTransaction,
-    TransactRead, TransactionReadOutcome,
+    TransactRead, TransactReadQuery, TransactionReadOutcome,
 };
 
 mod scan;

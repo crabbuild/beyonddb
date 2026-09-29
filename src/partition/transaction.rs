@@ -3,7 +3,7 @@
 use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, QueryContext};
+use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +196,106 @@ impl Command for PartitionTransactRead {
             PartitionTransactReadOutcome::Applied(images),
         )))
     }
+}
+
+/// Read a transaction batch through Cellule's read-only query path.
+pub struct PartitionTransactReadQuery;
+
+impl Query for PartitionTransactReadQuery {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 19;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PartitionTransactWriteInput>;
+    type Output = Json<PartitionTransactReadOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let rows = context.sql(&statement(
+            "SELECT spec FROM ddb_partition WHERE singleton = 1",
+            vec![],
+        ))?;
+        let Some(spec) = super::decode_spec(&rows[0])? else {
+            return Ok(Json(PartitionTransactReadOutcome::NotInstalled));
+        };
+        if spec.table.id != input.table_id || spec.epoch != input.epoch {
+            return Ok(Json(PartitionTransactReadOutcome::StaleRoute));
+        }
+        match super::query_access(context)? {
+            AccessState::Serving => {}
+            AccessState::Sealed => return Ok(Json(PartitionTransactReadOutcome::Sealed)),
+            AccessState::Importing => return Ok(Json(PartitionTransactReadOutcome::NotReady)),
+        }
+        if input.operations.is_empty() || input.operations.len() > 100 {
+            return Ok(Json(PartitionTransactReadOutcome::Rejected {
+                index: 0,
+                reason: TransactionFailure::Validation(
+                    "transaction operation count is outside 1..=100".into(),
+                ),
+            }));
+        }
+        let images = match query_stage_operations(context, &spec, input.operations)? {
+            Ok(images) => images,
+            Err(error) => {
+                return Ok(Json(match error {
+                    StageError::StaleRoute => PartitionTransactReadOutcome::StaleRoute,
+                    StageError::WrongPartition => PartitionTransactReadOutcome::WrongPartition,
+                    StageError::Rejected { index, reason } => {
+                        PartitionTransactReadOutcome::Rejected { index, reason }
+                    }
+                }));
+            }
+        };
+        Ok(Json(PartitionTransactReadOutcome::Applied(images)))
+    }
+}
+
+fn query_stage_operations(
+    context: &mut QueryContext<'_>,
+    spec: &PartitionSpec,
+    operations: Vec<TransactionOperation>,
+) -> Result<std::result::Result<Vec<Option<Item>>, StageError>> {
+    let mut images = Vec::with_capacity(operations.len());
+    let mut read_bytes = 0;
+    for (index, operation) in operations.into_iter().enumerate() {
+        let TransactionOperation::Read(input) = operation else {
+            return Ok(Err(stage_validation(
+                index,
+                "read-only transaction contains a non-read operation",
+            )));
+        };
+        if input.table_id != spec.table.id {
+            return Ok(Err(StageError::StaleRoute));
+        }
+        if !valid_key(&input.key, &spec.table) {
+            return Ok(Err(stage_validation(index, "item violates table schema")));
+        }
+        let key = item_key(&input.key, &spec.table.key_schema)?;
+        if !spec.contains(data_key_hash(
+            &spec.table.id,
+            &input.key,
+            &spec.table.key_schema,
+        )?) {
+            return Ok(Err(StageError::WrongPartition));
+        }
+        if read_key_conflict(context, &key)?.is_some() {
+            return Ok(Err(StageError::Rejected {
+                index,
+                reason: TransactionFailure::Conflict,
+            }));
+        }
+        let image =
+            crate::item_storage::StoredValue::Partition(&key).read(|batch| context.sql(batch))?;
+        read_bytes += image
+            .as_ref()
+            .map_or(0, extenddb_core::types::item_size_bytes);
+        if read_bytes > 4 * 1024 * 1024 {
+            return Ok(Err(stage_validation(
+                index,
+                "transaction read exceeds 4 MiB",
+            )));
+        }
+        images.push(image);
+    }
+    Ok(Ok(images))
 }
 
 fn rejected_read(

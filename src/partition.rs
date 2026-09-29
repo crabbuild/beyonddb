@@ -85,7 +85,7 @@ static COMMANDS: [OperationDescriptor; 24] = [
     operation(23),
     crate::no_return_transaction_operation(24),
 ];
-static QUERIES: [OperationDescriptor; 17] = [
+static QUERIES: [OperationDescriptor; 18] = [
     operation(1),
     operation(2),
     operation(3),
@@ -103,6 +103,7 @@ static QUERIES: [OperationDescriptor; 17] = [
     operation(16),
     operation(17),
     operation(18),
+    operation(19),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -199,6 +200,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionTransactWrite>()?;
         registry.bind_command::<PartitionTransactWriteNoReturn>()?;
         registry.bind_command::<PartitionTransactRead>()?;
+        registry.bind_query::<PartitionTransactReadQuery>()?;
         registry.bind_command::<ConfigurePartitionTtl>()?;
         registry.bind_command::<BackfillPartitionTtl>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;

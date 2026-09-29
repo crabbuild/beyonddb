@@ -223,7 +223,7 @@ static COMMANDS: [OperationDescriptor; 32] = [
     operation(52),
     no_return_transaction_operation(53),
 ];
-static QUERIES: [OperationDescriptor; 31] = [
+static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -273,6 +273,7 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(47),
     operation(48),
     operation(49),
+    operation(54),
 ];
 
 /// Statically linked account application.
@@ -464,6 +465,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<UpdateItemNoReturn>()?;
         registry.bind_command::<TransactRead>()?;
+        registry.bind_query::<TransactReadQuery>()?;
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<authorization::PutPrincipalPolicy>()?;
         registry.bind_command::<authorization::DeletePrincipalPolicy>()?;

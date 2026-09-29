@@ -32,11 +32,11 @@ use crate::{
     ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
     PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
     PartitionPutNoReturn, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
-    PartitionQueryOutcome, PartitionTransactRead, PartitionTransactReadOutcome,
+    PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
     PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
     PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
     PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
-    ScanItemsOutcome, SortComparison, SortPredicate, TransactRead, TransactWrite,
+    ScanItemsOutcome, SortComparison, SortPredicate, TransactReadQuery, TransactWrite,
     TransactWriteInput, TransactWriteNoReturn, TransactionFailure, TransactionOperation,
     TransactionOutcome, TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn,
     UpdateItemOutcome, data_key_hash,
@@ -89,9 +89,9 @@ impl CellStorage {
                 let target = target(account_id)?;
                 let result = self
                     .client
-                    .command::<TransactRead>(
+                    .query::<TransactReadQuery>(
                         &target,
-                        mutation_identity()?,
+                        None,
                         Json(TransactWriteInput {
                             operations: transaction_operations,
                         }),
@@ -100,14 +100,6 @@ impl CellStorage {
                 match result {
                     Ok(committed) => match committed.output.0 {
                         TransactionReadOutcome::Applied(items) => Ok(Some(items)),
-                        TransactionReadOutcome::Rejected { index, reason } => {
-                            Err(transaction_canceled(index, reason, count, &[]))
-                        }
-                    },
-                    Err(InvocationError::Rejected(committed)) => match committed.output.0 {
-                        TransactionReadOutcome::Applied(_) => Err(StorageError::Internal(
-                            "unexpected rejected local account transaction read".into(),
-                        )),
                         TransactionReadOutcome::Rejected { index, reason } => {
                             Err(transaction_canceled(index, reason, count, &[]))
                         }
@@ -124,9 +116,9 @@ impl CellStorage {
                     .map_err(|error| StorageError::Internal(error.to_string()))?;
                 let result = self
                     .client
-                    .command::<PartitionTransactRead>(
+                    .query::<PartitionTransactReadQuery>(
                         &target,
-                        mutation_identity()?,
+                        None,
                         Json(PartitionTransactWriteInput {
                             table_id,
                             epoch,
@@ -136,9 +128,6 @@ impl CellStorage {
                     .await;
                 match result {
                     Ok(committed) => {
-                        local_partition_transaction_read_result(committed.output.0, count)
-                    }
-                    Err(InvocationError::Rejected(committed)) => {
                         local_partition_transaction_read_result(committed.output.0, count)
                     }
                     Err(error) => Err(cell_error(error)),
