@@ -187,7 +187,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let session_dir = config.data_dir.join(session_uuid.to_string());
     tokio::fs::create_dir_all(&config.data_dir).await?;
     let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(4, 64)?, 256 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::for_system(64)?, 256 * 1024 * 1024)
         .with_replica_host(
             Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
         )

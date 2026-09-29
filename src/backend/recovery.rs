@@ -314,19 +314,6 @@ impl CellStorage {
             transaction_id,
             coordinator_cell: *coordinator.cell_id().as_bytes(),
         };
-        let observed = self.participant_state(target, input.clone()).await?;
-        match (commit, observed.output.0) {
-            (true, ParticipantTransactionState::Committed)
-            | (false, ParticipantTransactionState::Aborted) => return Ok(observed.receipt),
-            (true, ParticipantTransactionState::Prepared)
-            | (false, ParticipantTransactionState::Prepared)
-            | (false, ParticipantTransactionState::Missing) => {}
-            _ => {
-                return Err(StorageError::Internal(
-                    "participant state contradicts coordinator decision".into(),
-                ));
-            }
-        }
         let resolve = Json(ResolveTransactionInput {
             transaction_id,
             coordinator_cell: input.coordinator_cell,
