@@ -410,20 +410,17 @@ impl DataEngine for CellStorage {
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let input = Json(PartitionDeleteInput {
+                    return_old,
+                    table_id: key_info.table_id.clone(),
+                    epoch,
+                    key,
+                    condition,
+                    ttl: false,
+                });
                 let outcome = self
                     .client
-                    .command::<PartitionDelete>(
-                        &partition,
-                        mutation_identity()?,
-                        Json(PartitionDeleteInput {
-                            return_old,
-                            table_id: key_info.table_id.clone(),
-                            epoch,
-                            key,
-                            condition,
-                            ttl: false,
-                        }),
-                    )
+                    .command::<PartitionDelete>(&partition, mutation_identity()?, input)
                     .await;
                 let old = match outcome {
                     Ok(committed) => match committed.output.0 {

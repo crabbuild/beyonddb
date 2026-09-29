@@ -1121,95 +1121,110 @@ impl Command for PartitionDelete {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(spec) = indexes::command_spec(context)? else {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::NotInstalled,
-            )));
-        };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::StaleRoute,
-            )));
-        }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionDeleteOutcome::Sealed,
-                )));
-            }
-            AccessState::Importing => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionDeleteOutcome::NotReady,
-                )));
-            }
-        }
-        if !valid_key(&input.key, &spec.table) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::InvalidKey,
-            )));
-        }
-        let key = item_key(&input.key, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
-            &spec.table.id,
-            &input.key,
-            &spec.table.key_schema,
-        )?) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::WrongPartition,
-            )));
-        }
-        if transaction::key_locked(context, &key)? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::TransactionConflict,
-            )));
-        }
-        let old = command_item(context, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionDeleteOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionDeleteOutcome::InvalidExpression(message),
-                    )));
-                }
-            }
-        }
-        if input.ttl && !ttl::expired_for_configured_ttl(context, old.as_ref())? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::ConditionFailed(old),
-            )));
-        }
-        delete_item(context, &spec.table, &key, spec.epoch)?;
-        if input.ttl {
-            crate::stream_journal::append_ttl_delete(
-                context,
-                &spec.table.id,
-                &spec.table.key_schema,
-                spec.table.stream.as_ref(),
-                old.as_ref(),
-            )?;
-        } else {
-            crate::stream_journal::append(
-                context,
-                &spec.table.id,
-                &spec.table.key_schema,
-                spec.table.stream.as_ref(),
-                old.as_ref(),
-                None,
-                0,
-            )?;
-        }
-        Ok(CommandResult::Success(Json(
-            PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
-        )))
+        let return_old = input.return_old;
+        execute_partition_delete(context, input, return_old)
     }
+}
+
+fn execute_partition_delete(
+    context: &mut CommandContext<'_, '_>,
+    input: PartitionDeleteInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<PartitionDeleteOutcome>>> {
+    let Some(spec) = indexes::command_spec(context)? else {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::NotInstalled,
+        )));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::StaleRoute,
+        )));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::Sealed,
+            )));
+        }
+        AccessState::Importing => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::NotReady,
+            )));
+        }
+    }
+    if !valid_key(&input.key, &spec.table) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::InvalidKey,
+        )));
+    }
+    let key = item_key(&input.key, &spec.table.key_schema)?;
+    if !spec.contains(data_key_hash(
+        &spec.table.id,
+        &input.key,
+        &spec.table.key_schema,
+    )?) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::WrongPartition,
+        )));
+    }
+    if transaction::key_locked(context, &key)? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::TransactionConflict,
+        )));
+    }
+    let needs_old =
+        return_old || input.condition.is_some() || input.ttl || spec.table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionDeleteOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionDeleteOutcome::InvalidExpression(message),
+                )));
+            }
+        }
+    }
+    if input.ttl && !ttl::expired_for_configured_ttl(context, old.as_ref())? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::ConditionFailed(old),
+        )));
+    }
+    delete_item(context, &spec.table, &key, spec.epoch)?;
+    if input.ttl {
+        crate::stream_journal::append_ttl_delete(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+        )?;
+    } else {
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            None,
+            0,
+        )?;
+    }
+    Ok(CommandResult::Success(Json(
+        PartitionDeleteOutcome::Applied(if return_old { old } else { None }),
+    )))
 }
 
 /// Update one item under a verified data Cell epoch.

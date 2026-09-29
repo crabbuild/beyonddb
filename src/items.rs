@@ -159,56 +159,70 @@ impl Command for DeleteItem {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_unrouted_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        };
-        if table.id != input.table_id {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        }
-        if !valid_key(&input.key, &table) {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.key, &table.key_schema)?;
-        if transaction::key_locked(context, &table.id, &key)? {
-            return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
-        }
-        let old = command_item(context, &table.id, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::InvalidExpression(message),
-                    )));
-                }
+        let return_old = input.return_old;
+        execute_delete_item(context, input, return_old)
+    }
+}
+
+fn execute_delete_item(
+    context: &mut CommandContext<'_, '_>,
+    input: DeleteItemInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<ItemMutationOutcome>>> {
+    let Some(table) = command_unrouted_table(context, &input.table_name)? else {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    };
+    if table.id != input.table_id {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    }
+    if !valid_key(&input.key, &table) {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.key, &table.key_schema)?;
+    if transaction::key_locked(context, &table.id, &key)? {
+        return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
+    }
+    let needs_old = return_old || input.condition.is_some() || table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &table.id, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::InvalidExpression(message),
+                )));
             }
         }
-        delete_item(context, &table, &key)?;
-        crate::stream_journal::append(
-            context,
-            &table.id,
-            &table.key_schema,
-            table.stream.as_ref(),
-            old.as_ref(),
-            None,
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
-            if input.return_old { old } else { None },
-        ))))
     }
+    delete_item(context, &table, &key)?;
+    crate::stream_journal::append(
+        context,
+        &table.id,
+        &table.key_schema,
+        table.stream.as_ref(),
+        old.as_ref(),
+        None,
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
+        if return_old { old } else { None },
+    ))))
 }
 
 /// One atomic item update in a named table.
