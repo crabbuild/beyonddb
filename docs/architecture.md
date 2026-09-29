@@ -1,20 +1,22 @@
-# Architecture and durability design
+# Understand BeyondDB's architecture and durability
 
-BeyondDB composes two pinned projects. ExtendDB owns the public DynamoDB
-protocol and security boundary. Cellule owns fenced execution and publication.
-BeyondDB supplies the Cell schemas, `StorageEngine`/`CatalogStore` adapters,
-routing, provisioners, transaction coordinator, and serving workers. This is
-an implementation description, not a fleet-scale performance claim.
+This page explains how a signed request becomes durable, which Cell owns each kind of state, and how another node recovers that state. BeyondDB uses two pinned projects: ExtendDB owns the DynamoDB protocol and security boundary; Cellule owns fenced execution and durable publication. BeyondDB connects them through Cell schemas, adapters, routing, provisioners, a transaction coordinator, and serving workers. The design does not establish fleet-scale performance.
 
-```text
-AWS client -> ExtendDB HTTP/auth/engine -> BeyondDB adapter -> Cell owner
-                                                       |        |
-                                                       |        +-> SQLite command
-                                                       |              -> LTX -> object store
-                                                       +-> peer mTLS when owner is remote
-```
+![The layers from AWS clients through ExtendDB, BeyondDB, and Cellule to the object store](../diagram/beyonddb-architecture/layers.svg)
+
+The [full-size PNG](../diagram/beyonddb-architecture/layers@2x.png) is useful when a Markdown viewer does not render SVG. Read from top to bottom: ExtendDB validates the request, BeyondDB chooses an owner, and Cellule executes and publishes the result.
+
+| Term | Meaning in this design |
+| --- | --- |
+| **Cell** | A single-writer, durable unit of state executed by Cellule. |
+| **Owner** | The node currently authorized to execute a Cell. |
+| **Route** | The table generation, hash range, and owner information used to find a Cell. |
+| **LTX** | The published SQLite change format that lets a new owner restore a Cell. |
+| **Fence** | An authority check that prevents an old owner or route from writing. |
 
 ## Components and ownership
+
+The request path separates protocol work from state execution. The Cell types below have different ownership and recovery policies, even when they run on the same node.
 
 ```mermaid
 flowchart TB
@@ -36,12 +38,7 @@ flowchart TB
     LTX --> ObjectStore["Conditional object store"]
 ```
 
-The server takes an S3, GCS, or Azure object-store URL and uses a separate
-scratch directory per node session. The object store must support strict
-create and conditional updates for Cell authority. The public listener may
-forward a signed request to the current Cell owner over private mTLS; the
-receiving node still checks owner authority. The encryption key file protects
-stored access secrets and must survive node restarts.
+The server uses an S3, GCS, or Azure object store and a separate scratch directory for each node session. The object store needs strict create and conditional updates for Cell authority. A public node can forward a signed request to a remote owner over mutual TLS (mTLS); the receiver still checks its authority. Preserve the encryption key file across restarts because it protects stored access secrets.
 
 | State | Authority and atomic boundary |
 | --- | --- |
@@ -52,6 +49,10 @@ stored access secrets and must survive node restarts.
 | Credentials | Key-derived credential Cells store encrypted secrets and session tokens. |
 
 ## Single-item write sequence
+
+The owner commits the base mutation and its dependent records together. The client receives success after Cellule publishes the committed state.
+
+![A signed PutItem moves through validation, routing, one Cell command, and durable publication](../diagram/beyonddb-architecture/durable-write.svg)
 
 ```mermaid
 sequenceDiagram
@@ -71,13 +72,11 @@ sequenceDiagram
     HTTP-->>Client: DynamoDB JSON response
 ```
 
-A rejected command rolls back its SQLite transaction. A successful mutation
-response follows durable publication. The router must use the current table
-generation, range, and owner epoch; stale routes are rejected and refreshed.
-`GetItem` and Query/Scan read the owning Cell, respecting unresolved
-transaction intents.
+A rejected command rolls back its SQLite transaction. The router uses the current table generation, range, and owner epoch; the owner rejects stale routes so the router can refresh them. `GetItem`, `Query`, and `Scan` read the owning Cell and respect unresolved transaction intents.
 
 ## Cross-Cell transaction sequence
+
+A cross-Cell transaction has one durable decision. Participant Cells store their prepared state and resolve that decision independently, so recovery can finish after a driver failure.
 
 ```mermaid
 sequenceDiagram
@@ -109,14 +108,11 @@ sequenceDiagram
     Driver-->>Client: Return or replay result
 ```
 
-The original coordinator and participant identities survive routing changes.
-If a driver dies after decision publication, startup or serving recovery can
-finish participant resolution. A caller timeout is an unknown outcome until
-the durable decision is inspected; the client token distinguishes a matching
-replay from a different request. Transactional reads use shared key locks and
-captured images. See the [protocol and failure cases](../CROSS_CELL_TRANSACTIONS.md).
+The original coordinator and participant identities survive routing changes. If a driver dies after publishing the decision, startup or serving recovery finishes participant resolution. A caller timeout leaves the outcome unknown until the durable decision is inspected. A client token distinguishes a matching replay from a different request. Transactional reads use shared key locks and captured images. See the [transaction protocol and failure cases](../CROSS_CELL_TRANSACTIONS.md).
 
 ## Range split and GSI projection
+
+Splitting changes a route only after the source has sealed and both children have copied and verified its contents. Global secondary index (GSI) projection follows a different path: a base write commits a journal entry, then an index worker applies it asynchronously.
 
 ```mermaid
 flowchart LR
@@ -135,14 +131,20 @@ the table generation, Cell owner, and epoch, so a stale source cannot accept
 new work after cutover. `Scan` continuation and broad split behavior remain
 under qualification; see [metadata ownership](../METADATA_SHARDING.md).
 
-For a GSI, the base command writes an immutable projection journal entry.
-A worker applies a versioned entry or tombstone to the index Cell and removes
-the journal entry only after durable acknowledgement from every required
-index. An unavailable index delays its own projection; later healthy indexes
-can still advance. This gives eventual GSI visibility, not an atomic GSI view
-of a base transaction. [GSI design](../GLOBAL_INDEXES.md)
+For a GSI, the base command writes an immutable projection journal entry. A worker applies a versioned entry or tombstone to the index Cell. It removes the journal entry only after every required index acknowledges it durably. An unavailable index delays its own projection while healthy indexes can advance. GSI reads are therefore eventually consistent with base writes; a base transaction does not produce an atomic GSI view. See the [GSI design and limits](../GLOBAL_INDEXES.md).
+
+```mermaid
+flowchart LR
+    Base["Base data Cell<br/>item + projection journal"] -->|"durable base commit"| Ack["Acknowledge write"]
+    Base -->|"worker reads journal"| Worker["Projection worker"]
+    Worker -->|"idempotent update"| Index["GSI Cell"]
+    Index -->|"durable receipt"| Worker
+    Worker -->|"after all required receipts"| Prune["Prune journal entry"]
+```
 
 ## Failure recovery and current limits
+
+Recovery first establishes that the old owner has lost authority. The replacement then claims the published root and replays unfinished work before advertising readiness.
 
 ```mermaid
 sequenceDiagram
@@ -168,6 +170,8 @@ history collection remain open. The [scaling plan](../SCALING.md) defines the
 
 ## Source map
 
+Use these entry points to follow a diagram into the implementation:
+
 | Boundary | Entry point |
 | --- | --- |
 | Public server composition | [`src/server.rs`](../src/server.rs) and [`src/bin/beyonddb.rs`](../src/bin/beyonddb.rs) |
@@ -175,4 +179,4 @@ history collection remain open. The [scaling plan](../SCALING.md) defines the
 | Cell routing and ownership | [`src/routing.rs`](../src/routing.rs), [`src/directory.rs`](../src/directory.rs) |
 | Transaction driver and coordinator | [`src/backend/transaction.rs`](../src/backend/transaction.rs), [`src/transaction_coordinator.rs`](../src/transaction_coordinator.rs) |
 | GSI projection | [`src/global_index.rs`](../src/global_index.rs), [`src/backend/global_index.rs`](../src/backend/global_index.rs) |
-| Stream journal and reads | [`src/stream_journal.rs`](../src/stream_journal.rs), [`src/backend/streams.rs`](../src/backend/streams.rs) |
+| Stream journal, reads, and retention | [`src/stream_journal.rs`](../src/stream_journal.rs), [`src/backend/streams.rs`](../src/backend/streams.rs), [`src/backend/stream_retention.rs`](../src/backend/stream_retention.rs) |

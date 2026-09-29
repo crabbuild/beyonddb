@@ -1,13 +1,18 @@
-# API coverage and compatibility
+# Check DynamoDB API coverage
 
-BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but an ExtendDB handler
-does not by itself make an operation supported by BeyondDB. This page describes
-the pinned backend's Cell paths and their qualification. “Verified” means a
-signed AWS SDK or CLI request reached a durable Cell commit and the committed
-result was checked after owner or process restart. Individual fixtures cover
-the cases stated here; they do not prove every DynamoDB option or error shape.
+Use this page to decide whether a DynamoDB operation fits your workload. BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but a protocol handler alone does not establish Cell-backed support. A **verified path** has a signed AWS SDK or CLI request, a durable Cell commit, and a result checked after owner or process restart. Each fixture proves only its stated cases, not every DynamoDB option or error response.
+
+| Label in this page | What you can conclude |
+| --- | --- |
+| **Cell-backed with restart coverage** | The stated request path and restart case passed; check the boundary column for unsupported options. |
+| **Partial** | Some options work, but the named alternatives are rejected or unqualified. |
+| **Unsupported** | No compatible Cell path is available through the public endpoint. |
+
+The [AWS CLI guide](user-guide.md) shows requests you can try. The [implementation record](implementation-status.md) contains the test evidence and open qualification gates.
 
 ## Tables, items, and reads
+
+Core table, item, read, and transaction operations have Cell paths. Read the boundary column before using an option that changes schema, pagination, or consistency behavior.
 
 | Operation or option | BeyondDB status | Boundary |
 | --- | --- | --- |
@@ -25,6 +30,8 @@ maps these paths to tests. The full upstream protocol suite remains an
 
 ## Indexes
 
+Local secondary indexes (LSIs) share a base Cell's atomic mutation. Global secondary indexes (GSIs) have separate owner Cells and receive base changes asynchronously.
+
 | Feature | BeyondDB status |
 | --- | --- |
 | LSI created with a table, `ALL` projection | Implemented with base mutation and index maintenance in one Cell command; account and routed SDK fixtures cover Query/Scan, transactions, and restart. |
@@ -40,6 +47,8 @@ grow beyond one Cell.
 
 ## TTL
 
+Time to live (TTL) removes expired items in background work. Setting an expiration time does not hide the item immediately from reads.
+
 `UpdateTimeToLive` and `DescribeTimeToLive` store settings in the account Cell.
 The serving worker configures a fixed expiry index in data Cells, backfills
 older items in bounded commands, and conditionally removes expired items.
@@ -48,6 +57,8 @@ The global TTL listing traits remain unsupported; the worker enumerates each
 configured account directly. [TTL implementation status](implementation-status.md#running-the-current-server)
 
 ## Streams
+
+Streams record eligible item changes in the base mutation's Cell command. Reading and retention have additional lifecycle limits.
 
 `CreateTable` can install a stream policy. Item changes and eligible TTL
 removals produce records in the same Cell command as the base mutation.
@@ -64,6 +75,8 @@ remain open. See [Streams contract](../STREAMS_CONTRACT.md) and
 
 ## Authentication and administration
 
+The signed public endpoint can enforce stored credentials and inline policies. Account administration and credential issuance are separate unfinished surfaces.
+
 The public endpoint verifies SigV4 through ExtendDB. Long-lived credentials,
 externally provisioned temporary credentials, and revocation use encrypted
 credential Cells. Inline user/role policies and user/role permission boundaries
@@ -74,6 +87,8 @@ The server uses a pass-through authorization cache so policy removal takes
 effect without a stale cached grant. [Catalog implementation](../src/catalog.rs)
 
 ## Explicitly unsupported or incomplete
+
+These gaps require more than a server configuration change. In particular, the current import/export extensions do not implement DynamoDB's S3 API workflow.
 
 | Area | Current result |
 | --- | --- |
@@ -90,6 +105,16 @@ The source gates are in [table creation/update](../src/backend.rs),
 see its [differences from DynamoDB](https://github.com/ExtendDB/extenddb/blob/main/docs/differences-from-dynamodb.md).
 
 ## How to qualify a new API claim
+
+Use the same evidence path for each new operation or option:
+
+```mermaid
+flowchart LR
+    Compare["Compare ExtendDB SQLite<br/>and protocol behavior"] --> Signed["Send signed AWS SDK<br/>request"]
+    Signed --> Commit["Verify durable<br/>Cell result"]
+    Commit --> Restart["Restart or replace<br/>the owner"]
+    Restart --> Replay["Check result,<br/>replay, and errors"]
+```
 
 1. Compare the backend result with ExtendDB's SQLite backend and the upstream
    protocol suite, including validation and error responses.

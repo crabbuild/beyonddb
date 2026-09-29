@@ -1,18 +1,33 @@
-# BeyondDB implementation record
+# Review BeyondDB's implementation evidence
 
-This is the detailed implementation and qualification record that previously
-lived in the top-level README. Start with the shorter [README](../README.md),
-[API matrix](api.md), [user guide](user-guide.md),
-[architecture](architecture.md), or [deployment guide](deployment.md).
-Run commands below from the repository root. Some recorded test results refer
-to earlier dependency pins; the current pin is in `Cargo.toml`.
+This is the detailed engineering and qualification record for BeyondDB. It explains what each path does, which tests exercise it, and which claims remain open. Start with the [API coverage table](api.md) for a workload decision, the [architecture guide](architecture.md) for Cell ownership, the [user guide](user-guide.md) for requests, or the [deployment guide](deployment.md) for a local node. Run commands on this page from the repository root. Some historical results used earlier dependency pins; check [Cargo.toml](../Cargo.toml) for the current revisions.
 
-BeyondDB is an in-progress DynamoDB-compatible service composed from ExtendDB's
-protocol, validation, expression, authentication, and operation layers and
-Cellule's Cell runtime, application, host, peer transport, storage, and LTX
-crates. Both dependencies are pinned to reviewed commits in `Cargo.toml`.
+BeyondDB connects ExtendDB's DynamoDB protocol, validation, expression, authentication, and operation layers to Cellule's Cell runtime, peer transport, SQLite execution, and LTX publication. Both dependencies are pinned to reviewed Git revisions.
+
+| Read this section | To understand |
+| --- | --- |
+| [Running the current server](#running-the-current-server) | Lease, placement, recovery, and process-test behavior |
+| [Cell ownership](#cell-ownership) | Range routes, splits, transactions, and authority |
+| [Streams dependency contract](#streams-dependency-contract) | Current journal and retention boundaries |
+| [API coverage boundary](#api-coverage-boundary) | Specific compatibility gaps |
+| [Current verified slice](#current-verified-slice) | Native, signed SDK, and restart evidence |
+| [Independent client qualification](#independent-client-qualification) | Re-run unchanged ExtendDB client tests |
+
+**Evidence vocabulary:** A native Cell test checks a command or recovery path. A signed SDK test checks the public endpoint. A restart test checks that committed state survives owner loss. Passing one fixture does not qualify the full protocol suite or fleet-scale behavior.
+
+```mermaid
+flowchart LR
+    Native["Native Cell behavior"] --> Signed["Signed SDK request"]
+    Signed --> Restart["Durable owner restart"]
+    Restart --> Suite["Full protocol suite<br/>open gate"]
+    Suite --> Fleet["Sustained fleet load<br/>open gate"]
+```
+
+The diagram orders evidence from a local command to broader compatibility and operations claims. A feature may pass one signed restart fixture while the later gates remain open.
 
 ## Request path
+
+The path below shows the responsibility boundary. ExtendDB handles the public protocol; BeyondDB selects a Cell; Cellule executes and publishes its state.
 
 ```text
 AWS SDK / DynamoDB JSON client
@@ -23,6 +38,10 @@ AWS SDK / DynamoDB JSON client
 ```
 
 ## Running the current server
+
+This section records the serving binary's runtime behavior and the process fixtures that exercise it. For a step-by-step setup, use the [deployment guide](deployment.md).
+
+### Request admission and node leases
 
 The server writes warnings and errors to stderr.
 Peer requests reserve memory while awaiting storage or Cell dispatch. CPU slots
@@ -39,6 +58,8 @@ claims still reject withdrawal. Retirement reads and writes share one lease
 lifetime as their deadline; errors retain scratch state and failed drain never
 starts retirement. Unclean exit still requires authoritative expiry before
 takeover. See [measured lease qualification](../SCALING.md#graceful-session-retirement-and-immediate-restart).
+
+### Placement and range movement
 
 Each renewal measures RAM and scratch-filesystem availability on a blocking
 worker, caps them by runtime reservations, and signs Cell/job counts and backlog
@@ -69,6 +90,8 @@ preferring sealed sources, then live directory owners if no range can yield.
 Restoration does not require the account to be resident. Runtime generation and
 settled-work checks gate release; durable roots retain items, intents, directory
 membership and unfinished transfers for later restoration.
+
+### Bootstrap and configuration
 
 `cargo run -p beyonddb --bin beyonddb -- config.json --bootstrap` starts one
 leased Cell node, a private mTLS peer listener, and ExtendDB's public DynamoDB
@@ -118,6 +141,8 @@ storage does not provide the required Cell authority semantics. A new node
 session uses a fresh scratch directory; graceful shutdown removes it after
 Cell drain. Crashed sessions may leave scratch directories for operator cleanup.
 
+### Signed process and restart fixtures
+
 The process smoke test starts RustFS, bootstraps a key, sends AWS SDK table and
 item requests, kills the server without draining it, then restarts it at a new
 peer address and reads the committed item after lease expiry and fenced Cell
@@ -153,6 +178,8 @@ elastic-Cell, peer-network, and process tests against pinned Cellule. The former
 Crab monorepo's qualification results are historical. Ordinary `cargo test`
 does not run the ignored process tests.
 
+### Startup recovery and request-driven takeover
+
 This server uses an explicit list of configured accounts and locally owned
 credential Cells. On startup it recovers configured account and credential Cells, then
 pages base/index directory leaves and the account coordinator registry. Idle or expired owners can
@@ -174,10 +201,9 @@ management APIs, and the remaining DynamoDB operations are still required
 before this is a complete service. A public node with no locally owned account
 or credential Cells can forward signed requests to live owners through mTLS.
 
-The account Cell, independently owned data-range Cells, and a partial ExtendDB
-`StorageEngine` adapter are implemented today. Table and item operations have
-Cell paths; most remaining traits return explicit unsupported errors. TTL settings
-are committed in the account Cell. The serving binary sweeps enabled tables,
+### TTL sweeps and deferred expiry
+
+The account Cell commits TTL settings. The serving binary sweeps enabled tables,
 configures a fixed expiry index in each routed data Cell, backfills old items in
 bounded commands, and conditionally deletes expired items. Each tick processes
 at most one 64-Cell route page per table and 16 tables per account. An owner
@@ -189,6 +215,9 @@ data Cell index.
 TTL candidate selection skips shared and exclusive transaction locks. If a
 prepare races selection, the conditional delete defers that item while the
 sweep continues; later passes revisit it after transaction resolution.
+
+### Table creation, deletion, and tags
+
 The account capacity worker resumes incomplete table creation from its durable
 catalog row, preserving any published GSI directories before publishing the base
 route. It uses the same provisioning path as CreateTable and can continue after
@@ -203,6 +232,9 @@ The name remains reserved until catalog cleanup completes. This does not reclaim
 the retired data/index Cells' object-store history. The RustFS
 process test verifies these requests through the AWS SDK across a server
 restart and verifies that a recreated table starts without the old tags.
+
+### Transaction decisions and replay
+
 TransactWriteItems accepts Put, Delete, Update, and ConditionCheck across
 account and data Cells. Every public write transaction uses one durable
 coordinator for admission, token lookup, prepare, decision, and resolution.
@@ -223,6 +255,9 @@ The overall request stays incomplete until all receipts are durable; errors
 remain retryable. Cancellation leaves durable progress for the next resolver.
 Each Cell query helps at most one transaction; BEGIN and unavailable decisions
 remain retryable conflicts. Transactional reads retain conflict cancellation.
+
+### Routed tables and splits
+
 Once a table's initial route is published, keyed CRUD and Scan use its data
 Cells. Placement is committed with the table generation: account-local tables
 use the account Cell, while routed tables remain CREATING until publication,
@@ -240,6 +275,9 @@ transactions and pending index projections defer sealing without stopping the
 serving task. Inspection and split replay use the routed client, so published sources and children can stay on remote owners. New table ranges, GSI ranges, and split
 children use signed fleet placement in the serving binary. There is no merge controller or complete
 `StorageEngine`/`CatalogStore` behavior, or account-management service yet.
+
+### HTTP authorization and credentials
+
 `build_http_state` now assembles ExtendDB's signed request path from a ready,
 leased Cell node. ExtendDB requires a `CatalogStore` even for DynamoDB request
 authorization. BeyondDB supplies a Cell-backed catalog for authorization reads;
@@ -252,6 +290,9 @@ and expiry; the credential store rejects expired sessions on lookup. BeyondDB
 does not issue STS sessions yet.
 Revocation is a durable Cell command; an inactive key is rejected by ExtendDB
 authentication and stays inactive after owner recovery.
+
+### Capacity-driven split admission
+
 The provisioner can inspect a table's active data Cells, resume a pending split,
 and split one range whose occupied SQLite pages cross a caller-supplied
 threshold. That measurement includes indexes and runtime tables, but excludes
@@ -263,6 +304,9 @@ group, where failure closes readiness and shutdown cancels it before Cell drain.
 The serving binary installs it for every locally admitted account. The loop
 still needs disk and capture-pressure inputs before a Cell reaches its
 admission limit.
+
+### Signed SDK and peer-network evidence
+
 One request-path gate now passes: a signed HTTP request reaches a durable Cell
 write and survives owner restart in a loopback integration test using ExtendDB's
 HTTP server and an AWS DynamoDB SDK client. The credential is encrypted and
@@ -319,12 +363,18 @@ unattended takeover and fleet qualification remain unfinished.
 
 ## Cell ownership
 
+This section records the durable ownership rules behind routes, splits, and transactions. A Cell command is the atomic boundary; multi-Cell work needs a coordinator decision.
+
+### Account and data Cell boundaries
+
 The ExtendDB adapter maps an account ID to one deterministic SQL Cell. That
 Cell owns table key definitions and, until route activation, the table's items.
 Route activation rejects a table with account-local items, and the old account
 item commands are fenced after activation. A Cell command is the atomic
 boundary. A rejected command rolls back its writes; a successful response is
 returned only after LTX publication.
+
+### Range routes and split publication
 
 The data Cell module separately persists one table partition-key hash range per
 Cell. Sort-key siblings have the same owner.
@@ -364,6 +414,8 @@ and route generations still match. Published totals survive account-owner restar
 The values can lag writes and index projection, and do not measure billed storage
 or SQLite/object-store usage. See [statistics semantics and proof](../SCALING.md#table-and-index-statistics).
 
+### Directory reads and transaction routing
+
 Routed keyed CRUD and Scan use independently owned base and GSI directory trees.
 The account retains a publication anchor for each generation; bounded leaves own
 range membership and full split plans. Point requests follow one tree path.
@@ -380,6 +432,8 @@ Base and GSI splits advance only the source's epoch and the owning leaf's
 membership version. Unfinished plans prevent metadata movement until both
 children open.
 
+### Split evidence and remaining scale gates
+
 The base directory cutover is under verification. Focused signed SDK split,
 restore, pagination and replay tests pass. Native fixtures compile and the
 data-range owner-restart check passes; broader runtime and CI gates remain
@@ -387,6 +441,9 @@ incomplete. The account catalog and publication anchors still share
 a 512 MiB Cell and one writer. Hot partition-key groups, coordinator/history
 bounds and 10,000-Cell/multi-TB fleet qualification remain open. See
 [metadata ownership](../METADATA_SHARDING.md) and [scaling requirements](../SCALING.md).
+
+### Bounded transaction payloads
+
 Transaction request/intent payloads use bounded SQL chunks while remaining in
 one local command. Item and saved-read images also use bounded BLOB transfers,
 including JSON images larger than 1 MiB after escaping. The signed SDK fixtures
@@ -400,6 +457,8 @@ HTTP body limits, WAL/disk/memory headroom, and history collection remain separa
 gaps. Prepare now reserves SQLite page capacity for resolution; unrelated
 commands and runtime receipts cannot spend that claim. The conservative bound
 reduces admitted transaction concurrency and still needs scale qualification.
+
+### Participant state and recovery
 
 The [cross-Cell transaction protocol](../CROSS_CELL_TRANSACTIONS.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
@@ -438,6 +497,9 @@ and finishes a pending transaction with concurrent drivers. The Cell barriers
 fail closed; the adapter helps resolve a blocking terminal decision before
 retrying Get, Query, or Scan. An undecided or unavailable coordinator remains
 a retryable error.
+
+### Serving coordinator recovery
+
 A supervised serving worker rotates through locally admitted coordinators and
 discovers one registered shard per tick across configured accounts. It fences
 expired coordinator/participant owners, resumes abandoned BEGIN records, and
@@ -461,7 +523,9 @@ recovery keeps undecided transactions behind successful admission. Distributed
 recovery scheduling, bounded transaction/read-image retention, and
 fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
-SCALING.md for the unqualified 10,000-Cell, multi-TB target.
+the [scaling requirements](../SCALING.md) for the unqualified 10,000-Cell, multi-TB target.
+
+### Admission limits and lease-backed readiness
 
 HTTP Cell work uses bounded FIFO mailbox admission per Cell, with independent
 queues for different Cells. The client shares a 128-call/32-MiB encoded-input
@@ -483,6 +547,8 @@ initial admission and owner recovery through those paths.
 
 ## Streams dependency contract
 
+This section connects the pinned ExtendDB stream contract to BeyondDB's journal, read, and retention paths. The public Streams API remains partial.
+
 The closed-shard completion contract and full Streams implementation boundaries
 are in [STREAMS_CONTRACT.md](../STREAMS_CONTRACT.md). The contract is under review
 in [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372).
@@ -497,6 +563,15 @@ read retained records during that window. Account Cell regression covers table
 name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
 server restart. The signed TTL sweep also emits the DynamoDB service identity on
 its REMOVE record after the owner Cell verifies the configured expiry.
+
+```mermaid
+flowchart LR
+    Change["Item or eligible TTL change"] -->|"one Cell command"| Journal["Stream journal record"]
+    Journal -->|"read before visibility cutoff"| API["Streams read API"]
+    Journal -->|"after 24 hours"| Sweep["Bounded retention sweep"]
+    Sweep --> Local["Active owner or catalog-discovered Cell"]
+```
+
 Supervised sweeps now delete expired account and routed Cell records in bounded
 batches. Active owners are swept locally; a durable per-account cursor scans one
 tenant catalog shard per cycle to reach idle Cells and deleted table generations.
@@ -504,6 +579,8 @@ Expired stream catalog rows, UpdateTable stream transitions, and fleet-scale
 retention throughput remain open.
 
 ## API coverage boundary
+
+These compatibility limits apply even when ExtendDB recognizes a request shape. See the [API matrix](api.md) for operation-by-operation status.
 
 CreateTable and UpdateTable persist `STANDARD` or
 `STANDARD_INFREQUENT_ACCESS` as table-wide metadata; DescribeTable returns
@@ -528,6 +605,8 @@ upstream protocol support and Cell-backed orchestration, followed by signed SDK
 and restart qualification, before they can be listed as supported.
 
 ## ExtendDB contract to implement
+
+This is the implementation checklist for extending the backend without bypassing Cell authority or DynamoDB semantics.
 
 Use ExtendDB's existing `extenddb-server` and engine. The backend must supply
 all six `StorageEngine` traits (`TableEngine`, `DataEngine`, `MetadataEngine`,
@@ -559,6 +638,18 @@ The backend needs these invariants:
 
 ## Current verified slice
 
+The cases below describe focused evidence, not blanket API support. The [API matrix](api.md) summarizes the resulting user-facing boundary.
+
+| Fixture | Evidence it supplies | Important limit |
+| --- | --- | --- |
+| `tests/account_cell.rs` | Account Cell commands, rollback, replay, and restoration from a published root | Local fixture behavior does not prove the public protocol. |
+| `tests/elastic_cells.rs` | Routed data Cells, splits, transactions, indexes, and owner recovery | Focused ranges and failures do not establish fleet-scale behavior. |
+| `tests/peer_network.rs` | Authenticated two-node transport, signed requests, and fenced replacement | A two-node fixture does not establish unattended fleet recovery. |
+| `tests/server_binary.rs` | Signed SDK/CLI requests through a running process and hard-restart checks | Process tests are ignored by ordinary `cargo test`. |
+| `scripts/qualify-upstream.py` | Unchanged ExtendDB Python client tests against a compiled BeyondDB server | Passing selected files does not prove the whole protocol suite. |
+
+### Table, item, query, and transaction paths
+
 `src/lib.rs` registers an account Cell with table create/describe/list/update/
 delete, keyed put/get/update/delete, transactional put/delete, and transactional
 get operations and initial table route publication. It also registers
@@ -581,6 +672,9 @@ use durable shared locks and captured participant images, retrieved individually
 to avoid an aggregate Cell response limit. Same-Cell reads now pay the same
 coordinator protocol cost. Online global-index changes and non-ALL local index
 projections remain unsupported. Streamed writes use the installed Cell policy.
+
+### Index paths and backfill foundation
+
 Local secondary indexes with ALL projection support account/routed Query and Scan,
 strong reads, numeric sort ordering with base-sort tie-breakers, and base-plus-index
 continuation keys.
@@ -606,6 +700,8 @@ tracking, and split inheritance. Account lifecycle orchestration and SDK
 online index changes a supported API. The foundation and account-local ordered
 query index extend unreleased initial SQL schemas; upgrading roots written by
 earlier binaries is unqualified.
+
+### Native Cell and signed SDK fixtures
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
@@ -657,18 +753,17 @@ unclean restart. These cases do not qualify the full upstream protocol suite.
 
 ## Acceptance proof for a server claim
 
-Run ExtendDB's protocol suite against the BeyondDB endpoint, then exercise
-an AWS SDK against the same endpoint. Include table/item CRUD, query/scan,
-secondary indexes, batch and transactional operations, expressions, streams,
-TTL, backups, auth failures, pagination, and error responses. For durability,
-restart the owner from object storage and verify committed items and table
-metadata; replay requests and inspect idempotency outcomes. For isolation,
-repeat with two accounts using the same table names. For partitioned cells,
-inject owner loss between prepare, decision, and apply and verify atomic
-resolution.
+Use this checklist before changing a feature from implemented or partial to supported:
+
+1. Run ExtendDB's protocol suite against the BeyondDB endpoint, then exercise the same endpoint with an AWS SDK. Include table/item CRUD, Query/Scan, indexes, batches, transactions, expressions, Streams, TTL, backups, auth failures, pagination, and error responses where applicable.
+2. Restart the owner from object storage. Verify committed items and table metadata, replay requests, and inspect idempotency outcomes.
+3. Repeat with two accounts that use the same table names to check isolation.
+4. For partitioned work, inject owner loss before and after transaction prepare, decision, and apply. Verify atomic resolution.
 
 
-### Development storage layout
+## Development storage layout
+
+Unreleased Cell schemas have changed. Existing development roots can require reprovisioning before a new binary can read them.
 
 Cell catalog heads include the tenant as well as the application and shard.
 This isolates account and credential catalogs sharing a BeyondDB store. Existing
@@ -684,6 +779,8 @@ upgrade reader.
 
 ## Serving global-index recovery
 
+This worker restores index owners as needed, but its existence does not establish bounded fleet recovery time.
+
 The supervised projection worker discovers base and global-index ranges for
 configured accounts. It restores Idle owners and uses fenced takeover after
 remote leases expire, including indexes with no pending journal. A failed
@@ -694,8 +791,7 @@ fleet placement, bounded recovery time, or 10,000-Cell capacity.
 
 ## Independent client qualification
 
-`scripts/qualify-upstream.py` starts a fresh local RustFS store and the compiled
-BeyondDB binary, then runs ExtendDB's Python client tests unchanged. Requires
+Use `scripts/qualify-upstream.py` to compare BeyondDB against pinned ExtendDB protocol behavior. The runner starts a fresh RustFS store and the compiled BeyondDB binary, then runs ExtendDB's Python client tests unchanged. It requires
 `uv`, `openssl`, and `rustfs`. Supply a read-only ExtendDB checkout at the pinned
 dependency revision and an existing artifact directory on the workspace volume:
 

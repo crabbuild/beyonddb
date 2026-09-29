@@ -1,15 +1,22 @@
 # Use BeyondDB with the AWS CLI
 
-This guide assumes a node is running with a bootstrapped access key. Follow
-the [deployment guide](deployment.md) first. BeyondDB accepts signed DynamoDB
-JSON requests at its `public_endpoint`; the AWS CLI's `--endpoint-url` option
-selects that endpoint. The examples use a table with a string partition key.
+Use these commands to connect, create a table, change an item, and inspect time to live (TTL) and Streams behavior. First [deploy a node](deployment.md) and bootstrap an access key. BeyondDB accepts signed DynamoDB JSON requests at `public_endpoint`; pass that address with `--endpoint-url`. The examples use a string partition key named `pk`.
+
+```text
+AWS CLI -- SigV4 --> public endpoint -- route --> owning Cell
+                                                  |
+                                                  +--> durable result
+```
+
+Run the commands in one shell so later examples can use `BEYONDDB_ENDPOINT` and the AWS credential variables.
 
 ## Connect
 
+Set the bootstrapped DynamoDB credentials in your client shell. These are distinct from any credentials the server uses to access its object store.
+
 ```sh
-export AWS_ACCESS_KEY_ID='your-bootstrapped-key-id'
-export AWS_SECRET_ACCESS_KEY='your-bootstrapped-secret'
+export AWS_ACCESS_KEY_ID='your_bootstrapped_key_id'
+export AWS_SECRET_ACCESS_KEY='your_bootstrapped_secret'
 export AWS_DEFAULT_REGION='us-east-1'
 export AWS_CA_BUNDLE='/etc/beyonddb/public-ca.crt'
 export BEYONDDB_ENDPOINT='https://ddb.example.com:8000'
@@ -17,12 +24,11 @@ export BEYONDDB_ENDPOINT='https://ddb.example.com:8000'
 aws dynamodb list-tables --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The region must match the configured region and the IAM policy's resource
-ARNs. `AWS_CA_BUNDLE` must trust the public listener certificate. Omit that
-variable for a loopback-only `http://` listener. Do not use `--no-sign-request`:
-BeyondDB authenticates SigV4 credentials through its credential Cell.
+Set the region to the node's configured region and the policy's resource ARNs. `AWS_CA_BUNDLE` must trust the public listener certificate. For a loopback `http://` endpoint, omit that variable and change `BEYONDDB_ENDPOINT`. Keep request signing enabled: BeyondDB looks up SigV4 credentials in a credential Cell.
 
 ## Create a table and wait for it
+
+Create `Notes`, then wait for its route to become active before writing. This example uses on-demand billing; it does not imply AWS pricing semantics.
 
 ```sh
 aws dynamodb create-table \
@@ -41,11 +47,11 @@ aws dynamodb describe-table \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The serving binary provisions `initial_partitions` data Cells for a new routed
-table. Creation can report `CREATING` while range publication finishes. The
-configured count affects new table generations only.
+The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only.
 
 ## Write and read an item
+
+Write a DynamoDB attribute-value JSON item, read it consistently, then update it only if its `version` is still `1`.
 
 ```sh
 aws dynamodb put-item \
@@ -70,12 +76,11 @@ aws dynamodb update-item \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-Conditions and update expressions execute in the owning Cell command against
-the item version being changed. A failed condition does not commit an item
-mutation. To read several items, use `BatchGetItem`; to write several,
-`BatchWriteItem`. For atomic multi-item work, use `TransactWriteItems`.
+Conditions and update expressions run against the item version being changed inside one Cell command. A failed condition does not commit the mutation. Use `BatchGetItem` or `BatchWriteItem` for independent items; use `TransactWriteItems` when the items must commit atomically.
 
 ## Query and scan
+
+Query by partition key when you know it. Scan visits the table in bounded pages and can perform more work.
 
 ```sh
 aws dynamodb query \
@@ -97,6 +102,8 @@ Scan is a table walk and can cost more work than a keyed Query.
 
 ## TTL and Streams
 
+TTL is an asynchronous deletion policy. Streams can record the resulting eligible removals if you enable a stream when creating the table.
+
 To configure TTL on the numeric Unix-seconds attribute `expires_at`:
 
 ```sh
@@ -110,9 +117,7 @@ aws dynamodb describe-time-to-live \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The background worker performs bounded sweeps. Expiration is asynchronous;
-the TTL time is not a read-time visibility deadline. A stream can be enabled
-when creating a table:
+The background worker performs bounded sweeps. An expired item may still appear in a read before the worker removes it. Enable a stream at table creation:
 
 ```sh
 aws dynamodb create-table \
@@ -123,19 +128,40 @@ aws dynamodb create-table \
   --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 
-aws dynamodbstreams list-streams \
+aws dynamodb wait table-exists \
   --table-name StreamNotes \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-Use `aws dynamodbstreams describe-stream`, `get-shard-iterator`, and
-`get-records` with the returned stream ARN and shard IDs. The current stream
-read path covers table-created policies and retained generations; stream
-enable/disable through `UpdateTable` and full lifecycle qualification are
-unfinished. See [API coverage](api.md#streams) before using Streams for a
-consumer that must never miss an event.
+Write an item, then obtain the stream ARN. A routed table can have more than one stream shard, so read every shard returned by `DescribeStream` for this new table:
+
+```sh
+aws dynamodb put-item \
+  --table-name StreamNotes \
+  --item '{"pk":{"S":"stream-note-1"}}' \
+  --endpoint-url "$BEYONDDB_ENDPOINT"
+
+STREAM_ARN=$(aws dynamodbstreams list-streams \
+  --table-name StreamNotes --endpoint-url "$BEYONDDB_ENDPOINT" \
+  --query 'Streams[0].StreamArn' --output text)
+for SHARD_ID in $(aws dynamodbstreams describe-stream \
+  --stream-arn "$STREAM_ARN" --endpoint-url "$BEYONDDB_ENDPOINT" \
+  --query 'StreamDescription.Shards[].ShardId' --output text); do
+  ITERATOR=$(aws dynamodbstreams get-shard-iterator \
+    --stream-arn "$STREAM_ARN" --shard-id "$SHARD_ID" \
+    --shard-iterator-type TRIM_HORIZON \
+    --endpoint-url "$BEYONDDB_ENDPOINT" \
+    --query 'ShardIterator' --output text)
+  aws dynamodbstreams get-records \
+    --shard-iterator "$ITERATOR" --endpoint-url "$BEYONDDB_ENDPOINT"
+done
+```
+
+Check that `STREAM_ARN` and each `ITERATOR` are not `None`. Empty `Records` on one shard does not mean another shard is empty. A long-running consumer must also follow returned `NextShardIterator` values and any `LastEvaluatedShardId` from `DescribeStream`. The current read path covers policies set at table creation and retained generations. Enabling or disabling Streams through `UpdateTable` remains unsupported; full iterator and split-lineage qualification is unfinished. See [Streams API coverage](api.md#streams) before using this path for a consumer that cannot miss an event.
 
 ## Errors and recovery
+
+A retry can outlive the request that caused it. Use the response and current table state to distinguish rejected work from an unknown outcome:
 
 - An authentication or authorization error can mean the access key is unknown,
   inactive, signed for the wrong region, or denied by its inline policy or

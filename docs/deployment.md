@@ -1,13 +1,21 @@
 # Deploy a BeyondDB node
 
-BeyondDB currently has a serving binary and restart-tested process fixtures.
-It is **not production-qualified**: table backup/PITR, safe upgrade of older
-roots, unattended fleet recovery, and sustained-load qualification remain
-open. This guide describes the current single-node setup and the requirements
-for adding peers. Keep a copy of the encryption key and treat the object-store
-root as durable state.
+This guide builds and bootstraps one BeyondDB node, then explains the requirements for adding peers. The serving binary has restart-tested process fixtures, but table backup and point-in-time recovery (PITR), upgrades of older roots, unattended fleet recovery, and sustained load remain unqualified. Preserve the encryption key and object-store root as durable state.
+
+```mermaid
+flowchart LR
+    Client["AWS CLI or SDK<br/>DynamoDB credentials"] -->|"signed HTTPS or loopback HTTP"| Public["Public listener"]
+    Public --> Node["BeyondDB node<br/>ExtendDB + Cellule"]
+    Node <-->|"private mTLS"| Peer["Other Cell owners"]
+    Node -->|"conditional writes + LTX"| Store["Durable object store"]
+    Node --> Scratch["Session scratch directory"]
+```
+
+The object store and encryption key must survive a node restart. Scratch storage belongs to one node session. The [architecture guide](architecture.md) explains the authority and recovery steps behind this diagram.
 
 ## Requirements
+
+Prepare these resources before starting the server:
 
 - Rust 1.97 or newer to build this checkout; `cargo` and a unique
   `CARGO_TARGET_DIR` if the workstation has the mounted Workspace volume.
@@ -25,11 +33,9 @@ root as durable state.
 
 ### Local object-store fixture
 
-The ignored server-process test uses a digest-pinned RustFS container. For a
-local exercise, this reproduces its S3 endpoint and creates the bucket named
-in the example configuration. The credentials below are test-only; keep them
-in the **server's** shell, separate from the bootstrapped DynamoDB key used by
-clients.
+Use this fixture only for a local exercise. It starts RustFS and creates the bucket used by the configuration example below.
+
+The ignored server-process test uses the same digest-pinned RustFS image. The credentials below are test-only S3 credentials. Set them in the server's shell; use a separate shell for the bootstrapped DynamoDB key in the [client guide](user-guide.md#connect).
 
 ```sh
 docker run --detach --name beyonddb-rustfs \
@@ -54,6 +60,8 @@ named volume for restart testing; removing it removes this fixture's data.
 Use a service with qualified conditional writes for any nonlocal deployment.
 
 ## Prepare keys, policy, and configuration
+
+The example uses `/etc/beyonddb` for secrets and `/srv/beyonddb` for scratch files. Run the provisioning commands with an account that can write those paths, and run the server with read access to the key and certificate files. For a local account without that access, change every path in the commands and JSON to directories it owns.
 
 Create the credential encryption key with restricted permissions:
 
@@ -90,8 +98,7 @@ openssl x509 -req -in /etc/beyonddb/peer.csr \
 chmod 600 /etc/beyonddb/peer-ca.key /etc/beyonddb/peer.key
 ```
 
-The following bootstrap policy grants table access to one example account.
-Reduce its actions and resources for the intended workload.
+Save the following bootstrap policy as `/etc/beyonddb/operator-policy.json`. It grants table access to the example account; narrow its actions and resources for your workload.
 
 ```json
 {
@@ -106,9 +113,7 @@ Reduce its actions and resources for the intended workload.
 }
 ```
 
-Save that JSON as `/etc/beyonddb/operator-policy.json`. Save this example as
-`config.json` and replace its object-store URL and local paths. The public
-listener is loopback-only without TLS; the peer listener always uses mTLS.
+Save the next JSON block as `config.json` in the repository root. Replace its object-store URL and local paths as needed. The public listener is loopback-only without TLS; the peer listener always uses mTLS.
 
 ```json
 {
@@ -140,14 +145,20 @@ listener is loopback-only without TLS; the peer listener always uses mTLS.
 }
 ```
 
-The parser rejects unknown fields. `initial_partitions` defaults to one and
-can provision 1–256 initial data Cells per new table. The split threshold
-defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical
-node; each running node needs a distinct ID and scratch path.
+The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+
+| Credential or file | Used by | Keep across restart? |
+| --- | --- | --- |
+| Object-store credentials | Server process to read and write Cell roots | Yes, or replace with equivalent authorized credentials |
+| Encryption key file | Server process to decrypt stored access secrets | Yes; losing it makes those secrets unreadable |
+| Peer CA and leaf certificate | Nodes to authenticate private traffic | Preserve a common trust root; rotate leaves deliberately |
+| Bootstrapped access key and secret | AWS CLI or SDK client to sign DynamoDB requests | Preserve until you rotate or revoke the key |
 
 ## Build and bootstrap
 
-```sh
+Build the checked-out revision, enter the bootstrap secret at the hidden prompt, and keep the process running. The first command uses a target directory unique to this checkout on workstations with the mounted Workspace volume.
+
+```bash
 export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23"
 cargo build --locked --bin beyonddb
 printf 'Bootstrap secret: '
@@ -167,13 +178,11 @@ it normally to restart. Subsequent starts omit `--bootstrap`:
 "$CARGO_TARGET_DIR/debug/beyonddb" config.json
 ```
 
-The server writes warnings and errors to stderr. Use the
-[AWS CLI connection example](user-guide.md#connect) to test the signed public
-endpoint. A container supervisor should keep the process in the foreground,
-preserve the encryption key and object-store credentials, and provide a
-private scratch filesystem with the configured budget.
+The server writes warnings and errors to stderr. Use the [AWS CLI connection example](user-guide.md#connect) from a separate shell to test the signed public endpoint. A supervisor should keep the server in the foreground and provide the configured scratch budget.
 
 ## Expose the public listener or add nodes
+
+Once the local node works, set the public TLS identity and peer addresses for any non-loopback deployment. Every node must agree on the durable storage and trust configuration.
 
 For a non-loopback `public_bind`, supply both `public_certificate` and
 `public_private_key` in `config.json` and use an `https://` public endpoint.
@@ -198,8 +207,7 @@ distributed recovery scheduler and fleet load qualification do not.
 
 ## Recovery and upgrade limits
 
-The object store holds published Cell roots; scratch files are disposable
-only after the node has drained or a new owner has fenced the old session.
+Object-store roots are the recovery source. Scratch files are disposable only after a clean drain or a fenced takeover by a new owner.
 A crashed session can leave scratch files for operator cleanup. Preserve the
 encryption key, peer trust root, object-store data, and the exact compiled
 release used to write the roots. Several unreleased schema revisions require
@@ -212,11 +220,14 @@ protocol and its recovery drills exist. [Backup boundary](api.md#explicitly-unsu
 
 ## Verification
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
-focused tests for behavior changes. The ignored
-[`server_binary` process suite](../tests/server_binary.rs) starts RustFS,
-uses signed SDK requests, kills a server, and checks recovered state. Its
-Docker, AWS CLI, and OpenSSL prerequisites and invocation are in the
-[implementation record](implementation-status.md#running-the-current-server).
-For broader API validation, run the unchanged upstream client tests using the
-[independent qualification runner](implementation-status.md#independent-client-qualification).
+Check formatting and static diagnostics before running the signed process fixture:
+
+```sh
+cargo fmt --check
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23" \
+  cargo clippy --all-targets -- -D warnings
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23" \
+  cargo test --test server_binary -- --ignored --test-threads=1
+```
+
+The ignored [`server_binary` process suite](../tests/server_binary.rs) starts RustFS, uses signed SDK requests, kills a server, and checks recovered state. It requires Docker, AWS CLI, and OpenSSL; Colima users can select their daemon with `DOCKER_CONTEXT=colima`. For broader API validation, run unchanged upstream client tests with the [independent qualification runner](implementation-status.md#independent-client-qualification). Passing these fixtures does not establish production-scale capacity.
