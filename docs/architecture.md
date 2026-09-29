@@ -108,7 +108,7 @@ sequenceDiagram
     Driver-->>Client: Return or replay result
 ```
 
-The original coordinator and participant identities survive routing changes. If a driver dies after publishing the decision, startup or serving recovery finishes participant resolution. A caller timeout leaves the outcome unknown until the durable decision is inspected. A client token distinguishes a matching replay from a different request. Transactional reads use shared key locks and captured images. See the [transaction protocol and failure cases](../CROSS_CELL_TRANSACTIONS.md).
+The original coordinator and participant identities survive routing changes. If a driver dies after publishing the decision, startup or serving recovery finishes participant resolution. A caller timeout leaves the outcome unknown until the durable decision is inspected. A client token distinguishes a matching replay from a different request. Transactional reads use shared key locks and captured images. See the [transaction protocol and failure cases](cross-cell-transactions.md).
 
 ## Range split and GSI projection
 
@@ -129,9 +129,9 @@ transactions or pending GSI projection work would be lost. Directory
 publication retains the plan until both children open. The route identifies
 the table generation, Cell owner, and epoch, so a stale source cannot accept
 new work after cutover. `Scan` continuation and broad split behavior remain
-under qualification; see [metadata ownership](../METADATA_SHARDING.md).
+under qualification; see [metadata ownership](metadata-sharding.md).
 
-For a GSI, the base command writes an immutable projection journal entry. A worker applies a versioned entry or tombstone to the index Cell. It removes the journal entry only after every required index acknowledges it durably. An unavailable index delays its own projection while healthy indexes can advance. GSI reads are therefore eventually consistent with base writes; a base transaction does not produce an atomic GSI view. See the [GSI design and limits](../GLOBAL_INDEXES.md).
+For a GSI, the base command writes an immutable projection journal entry. A worker applies a versioned entry or tombstone to the index Cell. It removes the journal entry only after every required index acknowledges it durably. An unavailable index delays its own projection while healthy indexes can advance. GSI reads are therefore eventually consistent with base writes; a base transaction does not produce an atomic GSI view. See the [GSI design and limits](global-indexes.md).
 
 ```mermaid
 flowchart LR
@@ -165,7 +165,7 @@ Configured account and credential Cells are recovered at startup; requests
 can restore published idle or expired data/GSI owners. Coordinator recovery
 resolves abandoned work. A fleet-wide scheduler for unaccessed data-only
 owners, bounded recovery time, sustained overload behavior, and safe storage
-history collection remain open. The [scaling plan](../SCALING.md) defines the
+history collection remain open. The [scaling plan](scaling.md) defines the
 10,000-Cell/multi-TB target and the measurements needed to claim it.
 
 ## Source map

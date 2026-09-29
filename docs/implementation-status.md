@@ -57,7 +57,7 @@ advertisement from the same signed boot identity. Unsealed logs and recovery
 claims still reject withdrawal. Retirement reads and writes share one lease
 lifetime as their deadline; errors retain scratch state and failed drain never
 starts retirement. Unclean exit still requires authoritative expiry before
-takeover. See [measured lease qualification](../SCALING.md#graceful-session-retirement-and-immediate-restart).
+takeover. See [measured lease qualification](scaling.md#graceful-session-retirement-and-immediate-restart).
 
 ### Placement and range movement
 
@@ -82,7 +82,7 @@ settled data/GSI owners to available capacity. It samples every 15 seconds,
 retains the planner's residence and settlement gates, and releases at most two
 ranges per pass. Account, credential and coordinator Cells retain their existing
 ownership policies. Fleet load and failure qualification remain open; see
-[range movement](../SCALING.md#automatic-movement-of-settled-ranges).
+[range movement](scaling.md#automatic-movement-of-settled-ranges).
 When the local Cell pool is full, new range admission can release obsolete
 base/GSI sources after current-owner metadata proves retirement. Restoration of
 published owners and metadata admission can also release settled data/GSI owners,
@@ -169,7 +169,7 @@ it retains the fixture and prints its path for startup-only replay. A failed
 process test stops but retains its RustFS container and volume, printing the
 container name; successful tests remove both. This test
 does not cover large payloads or index restoration; both remain in the full
-scenario. See [scaling qualification](../SCALING.md) for actual results and open gates.
+scenario. See [scaling qualification](scaling.md) for actual results and open gates.
 
 The standalone [Rust workflow](../.github/workflows/rust.yml) checks format,
 types, Clippy, the server build, and library tests. The
@@ -412,7 +412,7 @@ for the table and its indexes. Each mutation maintains local counters; the serve
 samples one range per tick and publishes a completed snapshot only if its table
 and route generations still match. Published totals survive account-owner restart.
 The values can lag writes and index projection, and do not measure billed storage
-or SQLite/object-store usage. See [statistics semantics and proof](../SCALING.md#table-and-index-statistics).
+or SQLite/object-store usage. See [statistics semantics and proof](scaling.md#table-and-index-statistics).
 
 ### Directory reads and transaction routing
 
@@ -440,7 +440,7 @@ data-range owner-restart check passes; broader runtime and CI gates remain
 incomplete. The account catalog and publication anchors still share
 a 512 MiB Cell and one writer. Hot partition-key groups, coordinator/history
 bounds and 10,000-Cell/multi-TB fleet qualification remain open. See
-[metadata ownership](../METADATA_SHARDING.md) and [scaling requirements](../SCALING.md).
+[metadata ownership](metadata-sharding.md) and [scaling requirements](scaling.md).
 
 ### Bounded transaction payloads
 
@@ -460,9 +460,9 @@ reduces admitted transaction concurrency and still needs scale qualification.
 
 ### Participant state and recovery
 
-The [cross-Cell transaction protocol](../CROSS_CELL_TRANSACTIONS.md) specifies
+The [cross-Cell transaction protocol](cross-cell-transactions.md) specifies
 the decision, lock, visibility, and failure-recovery contract.
-Start with its [foundation assessment](../CROSS_CELL_TRANSACTIONS.md#foundation-assessment-for-multiple-primary-keys)
+Start with its [foundation assessment](cross-cell-transactions.md#foundation-assessment-for-multiple-primary-keys)
 for a three-key transfer, reader isolation, the driver trust boundary, and
 the remaining 10,000-Cell qualification gates.
 Account and data Cells persist prepared write images, immutable read images,
@@ -523,7 +523,7 @@ recovery keeps undecided transactions behind successful admission. Distributed
 recovery scheduling, bounded transaction/read-image retention, and
 fleet qualification remain incomplete. Production admits 64
 active Cells per node; busy coordinators apply retryable backpressure. See
-the [scaling requirements](../SCALING.md) for the unqualified 10,000-Cell, multi-TB target.
+the [scaling requirements](scaling.md) for the unqualified 10,000-Cell, multi-TB target.
 
 ### Admission limits and lease-backed readiness
 
@@ -531,7 +531,7 @@ HTTP Cell work uses bounded FIFO mailbox admission per Cell, with independent
 queues for different Cells. The client shares a 128-call/32-MiB encoded-input
 budget and permits 50 seconds of admission waiting per transport stage. Unknown
 write outcomes still require resolution. See [concurrent admission evidence and
-remaining overload limits](../SCALING.md#concurrent-request-admission).
+remaining overload limits](scaling.md#concurrent-request-admission).
 
 The signed SDK host test uses `CellNodeBuilder::build`, a published node
 advertisement, a renewing lease guard, and a task group. The lease task keeps
@@ -550,8 +550,8 @@ initial admission and owner recovery through those paths.
 This section connects the pinned ExtendDB stream contract to BeyondDB's journal, read, and retention paths. The public Streams API remains partial.
 
 The closed-shard completion contract and full Streams implementation boundaries
-are in [STREAMS_CONTRACT.md](../STREAMS_CONTRACT.md). The contract is under review
-in [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372).
+are in [streams-contract.md](streams-contract.md). The contract review is
+recorded in [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372).
 BeyondDB's current crabbuild fork pin descends from the contract merged in
 [ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1), so upstream
 release timing does not block this service.
@@ -682,11 +682,11 @@ Sparse entries are absent until their index key exists. Ordinary writes,
 transactions, TTL deletion, and split import maintain index entries in the
 same Cell command as base items. Indexed Query fences the HASH group's prepared
 write intents, including absent creates and sort-key moves; account-local Query
-conservatively fences the table. See [the remaining LSI read contract](../LSI_CONTRACT.md)
+conservatively fences the table. See [the remaining LSI read contract](lsi-contract.md)
 for KEYS_ONLY/INCLUDE, base-fetch capacity accounting, and scale limits.
 Global indexes created with a table have independently owned ranges, durable
 asynchronous maintenance, and ALL/KEYS_ONLY/INCLUDE projected Query and Scan.
-See [global-index implementation and limits](../GLOBAL_INDEXES.md) for journal
+See [global-index implementation and limits](global-indexes.md) for journal
 replay, transaction boundaries, restart evidence, and unfinished index splitting
 and collection.
 
@@ -769,7 +769,7 @@ Cell catalog heads include the tenant as well as the application and shard.
 This isolates account and credential catalogs sharing a BeyondDB store. Existing
 unreleased roots with application-only catalog heads require reprovisioning;
 there is no fallback reader. This does not enable multi-tenant backup or garbage
-collection. See [the recovery finding](../CROSS_CELL_TRANSACTIONS.md#tenant-catalog-collision-found-during-recovery-qualification).
+collection. See [the recovery finding](cross-cell-transactions.md#tenant-catalog-collision-found-during-recovery-qualification).
 
 Global-index journals and metadata, local-index schemas, principal permission boundaries,
 required table/participant metadata, and settled-root
@@ -786,7 +786,7 @@ configured accounts. It restores Idle owners and uses fenced takeover after
 remote leases expire, including indexes with no pending journal. A failed
 index does not prevent healthy indexes from applying the same source change;
 the journal remains until all have applied. See [global index recovery and
-qualification](../GLOBAL_INDEXES.md#splits-and-recovery). This does not establish
+qualification](global-indexes.md#splits-and-recovery). This does not establish
 fleet placement, bounded recovery time, or 10,000-Cell capacity.
 
 ## Independent client qualification

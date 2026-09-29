@@ -40,8 +40,8 @@ Local secondary indexes (LSIs) share a base Cell's atomic mutation. Global secon
 | Online GSI creation, deletion, or update | Rejected by `UpdateTable`. Index backfill primitives exist, but account lifecycle orchestration and public SDK qualification do not. |
 | Vector indexes and `SearchVectors` | ExtendDB has handlers; BeyondDB rejects vector index creation and has no supported Cell vector path. |
 
-See [LSI contract](../LSI_CONTRACT.md) and
-[GSI design and limits](../GLOBAL_INDEXES.md). Index support does not imply
+See [LSI contract](lsi-contract.md) and
+[GSI design and limits](global-indexes.md). Index support does not imply
 fleet-scale index recovery or a guarantee that a hot partition-key group can
 grow beyond one Cell.
 
@@ -70,7 +70,7 @@ This is **partial Streams support**. `UpdateTable` cannot enable, disable, or
 change the view type. Bounded retention sweeps cover active routed owners and
 catalog-discovered dormant or deleted data Cells. Expired stream catalog rows,
 full split-lineage and iterator qualification, and fleet-scale retention work
-remain open. See [Streams contract](../STREAMS_CONTRACT.md) and
+remain open. See [Streams contract](streams-contract.md) and
 [implementation status](implementation-status.md#streams-dependency-contract).
 
 ## Authentication and administration

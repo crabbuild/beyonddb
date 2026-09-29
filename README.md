@@ -116,16 +116,16 @@ cargo test --test server_binary -- --ignored --test-threads=1
 The [independent client qualification instructions](docs/implementation-status.md#independent-client-qualification)
 run ExtendDB's Python protocol tests against the BeyondDB binary. Passing
 selected tests does not establish full DynamoDB compatibility. For scale
-claims, use the [measured completion gates](SCALING.md#completion-proof).
+claims, use the [measured completion gates](docs/scaling.md#completion-proof).
 
 ## Design and evidence
 
-- [Cross-Cell transaction protocol](CROSS_CELL_TRANSACTIONS.md)
-- [Metadata ownership](METADATA_SHARDING.md)
-- [Global secondary indexes](GLOBAL_INDEXES.md)
-- [Streams contract](STREAMS_CONTRACT.md)
-- [Local secondary index contract](LSI_CONTRACT.md)
-- [Scaling and measured limits](SCALING.md)
+- [Cross-Cell transaction protocol](docs/cross-cell-transactions.md)
+- [Metadata ownership](docs/metadata-sharding.md)
+- [Global secondary indexes](docs/global-indexes.md)
+- [Streams contract](docs/streams-contract.md)
+- [Local secondary index contract](docs/lsi-contract.md)
+- [Scaling and measured limits](docs/scaling.md)
 
 BeyondDB is licensed under Apache-2.0. Its contributor invariants are in
 [AGENTS.md](AGENTS.md).

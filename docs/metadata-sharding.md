@@ -1,6 +1,41 @@
 # BeyondDB metadata ownership
 
-Status: base and GSI serving paths use independently owned directory leaves.
+## At a glance
+
+```text
+Account catalog + table generation
+             |
+             v
+Fixed-size publication anchor (one per base/index generation)
+             |
+             v
+Base or GSI directory root
+             |
+             v
+      Bounded branch
+        /         \
+       v           v
+  Writable      Writable       (ordered range leaves)
+   leaf A         leaf B
+       |           |
+       v           v
+  Data/index    Data/index      (independent Cell owners)
+    Cells         Cells
+```
+
+| Operation | Publication boundary |
+| --- | --- |
+| Point lookup | Follow one directory path, then validate the selected owner and epoch. |
+| Split | Freeze a leaf, import bounded pages, then publish child references in the parent. |
+| Delete | Fence the exact table generation, retire its directory trees, then remove the catalog name. |
+
+See [required topology](#required-topology) for tree ownership,
+[publication and lifecycle](#publication-and-lifecycle) for creation and
+deletion, and [base serving cutover](#base-serving-cutover) for verification.
+
+## Current status
+
+Base and GSI serving paths use independently owned directory leaves.
 The account retains one fixed-size publication anchor per base/index generation
 and the table catalog. Public routing, splitting, statistics, recovery and deletion
 share the tree protocol. The base cutover is under verification: focused signed
@@ -57,6 +92,7 @@ owners are installed. `CREATING` must remain visible until all initial index
 routes and the base route are published. The existing account-scoped worker can
 repair an incomplete creation from the stored table record; later directory
 extraction must retain that behavior without relying on the original request.
+
 The creation placement/count policy is persisted in the table generation before
 any initial owner is installed. Recovery uses that policy after configuration
 changes. UpdateTable rejects a routed generation until base-route publication
@@ -68,7 +104,7 @@ bounded cleanup. Live-table lookups fence new account writes/prepares, route and
 index publication, split admission/publication and statistics publication. The
 capacity worker discovers deleting generations and resumes cleanup after owner
 restore. Name reuse waits for catalog removal; delayed delete/cleanup commands
-carry the original generation. See [deletion proof](SCALING.md#bounded-generation-scoped-table-deletion).
+carry the original generation. See [deletion proof](scaling.md#bounded-generation-scoped-table-deletion).
 
 Metadata extraction must preserve these lifecycle semantics across independent
 owners, including explicit completion acknowledgements before name reuse. Base and GSI cleanup retain each anchor until its whole directory tree acknowledges
@@ -101,15 +137,16 @@ participant's retained terminal record.
 
 Metadata nodes use product admission, signed peer scope, configured and
 expired-owner recovery, and capacity reclamation. Restoration and metadata
-admission prefer releasing settled data/GSI owners, then allow settled directory
-owners to yield. This lets a lookup path outlive its local residency without
-requiring every directory node to remain active. Generation checks and fresh
-runtime settlement preflight precede worker close and authoritative release;
-membership and unfinished transfers stay in the durable root. New data/GSI
-bootstrap still requires free capacity or proven retirement. Metadata must
-not be silently bootstrapped when authority is missing. General fleet ownership
-and discovery must cover metadata nodes without centralizing all recovery work
-in one account writer.
+admission prefer releasing settled data/GSI owners, then allow settled
+directory owners to yield. This lets a lookup path outlive its local residency
+without requiring every directory node to remain active.
+
+Generation checks and fresh runtime settlement preflight precede worker close
+and authoritative release; membership and unfinished transfers stay in the
+durable root. New data/GSI bootstrap still requires free capacity or proven
+retirement. Metadata must not be silently bootstrapped when authority is
+missing. General fleet ownership and discovery must cover metadata nodes
+without centralizing all recovery work in one account writer.
 
 The signed SDK regression
 `sdk_reads_restore_data_and_live_directory_with_one_available_slot` fills four
@@ -155,6 +192,7 @@ from a serving anchor. Creation installs the initial GSI owners and root directo
 before publishing that fingerprint. The anchor stores no growing range inventory. Activation replay compares that fingerprint, preserving later
 leaf mutations. Base activation now verifies a directory copy receipt through
 the same publication contract.
+
 The 1,024-entry native activation regression checks replay and corrupted input;
 these are metadata entries, not 1,024 active owners. Public initial placement
 remains capped at 256 ranges per table/index.
@@ -191,6 +229,7 @@ identities, bounds and copy fingerprints. Children install in a non-serving stat
 The controller captures their durable installation receipts before publishing
 child references in the parent. That commit removes the parent's bounded copy;
 its immutable split remains available to finish opening children after restart.
+
 A former leaf now returns redirects and rejects stale writes. Opening children
 is an authenticated controller operation, like data-range opening: the controller
 must observe parent publication first. A participant command does not perform a
@@ -204,17 +243,21 @@ depth ceiling is 127; adversarial depth/rebalancing qualification remains open.
 This is a bounded primitive, not a literal unlimited-capacity promise.
 
 Provisioning now constructs replica limits from the compiled Cell type instead
-of assuming every type uses 512/64 MiB. Initial bootstrap, idle restoration and
-expired-owner restoration use the same declared limits. Existing account, data,
-index, coordinator and credential declarations retain their existing ceilings.
-The directory namespace uses signed peer admission and placement for child copies
-and idle restoration. Split and retirement controllers follow live remote owners
-and use the existing expired-session takeover path when required. Published paths
-require cataloged identity and a durable root before restoration; a missing child
-cannot be replaced with an empty node. Account, credential and coordinator targets
-remain outside this admission capability. Background GSI discovery restores at most the current and next metadata path
-for each page. Terminal directory nodes can release residency under the runtime
-generation and settled-work checks; their durable roots remain. Live directory
+of assuming every type uses 512/64 MiB. Initial bootstrap, idle restoration
+and expired-owner restoration use the same declared limits. Existing account,
+data, index, coordinator and credential declarations retain their existing
+ceilings. The directory namespace uses signed peer admission and placement for
+child copies and idle restoration.
+
+Split and retirement controllers follow live remote owners and use the
+existing expired-session takeover path when required. Published paths require
+cataloged identity and a durable root before restoration; a missing child
+cannot be replaced with an empty node. Account, credential and coordinator
+targets remain outside this admission capability. Background GSI discovery
+restores at most the current and next metadata path for each page.
+
+Terminal directory nodes can release residency under the runtime generation
+and settled-work checks; their durable roots remain. Live directory
 rebalancing and general branch/leaf residency still need qualification.
 
 ### Directory retirement
@@ -229,31 +272,41 @@ the terminal fence. Retained SQL rows and command receipts are not garbage-colle
 `provision/directory.rs::retire_directory_step` advances one bounded path and
 records a child's durable retirement before its parent can finish. Published
 children require existing authority. For unpublished children, the retained
-parent intent authorizes installing a terminal fence even if copying never began. A lost receipt is recovered from the child's terminal state. Missing
-or unavailable published children leave retirement pending. Public DeleteTable first fences the table generation. The capacity worker runs
-this protocol for every index intent, records its terminal receipt against that
-generation, then continues bounded account cleanup. An unpublished creation intent
-also authorizes a missing root's terminal fence, preventing delayed installation
-after deletion. These native commands trust the authenticated lifecycle controller
-to verify the account or parent intent; they do not read other Cells. Name reuse waits for every
-index acknowledgement; delayed receipts cannot affect a replacement generation.
+parent intent authorizes installing a terminal fence even if copying never
+began. A lost receipt is recovered from the child's terminal state. Missing or
+unavailable published children leave retirement pending.
+
+Public DeleteTable first fences the table generation. The capacity worker runs
+this protocol for every index intent, records its terminal receipt against
+that generation, then continues bounded account cleanup. An unpublished
+creation intent also authorizes a missing root's terminal fence, preventing
+delayed installation after deletion. These native commands trust the
+authenticated lifecycle controller to verify the account or parent intent;
+they do not read other Cells.
+
+Name reuse waits for every index acknowledgement; delayed receipts cannot
+affect a replacement generation.
 
 ### Evidence and remaining integration
 
-`tests/elastic_cells/directory_tree.rs` runs the native client through the real
-Cell app, host, SQL runtime and object-store recovery. It installs 1,024 route
-entries, rejects a full-leaf reservation and a corrupt child copy, then replaces
-the owner before any child copy, after one copy, and after parent publication.
-The controller restores every case. Tests also check stale-parent writes,
-leaf-version conflicts, reservations blocking metadata movement, independent
-child writers, install replay after mutation, recursive splitting and an unchanged
-ancestor. These are metadata entries, not 1,024 active data owners. Focused test:
-passed in 5.33 seconds with retirement coverage. It also interrupts retirement
-after a grandchild commit but before its parent acknowledgement, leaves another
-published child owned by an unavailable host, and verifies eventual completion
-after that owner releases it. Wrong-generation retirement and delayed install,
-open, split and range-publication attempts are rejected. This is native protocol
-proof, not DynamoDB SDK cutover.
+`tests/elastic_cells/directory_tree.rs` runs the native client through the
+real Cell app, host, SQL runtime and object-store recovery. It installs 1,024
+route entries, rejects a full-leaf reservation and a corrupt child copy, then
+replaces the owner before any child copy, after one copy, and after parent
+publication. The controller restores every case.
+
+Tests also check stale-parent writes, leaf-version conflicts, reservations
+blocking metadata movement, independent child writers, install replay after
+mutation, recursive splitting and an unchanged ancestor. These are metadata
+entries, not 1,024 active data owners. Focused test: passed in 5.33 seconds
+with retirement coverage.
+
+It also interrupts retirement after a grandchild commit but before its parent
+acknowledgement, leaves another published child owned by an unavailable host,
+and verifies eventual completion after that owner releases it.
+Wrong-generation retirement and delayed install, open, split and
+range-publication attempts are rejected. This is native protocol proof, not
+DynamoDB SDK cutover.
 
 `tests/peer_network/residency/directories.rs` runs split/copy/open over signed mTLS
 between two leased hosts, verifies remote ownership, restores a released child
@@ -283,6 +336,7 @@ range in one child, releases the metadata owners, then checks paginated Scan and
 Query after restoration. DeleteTable waits for directory retirement before the
 catalog generation disappears. Three repetitions passed (9.35, 6.27 and 5.29 s).
 Two runs exercised rejection by a full peer followed by successful placement.
+
 The original scenario exposed stale signed capacity: new admission previously
 claimed ownership before rejecting capacity, and converted the capacity error
 into a generic transport failure. Admission now checks capacity before a new
@@ -412,6 +466,7 @@ settled base/GSI owner, using the same runtime generation, queue, publication an
 lease checks as metadata admission. The released owner retains its exact root,
 items, locks and journals. Fresh range bootstrap still requires free capacity;
 this policy does not turn stale placement measurements into new ownership claims.
+
 The SDK recovery test revisits the original data ranges and the GSI after peer
 loss, exercising reuse of the eight slots across all nine durable owners.
 That extension caught a second gate: ownerless-root placement rejected the full
@@ -656,6 +711,7 @@ for two data participants, prepares one without recording its receipt, then
 drains the participant and coordinator owners. Account and three credential
 owners occupy four of six slots. The background recovery worker must restore
 the coordinator and alternate the two participants through the final slot.
+
 Local handle observations cannot restore the coordinator or drive the decision;
 the worker reaches COMMIT with both resolutions, then signed SDK strong reads
 verify both images. Transient capacity deferrals are observed before completion.

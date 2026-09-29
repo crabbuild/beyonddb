@@ -1,16 +1,56 @@
 # Streams implementation: closed-shard contract
 
-Status: [ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372) is
-open. BeyondDB pins the identical commit merged through crabbuild's
-[ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1).
-The older `extenddb-stream-completion.proposed.patch` records the
-original proposal against `bdb7b3df4ace3b80a6e928f144036d056aec0327`;
-the upstream PR supersedes it. Focused SQLite and engine tests, all three
-backend compile checks, and strict Clippy passed on current ExtendDB main.
-The signed process smoke covers SDK CreateTable/PutItem and AWS CLI Streams
-discovery/read through a hard restart. Broader Streams qualification remains open.
+## At a glance
+
+```text
+Item mutation
+      |
+      v
+Item + stream record commit in one Cell command
+      |
+      v
+Open source shard: More(cursor)
+      |
+      v
+Split seals source after its final record
+      +--------------------------+
+      |                          |
+      v                          v
+Exhausted source: End      Publish routes and open children
+                                 |
+                                 v
+                           Child shards: new records
+```
+
+| Boundary | Current state |
+| --- | --- |
+| Native journal | Item mutations and stream intents commit together; selected signed restart smoke passed. |
+| Closed shard | The storage contract distinguishes an open empty page from an exhausted sealed shard. |
+| Open work | Policy transitions, physical collection, and full Streams compatibility qualification remain unfinished. |
+
+See [native journal slice](#native-journal-slice) for implemented behavior,
+[concrete proposed change](#concrete-proposed-change) for the shared continuation
+contract, and [remaining BeyondDB implementation](#remaining-beyonddb-implementation)
+for open work.
+
+## Dependency and verification record
+
+[ExtendDB PR #372](https://github.com/ExtendDB/extenddb/pull/372) and
+[ExtendDB fork PR #1](https://github.com/crabbuild/extenddb/pull/1) record the
+continuation-contract review. The older
+`extenddb-stream-completion.proposed.patch` targeted
+`bdb7b3df4ace3b80a6e928f144036d056aec0327`; the PR superseded that patch.
+BeyondDB currently pins `7eaa89b437feed0af0f05883d3f1493f86c6fc6d`
+in `Cargo.toml`.
+
+At the recorded verification point, focused SQLite and engine tests, all three
+backend compile checks, and strict Clippy passed. The signed process smoke
+covered SDK CreateTable/PutItem and AWS CLI Streams discovery/read through a
+hard restart. Broader Streams qualification remains open.
 
 ## Native journal slice
+
+### Write capture
 
 `src/stream_journal.rs` appends a record to the item owner's SQL Cell in the
 same command as a direct Put, Update, or Delete. Both account and routed data
@@ -19,13 +59,18 @@ read inside the command, so a stale caller hint cannot suppress capture.
 Committed same-Cell and participant transaction writes use the same append
 path; rejected and aborted transactions do not apply staged images. Each
 command sequence plus operation ordinal gives a stable record position.
+
 Equal before and after images, and deletions of absent items, emit no record.
 Split import uses the item write helper without invoking the journal, so an
 imported copy does not appear as a new mutation.
+
+### Reading and shard identity
+
 Native account and partition queries read that journal in sequence order with
 a 1 MiB record budget and an exclusive sequence cursor. The account test
 follows multiple pages after owner restoration; the routed test reads its owner
 Cell and confirms imported children have no journal records.
+
 The partition query also reads the Cell's durable split seal. The ExtendDB
 storage method maps the final sealed page to `End` and an empty open page to
 `More(None)`, with a 23-digit sequence width and account-scoped routing. The
@@ -36,21 +81,27 @@ journal tail without scanning pages. Native account and routed tests cover
 validation and tail lookup. DescribeStream walks installed roots and durable
 split seals to expose parent/child lineage with bounded response pages.
 
+### Lifecycle, retention, and TTL
+
 This slice is exercised by the native account Cell test for insert, replay,
 equal-image Put, deletion, transaction commit, and rejection. The adapter now
 accepts `CreateTable(StreamSpecification)`, returns its stream ARN and view
 type in the table description, and passes streamed writes to the Cell command.
 ListStreams and DescribeStream use a generation catalog committed with table
 creation. DeleteTable marks that generation disabled before removing the table
-record. Catalog reads and record queries apply a 24-hour visibility cutoff;
-the old stream remains readable after deletion and table name reuse. The
-account Cell test covers this lifecycle. A signed process smoke creates a
-routed table, reads its record, restarts the server hard, and reads the same
-record again. Supervised account and routed Cell commands now delete expired
-journal rows in bounded batches. Active routed owners are swept locally. A
-durable per-account cursor scans verified tenant catalog shards to reach idle
-and deleted table Cells after owner restart. Expired stream catalog rows still
-need collection; policy replacement remains unsupported.
+record.
+
+Catalog reads and record queries apply a 24-hour visibility cutoff; the old
+stream remains readable after deletion and table name reuse. The account Cell
+test covers this lifecycle. A signed process smoke creates a routed table,
+reads its record, restarts the server hard, and reads the same record again.
+Supervised account and routed Cell commands now delete expired journal rows in
+bounded batches. Active routed owners are swept locally.
+
+A durable per-account cursor scans verified tenant catalog shards to reach
+idle and deleted table Cells after owner restart. Expired stream catalog rows
+still need collection; policy replacement remains unsupported.
+
 The TTL worker submits a marked delete to the routed owner Cell. That Cell
 checks its current TTL policy and the item's expiry before committing the
 deletion and stream record together. Its REMOVE record carries the
@@ -80,9 +131,9 @@ The previously pinned ExtendDB contract could not express this:
 - SQLite, PostgreSQL, and MongoDB all implement those last-sequence semantics.
   Their shard metadata already has an ending sequence, but reads do not use it
   to signal completion.
-- Current upstream main `998c12b72856dbaba8f3d508c62a4c4302be3229` was inspected
-  too. It still always produces another iterator; a pin update alone does not
-  resolve this boundary.
+- Upstream main at `998c12b72856dbaba8f3d508c62a4c4302be3229` was
+  inspected during the proposal. It still always produced another iterator;
+  a pin update to that revision alone would not resolve this boundary.
 
 Returning an empty page, a guessed cursor, or a storage error from BeyondDB
 cannot correctly terminate the iterator. A separate BeyondDB Streams HTTP
@@ -118,10 +169,11 @@ in the source Cell's seal command.
 
 ## Upstream integration
 
-The crabbuild fork commit is a reviewed, immutable dependency while the
-upstream PR is open. BeyondDB can release against this pin; move to an upstream
-revision after its contract is merged and qualified. PostgreSQL and MongoDB
-runtime tests and BeyondDB's broader signed SDK matrix remain open.
+The fork PR records the reviewed introduction of this contract. `Cargo.toml`
+is the source of truth for BeyondDB's current pin. Moving to an upstream
+revision requires reviewing that revision and qualifying the contract again.
+PostgreSQL and MongoDB runtime tests and BeyondDB's broader signed SDK matrix
+remain open.
 
 ## Remaining BeyondDB implementation
 

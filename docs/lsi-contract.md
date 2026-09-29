@@ -1,5 +1,36 @@
 # Local secondary index read contract
 
+## At a glance
+
+| Projection | CreateTable status | Read behavior |
+| --- | --- | --- |
+| `ALL` | Admitted | Index and base image share the owning Cell's read context. |
+| `KEYS_ONLY` | Rejected | Requires explicit selection and possible base-item fetch. |
+| `INCLUDE` | Rejected | Requires the same read-plan and capacity-accounting change. |
+
+The intended read path is:
+
+```text
+Query / Scan
+    |
+    v
+ExtendDB selects attributes and builds a read plan
+    |
+    v
+LSI entry in the owning Cell
+    |                     \
+    | projected only        \ nonprojected attribute requested
+    v                        v
+Return selected          Fetch base item in the same read context
+attributes                   |
+                             v
+                       Return selected attributes
+```
+
+The [reproduction](#reproduction-at-the-contract-boundary) shows the four
+selection cases. The [proposed upstream change](#proposed-upstream-change)
+defines the missing engine-to-storage contract.
+
 ## Current gate
 
 BeyondDB admits local secondary indexes with `ProjectionType=ALL`. KEYS_ONLY
@@ -7,13 +38,30 @@ and INCLUDE remain explicitly unsupported at CreateTable. The objective remains
 all DynamoDB projection modes; admitting those modes before fixing the engine
 boundary would silently return incorrect attributes or omit valid base fetches.
 
-The pinned ExtendDB revision is
-`bdb7b3df4ace3b80a6e928f144036d056aec0327`. No dependency change is applied here.
+The original contract review examined ExtendDB revision
+`bdb7b3df4ace3b80a6e928f144036d056aec0327`. BeyondDB currently pins
+`7eaa89b437feed0af0f05883d3f1493f86c6fc6d` in `Cargo.toml`; the
+non-`ALL` gate remains. This document makes no dependency change.
 
 ## Reproduction at the contract boundary
 
 Create a table with HASH `pk`, RANGE `sk`, and an LSI on `pk`/`score`, projection
 KEYS_ONLY. Write `{pk: "a", sk: 1, score: 2, payload: "value"}`.
+
+For example, the request asking for the base-only attribute is valid DynamoDB
+Query JSON (after substituting the table and index names):
+
+```json
+{
+  "TableName": "ExampleTable",
+  "IndexName": "ByScore",
+  "KeyConditionExpression": "pk = :pk",
+  "ExpressionAttributeValues": {
+    ":pk": { "S": "a" }
+  },
+  "ProjectionExpression": "payload"
+}
+```
 
 | Query/Scan request | Required returned attributes |
 | --- | --- |
