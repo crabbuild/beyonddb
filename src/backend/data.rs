@@ -35,12 +35,12 @@ use crate::{
     PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
     PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
     PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
-    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
-    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
-    ScanItemsOutcome, SortComparison, SortPredicate, TransactReadQuery, TransactWrite,
-    TransactWriteInput, TransactWriteNoReturn, TransactionFailure, TransactionOperation,
-    TransactionOutcome, TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn,
-    UpdateItemOutcome, data_key_hash,
+    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome,
+    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
+    SortComparison, SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput,
+    TransactWriteNoReturn, TransactionFailure, TransactionOperation, TransactionOutcome,
+    TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome,
+    data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -526,6 +526,32 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let no_return = !return_old && !return_new && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Update(UpdateItemInput {
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    key,
+                                    update,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                    }
+                    result?;
+                    return Ok((None, None));
+                }
                 let input = PartitionUpdateInput {
                     table_id: key_info.table_id.clone(),
                     epoch,
@@ -541,30 +567,6 @@ impl DataEngine for CellStorage {
                     {
                         Ok(committed) => match committed.output.0 {
                             PartitionUpdateOutcome::Applied { old, new } => (old, new),
-                            _ => {
-                                return Err(StorageError::Internal(
-                                    "unexpected partition update".into(),
-                                ));
-                            }
-                        },
-                        Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
-                            return Err(partition_update_rejection(committed.output.0));
-                        }
-                        Err(error) => return Err(cell_error(error)),
-                    }
-                } else if no_return {
-                    match self
-                        .client
-                        .command::<PartitionUpdateNoReturn>(
-                            &partition,
-                            mutation_identity()?,
-                            Json(input),
-                        )
-                        .await
-                    {
-                        Ok(committed) => match committed.output.0 {
-                            PartitionUpdateOutcome::AppliedNoReturn => (None, Item::new()),
                             _ => {
                                 return Err(StorageError::Internal(
                                     "unexpected partition update".into(),
