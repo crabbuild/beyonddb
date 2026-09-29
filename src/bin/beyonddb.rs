@@ -39,6 +39,9 @@ struct Config {
     node_retained_bytes: usize,
     #[serde(default = "default_max_active_cells")]
     max_active_cells: usize,
+    /// Optional SQL worker override. The runtime caps this at sixteen workers.
+    #[serde(default)]
+    sql_workers: Option<usize>,
     encryption_key_file: PathBuf,
     region: String,
     peer_bind: SocketAddr,
@@ -93,6 +96,8 @@ const fn default_max_active_cells() -> usize {
     128
 }
 
+const MAX_SQL_WORKERS: usize = 16;
+
 #[tokio::main]
 async fn main() -> ServerResult<()> {
     tracing_subscriber::fmt()
@@ -132,9 +137,12 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         || config.node_retained_bytes == 0
         || config.split_threshold_bytes == 0
         || config.max_active_cells == 0
+        || config
+            .sql_workers
+            .is_some_and(|workers| !(1..=MAX_SQL_WORKERS).contains(&workers))
     {
         return Err(invalid(
-            "disk, retained-byte, split, and active-cell budgets must be positive",
+            "disk, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
         )
         .into());
     }
@@ -206,11 +214,12 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let session = SessionId::from_bytes(*session_uuid.as_bytes());
     let session_dir = config.data_dir.join(session_uuid.to_string());
     tokio::fs::create_dir_all(&config.data_dir).await?;
+    let sql_workers = match config.sql_workers {
+        Some(workers) => SqlWorkerPool::new(workers, config.max_active_cells)?,
+        None => SqlWorkerPool::for_system(config.max_active_cells)?,
+    };
     let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(
-            SqlWorkerPool::for_system(config.max_active_cells)?,
-            config.node_retained_bytes,
-        )
+        .with_runtime(sql_workers, config.node_retained_bytes)
         .with_replica_host(
             Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
         )

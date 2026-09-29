@@ -127,6 +127,7 @@ Save the next JSON block as `config.json` in the repository root. Replace its ob
   "disk_budget_bytes": 107374182400,
   "node_retained_bytes": 1073741824,
   "max_active_cells": 128,
+  "sql_workers": 12,
   "encryption_key_file": "/etc/beyonddb/encryption.key",
   "region": "us-east-1",
   "peer_bind": "127.0.0.1:9001",
@@ -165,7 +166,7 @@ the authority check resumes after that window, and a drained Cell handle still
 rejects work immediately. This short owner cache improves warm local latency
 while bounding visibility of an ownership change.
 
-The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |

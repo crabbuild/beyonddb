@@ -107,6 +107,7 @@ file contains exactly 32 raw bytes and must be retained across restarts.
   "data_dir": "/srv/beyonddb/scratch",
   "disk_budget_bytes": 107374182400,
   "max_active_cells": 128,
+  "sql_workers": 12,
   "encryption_key_file": "/etc/beyonddb/encryption.key",
   "region": "us-east-1",
   "peer_bind": "0.0.0.0:9001",
