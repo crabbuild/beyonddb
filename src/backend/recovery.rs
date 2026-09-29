@@ -13,11 +13,12 @@ use crate::{
     ParticipantTransactionState, PendingCrossCellTransaction, PendingTransactionCursor,
     PendingTransactionState, ReadAccountTransaction, ReadCrossCellTransaction,
     ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, RecordReadResultRelease,
-    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, ResolveAccountTransaction,
-    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
+    ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadResultRelease,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantResolutions,
+    RecordReadResultReleases, RecordReadResultReleasesInput, ReleaseAccountTransactionReads,
+    ReleasePartitionTransactionReads, ResolveAccountTransaction, ResolvePartitionTransaction,
+    ResolveTransactionInput, ResolveTransactionOutcome, UnresolvedCoordinatorParticipant,
+    account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -209,13 +210,74 @@ impl CellStorage {
         let mut resolving = stream::iter(participants)
             .map(|participant| self.finish_participant(coordinator, read, participant, commit))
             .buffer_unordered(4);
+        let mut read_releases = Vec::new();
+        let mut resolutions = Vec::new();
         while let Some(result) = resolving.next().await {
-            if let Err(error) = result {
-                failure.get_or_insert(error);
+            match result {
+                Ok((true, input)) => read_releases.push(input),
+                Ok((false, input)) => resolutions.push(input),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
         }
         if let Some(error) = failure {
             return Err(error);
+        }
+        if !read_releases.is_empty() {
+            let receipts = read_releases
+                .into_iter()
+                .map(|input| ReadResultRelease {
+                    position: input.position,
+                    participant_cell: input.participant_cell,
+                    sequence: input.sequence,
+                })
+                .collect();
+            let recorded = self
+                .client
+                .command::<RecordReadResultReleases>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(RecordReadResultReleasesInput {
+                        account_id: read.account_id.clone(),
+                        transaction_id: read.transaction_id,
+                        routing_key: read.routing_key.clone(),
+                        releases: receipts,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+            if recorded.output.0.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                )
+            }) {
+                return Err(StorageError::Internal(
+                    "coordinator rejected read result release".into(),
+                ));
+            }
+        }
+        if !resolutions.is_empty() {
+            let recorded = self
+                .client
+                .command::<RecordParticipantResolutions>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(resolutions),
+                )
+                .await
+                .map_err(cell_error)?;
+            if recorded.output.0.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                )
+            }) {
+                return Err(StorageError::Internal(
+                    "coordinator rejected participant resolution".into(),
+                ));
+            }
         }
         let final_status = self
             .client
@@ -241,7 +303,7 @@ impl CellStorage {
         read: &ReadCrossCellTransactionInput,
         participant: UnresolvedCoordinatorParticipant,
         commit: bool,
-    ) -> Result<(), StorageError> {
+    ) -> Result<(bool, CoordinatorPhaseInput), StorageError> {
         let position = participant.position;
         let target = match participant.target {
             CoordinatorParticipantTarget::Account => account_target(&read.account_id)
@@ -287,30 +349,7 @@ impl CellStorage {
             participant_cell: *target.cell_id().as_bytes(),
             sequence: receipt.commit_sequence,
         });
-        let identity = mutation_identity()?;
-        let recorded = if participant.release_read_result {
-            self.client
-                .command::<RecordReadResultRelease>(coordinator, identity, input)
-                .await
-        } else {
-            self.client
-                .command::<RecordParticipantResolution>(coordinator, identity, input)
-                .await
-        };
-        match recorded {
-            Ok(committed)
-                if matches!(
-                    committed.output.0,
-                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                ) =>
-            {
-                Ok(())
-            }
-            Ok(_) | Err(InvocationError::Rejected(_)) => Err(StorageError::Internal(
-                "coordinator rejected participant resolution".into(),
-            )),
-            Err(error) => Err(cell_error(error)),
-        }
+        Ok((participant.release_read_result, input.0))
     }
 
     async fn resolve_participant(

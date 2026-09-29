@@ -14,7 +14,7 @@ use crate::{
     ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepares,
     TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
 };
 
@@ -205,54 +205,46 @@ impl CellStorage {
             evidence.push((position, target, receipt));
         }
 
-        // Evidence records are independent CAS updates on the coordinator.
-        // Publish them concurrently after all participant prepares succeed;
-        // durable ordering is carried by each participant position.
-        let recorded = stream::iter(evidence.into_iter().map(|(position, target, receipt)| {
-            let coordinator = coordinator.clone();
-            let read = read.clone();
-            async move {
-                let result = self
-                    .client
-                    .command::<RecordParticipantPrepare>(
-                        &coordinator,
-                        mutation_identity()?,
-                        Json(CoordinatorPhaseInput {
-                            account_id: read.account_id,
-                            transaction_id,
-                            routing_key: read.routing_key,
-                            position,
-                            participant_cell: *target.cell_id().as_bytes(),
-                            sequence: receipt.commit_sequence,
-                        }),
-                    )
-                    .await;
-                Ok::<_, StorageError>(result)
-            }
-        }))
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
-        for result in recorded {
-            let recorded = result?;
-            match recorded {
-                Ok(result)
-                    if matches!(
-                        result.output.0,
+        // Participant prepares already ran concurrently. Record their receipts
+        // in one coordinator command so the coordinator publishes one durable
+        // evidence update instead of one round trip per participant.
+        let phases = evidence
+            .into_iter()
+            .map(|(position, target, receipt)| CoordinatorPhaseInput {
+                account_id: read.account_id.clone(),
+                transaction_id,
+                routing_key: read.routing_key.clone(),
+                position,
+                participant_cell: *target.cell_id().as_bytes(),
+                sequence: receipt.commit_sequence,
+            })
+            .collect();
+        let recorded = self
+            .client
+            .command::<RecordParticipantPrepares>(&coordinator, mutation_identity()?, Json(phases))
+            .await;
+        match recorded {
+            Ok(result)
+                if result.output.0.iter().all(|outcome| {
+                    matches!(
+                        outcome,
                         CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                    ) => {}
-                Err(InvocationError::Rejected(result))
-                    if result.output.0 == CoordinatorPhaseOutcome::WrongDecision =>
-                {
-                    return self.finish_transaction(&coordinator, &read).await;
-                }
-                Ok(_) | Err(InvocationError::Rejected(_)) => {
-                    return Err(StorageError::Internal(
-                        "coordinator refused prepare evidence".into(),
-                    ));
-                }
-                Err(error) => return Err(cell_error(error)),
+                    )
+                }) => {}
+            Ok(result)
+                if result
+                    .output
+                    .0
+                    .contains(&CoordinatorPhaseOutcome::WrongDecision) =>
+            {
+                return self.finish_transaction(&coordinator, &read).await;
             }
+            Ok(_) | Err(InvocationError::Rejected(_)) => {
+                return Err(StorageError::Internal(
+                    "coordinator refused prepare evidence".into(),
+                ));
+            }
+            Err(error) => return Err(cell_error(error)),
         }
         self.decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
             .await

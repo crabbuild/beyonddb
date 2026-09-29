@@ -111,48 +111,88 @@ impl Command for RecordParticipantPrepare {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        phase_identity(context, &input.account_id, &input.routing_key)?;
-        let (state, prepared) = match phase_row(context, &input)? {
-            PhaseRow::Missing => {
-                return Ok(CommandResult::Rejected(Json(
-                    CoordinatorPhaseOutcome::Missing,
-                )));
-            }
-            PhaseRow::WrongParticipant => {
-                return Ok(CommandResult::Rejected(Json(
-                    CoordinatorPhaseOutcome::WrongParticipant,
-                )));
-            }
-            PhaseRow::Found {
-                state, prepared, ..
-            } => (state, prepared),
-        };
-        if state != 0 {
+        record_participant_prepare(context, input)
+    }
+}
+
+fn record_participant_prepare(
+    context: &mut CommandContext<'_, '_>,
+    input: CoordinatorPhaseInput,
+) -> Result<CommandResult<Json<CoordinatorPhaseOutcome>>> {
+    phase_identity(context, &input.account_id, &input.routing_key)?;
+    let (state, prepared) = match phase_row(context, &input)? {
+        PhaseRow::Missing => {
             return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::WrongDecision,
+                CoordinatorPhaseOutcome::Missing,
             )));
         }
-        if prepared.is_some() {
-            return Ok(CommandResult::Success(Json(
-                CoordinatorPhaseOutcome::Replay,
+        PhaseRow::WrongParticipant => {
+            return Ok(CommandResult::Rejected(Json(
+                CoordinatorPhaseOutcome::WrongParticipant,
             )));
         }
-        let sequence = i64::try_from(input.sequence)
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or(Error::Command("invalid prepare sequence"))?;
-        context.sql(&statement(
-            "UPDATE ddb_coordinator_participants SET prepared_sequence = ?1 \
+        PhaseRow::Found {
+            state, prepared, ..
+        } => (state, prepared),
+    };
+    if state != 0 {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::WrongDecision,
+        )));
+    }
+    if prepared.is_some() {
+        return Ok(CommandResult::Success(Json(
+            CoordinatorPhaseOutcome::Replay,
+        )));
+    }
+    let sequence = i64::try_from(input.sequence)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or(Error::Command("invalid prepare sequence"))?;
+    context.sql(&statement(
+        "UPDATE ddb_coordinator_participants SET prepared_sequence = ?1 \
              WHERE transaction_id = ?2 AND position = ?3 AND prepared_sequence IS NULL",
-            vec![
-                SqlValue::Integer(sequence),
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-            ],
-        ))?;
-        Ok(CommandResult::Success(Json(
-            CoordinatorPhaseOutcome::Recorded,
-        )))
+        vec![
+            SqlValue::Integer(sequence),
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+        ],
+    ))?;
+    Ok(CommandResult::Success(Json(
+        CoordinatorPhaseOutcome::Recorded,
+    )))
+}
+
+/// Batch durable evidence for independent participant prepares.
+pub struct RecordParticipantPrepares;
+
+impl Command for RecordParticipantPrepares {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 9;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<Vec<CoordinatorPhaseInput>>;
+    type Output = Json<Vec<CoordinatorPhaseOutcome>>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        if input.is_empty() || input.len() > 100 {
+            return Err(Error::Command("prepare evidence batch is outside 1..=100"));
+        }
+        let results = input
+            .into_iter()
+            .map(|input| record_participant_prepare(context, input))
+            .collect::<Result<Vec<_>>>()?;
+        let outcomes = results
+            .into_iter()
+            .map(|result| match result {
+                CommandResult::Success(Json(outcome)) | CommandResult::Rejected(Json(outcome)) => {
+                    outcome
+                }
+            })
+            .collect();
+        Ok(CommandResult::Success(Json(outcomes)))
     }
 }
 
@@ -278,82 +318,124 @@ impl Command for RecordParticipantResolution {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        phase_identity(context, &input.account_id, &input.routing_key)?;
-        let (state, resolved) = match phase_row(context, &input)? {
-            PhaseRow::Missing => {
-                return Ok(CommandResult::Rejected(Json(
-                    CoordinatorPhaseOutcome::Missing,
-                )));
-            }
-            PhaseRow::WrongParticipant => {
-                return Ok(CommandResult::Rejected(Json(
-                    CoordinatorPhaseOutcome::WrongParticipant,
-                )));
-            }
-            PhaseRow::Found {
-                state, resolved, ..
-            } => (state, resolved),
-        };
-        if state == 0 {
+        record_participant_resolution(context, input)
+    }
+}
+
+fn record_participant_resolution(
+    context: &mut CommandContext<'_, '_>,
+    input: CoordinatorPhaseInput,
+) -> Result<CommandResult<Json<CoordinatorPhaseOutcome>>> {
+    phase_identity(context, &input.account_id, &input.routing_key)?;
+    let (state, resolved) = match phase_row(context, &input)? {
+        PhaseRow::Missing => {
             return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::WrongDecision,
+                CoordinatorPhaseOutcome::Missing,
             )));
         }
-        if resolved.is_some() {
-            return Ok(CommandResult::Success(Json(
-                CoordinatorPhaseOutcome::Replay,
+        PhaseRow::WrongParticipant => {
+            return Ok(CommandResult::Rejected(Json(
+                CoordinatorPhaseOutcome::WrongParticipant,
             )));
         }
-        let sequence = i64::try_from(input.sequence)
-            .ok()
-            .filter(|value| *value > 0)
-            .ok_or(Error::Command("invalid resolution sequence"))?;
-        context.sql(&statement(
-            "UPDATE ddb_coordinator_participants SET resolved_sequence = ?1 \
+        PhaseRow::Found {
+            state, resolved, ..
+        } => (state, resolved),
+    };
+    if state == 0 {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::WrongDecision,
+        )));
+    }
+    if resolved.is_some() {
+        return Ok(CommandResult::Success(Json(
+            CoordinatorPhaseOutcome::Replay,
+        )));
+    }
+    let sequence = i64::try_from(input.sequence)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or(Error::Command("invalid resolution sequence"))?;
+    context.sql(&statement(
+        "UPDATE ddb_coordinator_participants SET resolved_sequence = ?1 \
              WHERE transaction_id = ?2 AND position = ?3 AND resolved_sequence IS NULL",
-            vec![
-                SqlValue::Integer(sequence),
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-            ],
-        ))?;
-        // Terminal write replay needs the digest, target and receipts, but no
-        // operation images. Committed reads still need their position mapping;
-        // aborted reads never return images. Keep the decision payload at -1.
-        context.sql(&statement(
-            "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2 \
+        vec![
+            SqlValue::Integer(sequence),
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+        ],
+    ))?;
+    // Terminal write replay needs the digest, target and receipts, but no
+    // operation images. Committed reads still need their position mapping;
+    // aborted reads never return images. Keep the decision payload at -1.
+    context.sql(&statement(
+        "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2 \
              AND EXISTS (SELECT 1 FROM ddb_coordinator_participants \
              WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2))",
-            vec![
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-                SqlValue::Integer(state),
-            ],
-        ))?;
-        context.sql(&statement(
-            "UPDATE ddb_coordinator_participants SET operation_chunks = NULL \
+        vec![
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+            SqlValue::Integer(state),
+        ],
+    ))?;
+    context.sql(&statement(
+        "UPDATE ddb_coordinator_participants SET operation_chunks = NULL \
              WHERE transaction_id = ?1 AND position = ?2 AND (retain_operations = 0 OR ?3 = 2)",
-            vec![
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-                SqlValue::Integer(state),
-            ],
-        ))?;
-        // ExtendDB rolls back token claims on canceled writes. Release the slot
-        // only after every abort resolution, so retries cannot race old intents.
-        context.sql(&statement(
-            "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1, \
+        vec![
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+            SqlValue::Integer(state),
+        ],
+    ))?;
+    // ExtendDB rolls back token claims on canceled writes. Release the slot
+    // only after every abort resolution, so retries cannot race old intents.
+    context.sql(&statement(
+        "UPDATE ddb_coordinator_transactions SET unresolved_count = unresolved_count - 1, \
              token = CASE WHEN unresolved_count = 1 AND state = 2 THEN NULL ELSE token END, \
              completed_at_ms = CASE WHEN unresolved_count = 1 THEN ?2 ELSE completed_at_ms END \
              WHERE transaction_id = ?1 AND unresolved_count > 0",
-            vec![
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(context.now_ms()),
-            ],
-        ))?;
-        Ok(CommandResult::Success(Json(
-            CoordinatorPhaseOutcome::Recorded,
-        )))
+        vec![
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(context.now_ms()),
+        ],
+    ))?;
+    Ok(CommandResult::Success(Json(
+        CoordinatorPhaseOutcome::Recorded,
+    )))
+}
+
+/// Batch durable evidence for independent participant resolutions.
+pub struct RecordParticipantResolutions;
+
+impl Command for RecordParticipantResolutions {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 10;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<Vec<CoordinatorPhaseInput>>;
+    type Output = Json<Vec<CoordinatorPhaseOutcome>>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        if input.is_empty() || input.len() > 100 {
+            return Err(Error::Command(
+                "resolution evidence batch is outside 1..=100",
+            ));
+        }
+        let results = input
+            .into_iter()
+            .map(|input| record_participant_resolution(context, input))
+            .collect::<Result<Vec<_>>>()?;
+        let outcomes = results
+            .into_iter()
+            .map(|result| match result {
+                CommandResult::Success(Json(outcome)) | CommandResult::Rejected(Json(outcome)) => {
+                    outcome
+                }
+            })
+            .collect();
+        Ok(CommandResult::Success(Json(outcomes)))
     }
 }
 
