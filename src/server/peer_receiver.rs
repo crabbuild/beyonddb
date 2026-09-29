@@ -52,7 +52,7 @@ pub(super) struct LocalResolver {
     bootstrap: Option<NodeDirectory>,
 }
 
-const LOCAL_HANDLE_CACHE_TTL: Duration = Duration::from_millis(50);
+const LOCAL_HANDLE_CACHE_TTL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 struct CachedHandle {

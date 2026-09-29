@@ -159,7 +159,7 @@ metadata immediately; changes made through another node become visible after
 the cache TTL. Enabling the flag also caches complete routed directory pages
 for point operations. The owning data Cell rejects a stale epoch and the
 server drops that route entry, so a split is refreshed on the next request. It
-also keeps immutable catalog proofs and resident local Cell handles for 50 ms;
+also keeps immutable catalog proofs and resident local Cell handles for 500 ms;
 the authority check resumes after that window, and a drained Cell handle still
 rejects work immediately. This short owner cache improves warm local latency
 while bounding visibility of an ownership change.

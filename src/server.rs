@@ -145,7 +145,7 @@ impl BeyonddbPeers {
 
     /// Build a client with the opt-in short-lived local owner cache.
     ///
-    /// The cache keeps resident handles for 50 ms while the Cell handle still
+    /// The cache keeps resident handles for 500 ms while the Cell handle still
     /// fences drained owners. Authority is re-read after expiry, so ownership
     /// changes remain bounded by the cache window.
     pub fn client_with_cache(
