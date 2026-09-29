@@ -199,6 +199,10 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(28),
     OperationDescriptor {
         codec_version: 3,
+        // This query returns only an optional root spec, never item data.
+        // Reserving the generic 4 MiB result budget for every route lookup
+        // needlessly fills the account Cell mailbox under concurrent reads.
+        output_limit: 4 * 1024,
         ..operation(29)
     },
     participant::phase_operation(30),
