@@ -328,7 +328,7 @@ async fn serve_ready(
             .recover_owned_credential(key_id, &directory)
             .await?;
     }
-    let client = peers.client(provisioner.clone());
+    let client = peers.client_with_cache(provisioner.clone(), config.auth_cache_enabled);
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)

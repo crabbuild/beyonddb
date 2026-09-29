@@ -140,6 +140,19 @@ impl BeyonddbPeers {
 
     /// Build a client that places idle ranges/directories and recovers expired owners.
     pub fn client(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> CellClient {
+        self.client_with_cache(provisioner, false)
+    }
+
+    /// Build a client with the opt-in short-lived local owner cache.
+    ///
+    /// The cache keeps resident handles for 50 ms while the Cell handle still
+    /// fences drained owners. Authority is re-read after expiry, so ownership
+    /// changes remain bounded by the cache window.
+    pub fn client_with_cache(
+        &self,
+        provisioner: Arc<CellInitialPartitionProvisioner>,
+        handle_cache_enabled: bool,
+    ) -> CellClient {
         let principal =
             peer_receiver::peer_principal(self.placement.directory.fleet(), self.placement.session);
         CellClient::peer(
@@ -149,8 +162,12 @@ impl BeyonddbPeers {
             self.placement.round_trip.clone(),
         )
         .with_local_resolver(Arc::new(
-            peer_receiver::LocalResolver::serving(self, provisioner)
-                .with_placement(self.placement.clone()),
+            peer_receiver::LocalResolver::serving_with_cache(
+                self,
+                provisioner,
+                handle_cache_enabled,
+            )
+            .with_placement(self.placement.clone()),
         ))
     }
 

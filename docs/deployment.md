@@ -153,7 +153,11 @@ mutations invalidate cached credentials, policies, boundaries, and table
 metadata immediately; changes made through another node become visible after
 the cache TTL. Enabling the flag also caches complete routed directory pages
 for point operations. The owning data Cell rejects a stale epoch and the
-server drops that route entry, so a split is refreshed on the next request.
+server drops that route entry, so a split is refreshed on the next request. It
+also keeps immutable catalog proofs and resident local Cell handles for 50 ms;
+the authority check resumes after that window, and a drained Cell handle still
+rejects work immediately. This short owner cache improves warm local latency
+while bounding visibility of an ownership change.
 
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
