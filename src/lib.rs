@@ -170,7 +170,7 @@ const fn no_return_transaction_operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 32] = [
+static COMMANDS: [OperationDescriptor; 33] = [
     operation(1),
     operation(2),
     operation(3),
@@ -222,6 +222,7 @@ static COMMANDS: [OperationDescriptor; 32] = [
     no_return_operation(51),
     operation(52),
     no_return_transaction_operation(53),
+    no_return_operation(55),
 ];
 static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
@@ -450,6 +451,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<PutItem>()?;
         registry.bind_command::<PutItemNoReturn>()?;
         registry.bind_command::<DeleteItem>()?;
+        registry.bind_command::<DeleteItemNoReturn>()?;
         registry.bind_command::<TransactWrite>()?;
         registry.bind_command::<TransactWriteNoReturn>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
