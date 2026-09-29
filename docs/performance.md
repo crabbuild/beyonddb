@@ -58,7 +58,7 @@ aws dynamodb create-table \
   --billing-mode PAY_PER_REQUEST
 
 python3 -m pip install boto3
-python3 scripts/bench_sdk.py \
+python3 scripts/bench.py \
   --endpoint "$BEYONDDB_ENDPOINT" \
   --table PerfData \
   --seconds 30 \
@@ -66,7 +66,7 @@ python3 scripts/bench_sdk.py \
   --output perf-results.json
 
 # Run a broader API sample on a disposable table.
-python3 scripts/bench_sdk.py \
+python3 scripts/bench.py \
   --endpoint "$BEYONDDB_ENDPOINT" \
   --table PerfData \
   --seconds 30 \
