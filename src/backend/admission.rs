@@ -20,6 +20,7 @@ use crate::{
 pub(super) struct AdmittedTransaction {
     pub identity: ReadCrossCellTransactionInput,
     pub decision: CoordinatorDecision,
+    pub participant_count: u8,
     pub replay: bool,
 }
 
@@ -242,8 +243,8 @@ impl CellStorage {
         transaction_id: [u8; 16],
         prior: CoordinatorDecision,
     ) -> Result<AdmittedTransaction, StorageError> {
-        let decision = self
-            .resume_cross_cell_transaction(account_id, &routing_key, transaction_id)
+        let status = self
+            .resume_cross_cell_transaction_status(account_id, &routing_key, transaction_id)
             .await?;
         Ok(AdmittedTransaction {
             identity: ReadCrossCellTransactionInput {
@@ -251,7 +252,8 @@ impl CellStorage {
                 routing_key,
                 transaction_id,
             },
-            decision,
+            decision: status.decision,
+            participant_count: status.participant_count,
             replay: prior == CoordinatorDecision::Commit,
         })
     }

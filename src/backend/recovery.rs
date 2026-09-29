@@ -8,11 +8,11 @@ use futures_util::{StreamExt, stream};
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
-    CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
-    DecideCrossCellTransactionOutcome, Json, NAMESPACE, ParticipantTransactionState,
-    PendingCrossCellTransaction, PendingTransactionCursor, PendingTransactionState,
-    ReadAccountTransaction, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionTransaction, ReadPendingCrossCellTransactions,
+    CoordinatorPhaseOutcome, CrossCellTransactionStatus, DecideCrossCellTransaction,
+    DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json, NAMESPACE,
+    ParticipantTransactionState, PendingCrossCellTransaction, PendingTransactionCursor,
+    PendingTransactionState, ReadAccountTransaction, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
     ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
     ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, RecordReadResultRelease,
     ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, ResolveAccountTransaction,
@@ -172,6 +172,16 @@ impl CellStorage {
             .output
             .0
             .ok_or_else(|| StorageError::Internal("coordinator transaction is missing".into()))?;
+        self.finish_decided_cross_cell_transaction_from_status(&coordinator, &read, status)
+            .await
+    }
+
+    pub(super) async fn finish_decided_cross_cell_transaction_from_status(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        status: CrossCellTransactionStatus,
+    ) -> Result<(), StorageError> {
         let commit = match status.decision {
             CoordinatorDecision::Begin => {
                 return Err(StorageError::Transient(
@@ -187,7 +197,7 @@ impl CellStorage {
         }
         let participants = self
             .client
-            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read.clone()))
+            .query::<ReadUnresolvedCoordinatorParticipants>(coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -197,7 +207,7 @@ impl CellStorage {
         // window so a slow owner cannot hold healthy keys, without fanning one
         // request out to all 100 participants or detaching work on cancellation.
         let mut resolving = stream::iter(participants)
-            .map(|participant| self.finish_participant(&coordinator, &read, participant, commit))
+            .map(|participant| self.finish_participant(coordinator, read, participant, commit))
             .buffer_unordered(4);
         while let Some(result) = resolving.next().await {
             if let Err(error) = result {
@@ -209,7 +219,7 @@ impl CellStorage {
         }
         let final_status = self
             .client
-            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
+            .query::<ReadCrossCellTransaction>(coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output

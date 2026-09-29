@@ -30,6 +30,18 @@ impl CellStorage {
         routing_key: &[u8],
         transaction_id: [u8; 16],
     ) -> Result<CoordinatorDecision, StorageError> {
+        Ok(self
+            .resume_cross_cell_transaction_status(account_id, routing_key, transaction_id)
+            .await?
+            .decision)
+    }
+
+    pub(super) async fn resume_cross_cell_transaction_status(
+        &self,
+        account_id: &str,
+        routing_key: &[u8],
+        transaction_id: [u8; 16],
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let coordinator = coordinator_target(account_id, routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
         let read = ReadCrossCellTransactionInput {
@@ -264,20 +276,16 @@ impl CellStorage {
         &self,
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
-    ) -> Result<CoordinatorDecision, StorageError> {
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let status = self.transaction_status(coordinator, read).await?;
         if status.decision == CoordinatorDecision::Begin {
             return Err(StorageError::Transient(
                 "transaction decision remains pending".into(),
             ));
         }
-        self.finish_decided_cross_cell_transaction(
-            &read.account_id,
-            &read.routing_key,
-            read.transaction_id,
-        )
-        .await?;
-        Ok(status.decision)
+        self.finish_decided_cross_cell_transaction_from_status(coordinator, read, status.clone())
+            .await?;
+        Ok(status)
     }
 
     async fn decide_transaction(
@@ -285,7 +293,7 @@ impl CellStorage {
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
         decision: CoordinatorDecision,
-    ) -> Result<CoordinatorDecision, StorageError> {
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let result = self
             .client
             .command::<DecideCrossCellTransaction>(

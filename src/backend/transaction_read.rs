@@ -6,11 +6,12 @@ use futures_util::{StreamExt, stream};
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
-    BeginReadResultRelease, CoordinatorDecision, CoordinatorParticipantTarget, GetItemInput, Json,
-    ReadAccountTransactionResult, ReadCoordinatorParticipantInput, ReadCrossCellTransaction,
-    ReadPartitionTransactionResult, ReadTransactionInput, ReadTransactionResultInput,
-    TransactionFailure, TransactionOperation, TransactionReadResult, account_target,
-    coordinator_target, data_target,
+    BeginReadResultRelease, CoordinatorDecision, CoordinatorParticipantTarget,
+    CoordinatorPhaseInput, CoordinatorPhaseOutcome, GetItemInput, Json,
+    ReadAccountTransactionResult, ReadCoordinatorParticipantInput, ReadPartitionTransactionResult,
+    ReadTransactionInput, ReadTransactionResultInput, RecordReadResultRelease,
+    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, TransactionFailure,
+    TransactionOperation, TransactionReadResult, account_target, coordinator_target, data_target,
 };
 
 #[derive(Clone)]
@@ -50,31 +51,27 @@ impl CellStorage {
         let identity = admitted.identity;
         let coordinator = coordinator_target(account_id, &identity.routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
-        let status = self
-            .client
-            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(identity.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0
-            .ok_or_else(|| StorageError::Internal("read transaction disappeared".into()))?;
         let participant_inputs =
-            (0..status.participant_count).map(|position| ReadCoordinatorParticipantInput {
+            (0..admitted.participant_count).map(|position| ReadCoordinatorParticipantInput {
                 account_id: account_id.into(),
                 transaction_id: identity.transaction_id,
                 routing_key: identity.routing_key.clone(),
                 position,
                 chunk: 0,
             });
-        let participant_results = stream::iter(
-            participant_inputs
-                .map(|input| async { self.coordinator_participant(&coordinator, input).await }),
-        )
+        let participant_results = stream::iter(participant_inputs.map(|input| async {
+            let position = input.position;
+            (
+                position,
+                self.coordinator_participant(&coordinator, input).await,
+            )
+        }))
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
         let mut image_reads = Vec::new();
-        for result in participant_results {
+        let mut participant_targets = Vec::with_capacity(participant_results.len());
+        for (participant_position, result) in participant_results {
             let participant = result?.ok_or_else(|| {
                 StorageError::Internal("committed read operations are missing".into())
             })?;
@@ -89,6 +86,7 @@ impl CellStorage {
                 } => data_target(account_id, table_id, partition_id).map(ReadTarget::Data),
             }
             .map_err(|error| StorageError::Internal(error.to_string()))?;
+            participant_targets.push((participant_position, target.clone()));
             for (position, operation) in participant.operations.into_iter().enumerate() {
                 if !matches!(operation.operation, TransactionOperation::Read(_)) {
                     return Err(StorageError::Internal(
@@ -181,15 +179,85 @@ impl CellStorage {
                 "coordinator rejected read result acknowledgement".into(),
             ));
         }
-        if let Err(error) = self
-            .finish_decided_cross_cell_transaction(
-                account_id,
-                &identity.routing_key,
-                identity.transaction_id,
-            )
-            .await
-        {
-            tracing::warn!(%error, "transaction read result cleanup remains pending");
+        // The coordinator acknowledgement is durable. Release each participant
+        // directly from the targets already read above, avoiding a second
+        // coordinator status/participant-discovery round trip while preserving
+        // the same receipt ordering and restart recovery contract.
+        let cleanup = stream::iter(participant_targets.into_iter().map(|(position, target)| {
+            let coordinator = coordinator.clone();
+            let identity = identity.clone();
+            let account_id = account_id.to_owned();
+            async move {
+                let participant_cell = match &target {
+                    ReadTarget::Account(target) | ReadTarget::Data(target) => {
+                        *target.cell_id().as_bytes()
+                    }
+                };
+                let coordinator_cell = *coordinator.cell_id().as_bytes();
+                let released = match target {
+                    ReadTarget::Account(target) => {
+                        self.client
+                            .command::<ReleaseAccountTransactionReads>(
+                                &target,
+                                mutation_identity()?,
+                                Json(ReadTransactionInput {
+                                    transaction_id: identity.transaction_id,
+                                    coordinator_cell,
+                                }),
+                            )
+                            .await
+                    }
+                    ReadTarget::Data(target) => {
+                        self.client
+                            .command::<ReleasePartitionTransactionReads>(
+                                &target,
+                                mutation_identity()?,
+                                Json(ReadTransactionInput {
+                                    transaction_id: identity.transaction_id,
+                                    coordinator_cell,
+                                }),
+                            )
+                            .await
+                    }
+                }
+                .map_err(cell_error)?;
+                if !released.output.0 {
+                    return Err(StorageError::Internal(
+                        "participant rejected read result release".into(),
+                    ));
+                }
+                let recorded = self
+                    .client
+                    .command::<RecordReadResultRelease>(
+                        &coordinator,
+                        mutation_identity()?,
+                        Json(CoordinatorPhaseInput {
+                            account_id,
+                            transaction_id: identity.transaction_id,
+                            routing_key: identity.routing_key,
+                            position,
+                            participant_cell,
+                            sequence: released.receipt.commit_sequence,
+                        }),
+                    )
+                    .await
+                    .map_err(cell_error)?;
+                if !matches!(
+                    recorded.output.0,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                ) {
+                    return Err(StorageError::Internal(
+                        "coordinator rejected read result release".into(),
+                    ));
+                }
+                Ok::<_, StorageError>(())
+            }
+        }))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        for result in cleanup {
+            result?;
         }
         validate_read_size(items)
     }
