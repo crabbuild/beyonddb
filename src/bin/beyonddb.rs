@@ -55,8 +55,9 @@ struct Config {
     initial_partitions: u16,
     #[serde(default = "default_split_threshold")]
     split_threshold_bytes: u64,
-    /// Enable ExtendDB's stale-while-revalidate auth and table metadata caches.
-    /// Changes made on another node become visible after the cache TTL.
+    /// Enable stale-while-revalidate auth and table metadata caches plus the
+    /// complete-page routed table cache. Changes made on another node become
+    /// visible after the cache TTL or a stale-route rejection.
     #[serde(default)]
     auth_cache_enabled: bool,
     bootstrap: Option<BootstrapConfig>,

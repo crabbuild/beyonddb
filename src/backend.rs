@@ -14,7 +14,7 @@ mod transaction_read;
 mod transaction_transport;
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -90,6 +90,13 @@ pub struct CellStorage {
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
     account_placement_cache: Arc<RwLock<HashSet<String>>>,
+    route_cache: Arc<RwLock<HashMap<(String, String), CachedRoute>>>,
+    route_cache_enabled: bool,
+}
+
+#[derive(Clone)]
+struct CachedRoute {
+    partitions: Vec<crate::RoutePagePartition>,
 }
 
 impl CellStorage {
@@ -109,6 +116,8 @@ impl CellStorage {
             initial_partitions: None,
             coordinators: None,
             account_placement_cache: Arc::new(RwLock::new(HashSet::new())),
+            route_cache: Arc::new(RwLock::new(HashMap::new())),
+            route_cache_enabled: false,
         }
     }
 
@@ -130,6 +139,24 @@ impl CellStorage {
     ) -> Self {
         self.initial_partitions = Some(provisioner);
         self
+    }
+
+    /// Enables process-local caching for complete, immutable route pages.
+    ///
+    /// A stale cached route is rejected by the data Cell and invalidated; the
+    /// next request reads the current directory. Keep this opt-in alongside
+    /// other explicitly stale-tolerant serving caches.
+    #[must_use]
+    pub fn with_route_cache(mut self, enabled: bool) -> Self {
+        self.route_cache_enabled = enabled;
+        self
+    }
+
+    pub(super) async fn invalidate_route_cache(&self, account_id: &str, table_id: &str) {
+        self.route_cache
+            .write()
+            .await
+            .remove(&(account_id.to_owned(), table_id.to_owned()));
     }
 }
 
@@ -334,6 +361,10 @@ impl TableEngine for CellStorage {
                 .write()
                 .await
                 .remove(&previous.id);
+            self.route_cache
+                .write()
+                .await
+                .remove(&(account_id.clone(), previous.id.clone()));
             // A concurrent delete/recreate can change the name's generation.
             // Never attach the previous table's sample to the newly deleted one.
             let same_generation = record.id == previous.id;

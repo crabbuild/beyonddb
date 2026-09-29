@@ -151,7 +151,9 @@ generations can be changed by another node. Set it to `true` only when the
 cache's 60-second cross-node visibility window is acceptable. Local management
 mutations invalidate cached credentials, policies, boundaries, and table
 metadata immediately; changes made through another node become visible after
-the cache TTL.
+the cache TTL. Enabling the flag also caches complete routed directory pages
+for point operations. The owning data Cell rejects a stale epoch and the
+server drops that route entry, so a split is refreshed on the next request.
 
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 

@@ -46,6 +46,15 @@ impl CellStorage {
         }
         let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
+        let cache_key = (key_info.account_id.clone(), key_info.table_id.clone());
+        if self.route_cache_enabled
+            && let Some(route) = self.route_cache.read().await.get(&cache_key)
+            && let Some(partition) = route.partitions.iter().find(|partition| {
+                hash >= partition.lower && partition.upper.is_none_or(|upper| hash < upper)
+            })
+        {
+            return Ok(Some((partition.partition_id, partition.epoch)));
+        }
         let account = target(&key_info.account_id)?;
         match crate::read_route_page(
             &self.client,
@@ -69,10 +78,25 @@ impl CellStorage {
                 }
                 Ok(None)
             }
-            RoutePageOutcome::Changed => Err(stale_partition()),
-            RoutePageOutcome::Page { partitions, .. } => {
+            RoutePageOutcome::Changed => {
+                self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                    .await;
+                Err(stale_partition())
+            }
+            RoutePageOutcome::Page {
+                epoch: _,
+                partitions,
+                has_more,
+            } => {
                 let range = partitions.first().ok_or_else(stale_partition)?;
-                Ok(Some((range.partition_id, range.epoch)))
+                let selected = (range.partition_id, range.epoch);
+                if self.route_cache_enabled && !has_more {
+                    self.route_cache
+                        .write()
+                        .await
+                        .insert(cache_key, super::super::CachedRoute { partitions });
+                }
+                Ok(Some(selected))
             }
         }
     }

@@ -100,7 +100,7 @@ impl DataEngine for CellStorage {
                         &partition,
                         mutation_identity()?,
                         Json(PartitionPutInput {
-                            table_id: key_info.table_id,
+                            table_id: key_info.table_id.clone(),
                             epoch,
                             item,
                             condition,
@@ -113,6 +113,8 @@ impl DataEngine for CellStorage {
                         _ => return Err(StorageError::Internal("unexpected partition put".into())),
                     },
                     Err(InvocationError::Rejected(committed)) => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                            .await;
                         return Err(partition_put_rejection(committed.output.0));
                     }
                     Err(error) => return Err(cell_error(error)),
@@ -122,7 +124,7 @@ impl DataEngine for CellStorage {
             let target = target(&key_info.account_id)?;
             let input = PutItemInput {
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 item,
                 condition,
             };
@@ -162,7 +164,7 @@ impl DataEngine for CellStorage {
                         &partition,
                         &key_info.account_id,
                         Json(PartitionGetInput {
-                            table_id: key_info.table_id,
+                            table_id: key_info.table_id.clone(),
                             epoch,
                             key,
                         }),
@@ -180,7 +182,11 @@ impl DataEngine for CellStorage {
                     | PartitionGetOutcome::StaleRoute
                     | PartitionGetOutcome::Sealed
                     | PartitionGetOutcome::NotReady
-                    | PartitionGetOutcome::WrongPartition => Err(stale_partition()),
+                    | PartitionGetOutcome::WrongPartition => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                            .await;
+                        Err(stale_partition())
+                    }
                 };
             }
             let target = target(&key_info.account_id)?;
@@ -190,7 +196,7 @@ impl DataEngine for CellStorage {
                     &key_info.account_id,
                     Json(GetItemInput {
                         table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id,
+                        table_id: key_info.table_id.clone(),
                         key,
                     }),
                 )
@@ -231,7 +237,7 @@ impl DataEngine for CellStorage {
                         mutation_identity()?,
                         Json(PartitionDeleteInput {
                             return_old,
-                            table_id: key_info.table_id,
+                            table_id: key_info.table_id.clone(),
                             epoch,
                             key,
                             condition,
@@ -249,6 +255,8 @@ impl DataEngine for CellStorage {
                         }
                     },
                     Err(InvocationError::Rejected(committed)) => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                            .await;
                         return Err(partition_delete_rejection(committed.output.0));
                     }
                     Err(error) => return Err(cell_error(error)),
@@ -259,7 +267,7 @@ impl DataEngine for CellStorage {
             let input = DeleteItemInput {
                 return_old,
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 key,
                 condition,
             };
@@ -303,7 +311,7 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let input = PartitionUpdateInput {
-                    table_id: key_info.table_id,
+                    table_id: key_info.table_id.clone(),
                     epoch,
                     key,
                     update,
@@ -323,6 +331,8 @@ impl DataEngine for CellStorage {
                         }
                     },
                     Err(InvocationError::Rejected(committed)) => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                            .await;
                         return Err(partition_update_rejection(committed.output.0));
                     }
                     Err(error) => return Err(cell_error(error)),
@@ -335,7 +345,7 @@ impl DataEngine for CellStorage {
             let target = target(&key_info.account_id)?;
             let input = UpdateItemInput {
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 key,
                 update,
                 condition,
@@ -485,7 +495,11 @@ impl DataEngine for CellStorage {
                     | PartitionQueryOutcome::StaleRoute
                     | PartitionQueryOutcome::Sealed
                     | PartitionQueryOutcome::NotReady
-                    | PartitionQueryOutcome::WrongPartition => Err(stale_partition()),
+                    | PartitionQueryOutcome::WrongPartition => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                            .await;
+                        Err(stale_partition())
+                    }
                 };
             }
             if let Some(start) = exclusive_start_key {

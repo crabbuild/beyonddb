@@ -257,7 +257,8 @@ pub fn build_http_state_with_cache(
     let storage: Arc<dyn StorageEngine> = Arc::new(
         CellStorage::new(client.clone(), region)
             .with_transaction_coordinators(provisioner.clone())
-            .with_initial_partitions(provisioner),
+            .with_initial_partitions(provisioner)
+            .with_route_cache(cache_enabled),
     );
     let credentials: Arc<dyn extenddb_auth::CredentialStore> = Arc::new(CellCredentialStore::new(
         client.clone(),
