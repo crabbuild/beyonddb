@@ -65,7 +65,7 @@ static COMMANDS: [OperationDescriptor; 23] = [
     operation(6),
     operation(7),
     operation(8),
-    operation(9),
+    crate::transaction_write_operation(9),
     operation(10),
     operation(11),
     operation(12),

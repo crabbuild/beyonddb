@@ -112,6 +112,10 @@ const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
 // the generic 4 MiB command envelope.
 const NO_RETURN_INPUT_BYTES: u32 = 1024 * 1024;
 const NO_RETURN_OUTPUT_BYTES: u32 = 64 * 1024;
+// A transaction write can return one failed item's old image, but never a
+// successful item list. Keep the result envelope below the generic operation
+// bound while retaining the full 4 MiB input budget for up to 100 operations.
+const TRANSACTION_WRITE_OUTPUT_BYTES: u32 = 1024 * 1024;
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NAMESPACE,
@@ -144,11 +148,22 @@ const fn no_return_operation(id: u32) -> OperationDescriptor {
     }
 }
 
+const fn transaction_write_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: OPERATION_BYTES,
+        output_limit: TRANSACTION_WRITE_OUTPUT_BYTES,
+    }
+}
+
 static COMMANDS: [OperationDescriptor; 31] = [
     operation(1),
     operation(2),
     operation(3),
-    operation(5),
+    transaction_write_operation(5),
     operation(7),
     operation(8),
     operation(9),
