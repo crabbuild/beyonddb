@@ -99,12 +99,12 @@ use beyonddb::{
     ReadPartitionState, ReadPartitionStreamJournal, ReadPartitionTransaction,
     ReadPendingCrossCellTransactions, ReadPendingCrossCellTransactionsInput, ReadTransactionInput,
     ReadTtlSchedule, ReadTtlSweep, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
-    RecordParticipantResolution, ResolvePartitionTransaction, ResolveTransactionInput,
-    ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome, SealPartition,
-    SealPartitionOutcome, SplitPlan, StreamConfig, StreamJournalInput, StreamJournalOutcome,
-    TableRoute, TableSpec, TransactionOperation, TransactionToken, UpdateTtl, UpdateTtlInput,
-    account_target, build_http_state, coordinator_target, credential_target, data_key_hash,
-    data_target, initialize_account, initialize_coordinator, initialize_partition,
+    RecordParticipantResolution, RecordParticipantResolutions, ResolvePartitionTransaction,
+    ResolveTransactionInput, ResolveTransactionOutcome, RoutePageInput, RoutePageOutcome,
+    SealPartition, SealPartitionOutcome, SplitPlan, StreamConfig, StreamJournalInput,
+    StreamJournalOutcome, TableRoute, TableSpec, TransactionOperation, TransactionToken, UpdateTtl,
+    UpdateTtlInput, account_target, build_http_state, coordinator_target, credential_target,
+    data_key_hash, data_target, initialize_account, initialize_coordinator, initialize_partition,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;

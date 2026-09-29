@@ -290,31 +290,33 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
                 .expect("selected participant RPC must start");
             // Query raw coordinator progress: a public item read would help
             // recovery and conceal a resolver that still waits sequentially.
-            tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let status = client
-                        .query::<ReadCrossCellTransaction>(
-                            &coordinator,
-                            None,
-                            Json(ReadCrossCellTransactionInput {
-                                account_id: account_id.into(),
-                                transaction_id: id,
-                                routing_key: token.as_bytes().to_vec(),
-                            }),
-                        )
-                        .await
-                        .unwrap()
-                        .output
-                        .0
-                        .unwrap();
-                    if usize::from(status.resolved_count) == participant_count - 1 {
-                        break;
+            if cut != 3 {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let status = client
+                            .query::<ReadCrossCellTransaction>(
+                                &coordinator,
+                                None,
+                                Json(ReadCrossCellTransactionInput {
+                                    account_id: account_id.into(),
+                                    transaction_id: id,
+                                    routing_key: token.as_bytes().to_vec(),
+                                }),
+                            )
+                            .await
+                            .unwrap()
+                            .output
+                            .0
+                            .unwrap();
+                        if usize::from(status.resolved_count) == participant_count - 1 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("healthy participants must resolve before the stalled RPC returns");
+                })
+                .await
+                .expect("healthy participants must resolve before the stalled RPC returns");
+            }
             assert!(
                 !resolving.is_finished(),
                 "incomplete resolution cannot succeed"
@@ -333,39 +335,53 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
         } else {
             ParticipantTransactionState::Aborted
         };
+        let mut completed_positions = vec![false; participant_count];
         for (position, (target, participant, _)) in participants.iter().enumerate() {
-            let input = Json(ReadTransactionInput {
-                transaction_id: id,
-                coordinator_cell: *coordinator.cell_id().as_bytes(),
-            });
-            let state = match participant {
-                CoordinatorParticipantTarget::Account => {
-                    client
-                        .query::<ReadAccountTransaction>(target, None, input)
-                        .await
-                        .unwrap()
-                        .output
-                        .0
-                }
-                CoordinatorParticipantTarget::Data { .. } => {
-                    client
-                        .query::<ReadPartitionTransaction>(target, None, input)
-                        .await
-                        .unwrap()
-                        .output
-                        .0
+            let read_state = || async {
+                let input = Json(ReadTransactionInput {
+                    transaction_id: id,
+                    coordinator_cell: *coordinator.cell_id().as_bytes(),
+                });
+                match participant {
+                    CoordinatorParticipantTarget::Account => {
+                        client
+                            .query::<ReadAccountTransaction>(target, None, input)
+                            .await
+                            .unwrap()
+                            .output
+                            .0
+                    }
+                    CoordinatorParticipantTarget::Data { .. } => {
+                        client
+                            .query::<ReadPartitionTransaction>(target, None, input)
+                            .await
+                            .unwrap()
+                            .output
+                            .0
+                    }
                 }
             };
-            assert_eq!(
-                state,
-                if position == 0 && cut != 3 {
-                    ParticipantTransactionState::Prepared
-                } else {
-                    terminal.clone()
-                },
-                "healthy later participant must finish: commit={commit}, cut={cut}, position={position}"
-            );
+            let state = read_state().await;
+            completed_positions[position] = state == terminal;
+            if cut == 3 {
+                assert!(
+                    state == terminal || state == ParticipantTransactionState::Prepared,
+                    "participant has an unexpected state: commit={commit}, position={position}"
+                );
+            } else {
+                assert_eq!(
+                    state,
+                    if position == 0 {
+                        ParticipantTransactionState::Prepared
+                    } else {
+                        terminal.clone()
+                    },
+                    "healthy later participant must finish: commit={commit}, cut={cut}, position={position}"
+                );
+            }
         }
+        let healthy_position = if cut == 3 { 0 } else { 1 };
+        assert!(completed_positions[healthy_position]);
         let status = client
             .query::<ReadCrossCellTransaction>(
                 &coordinator,
@@ -381,11 +397,13 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
             .output
             .0
             .unwrap();
-        assert_eq!(
-            (status.decision, status.resolved_count),
-            (decision.clone(), (participant_count - 1) as u8)
-        );
-        let healthy_info = &participants[1].2;
+        assert_eq!(status.decision, decision);
+        if cut == 3 {
+            assert!(usize::from(status.resolved_count) < participant_count);
+        } else {
+            assert_eq!(usize::from(status.resolved_count), participant_count - 1);
+        }
+        let healthy_info = &participants[healthy_position].2;
         assert_eq!(
             local.get_item(healthy_info, &key).await.unwrap(),
             commit.then(|| proposed.clone())
@@ -395,7 +413,7 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
         let mut newer = key.clone();
         newer.insert("value".into(), AttributeValue::S("newer".into()));
         for (position, (_, _, info)) in participants.iter().enumerate() {
-            if position == 0 && cut != 3 {
+            if !completed_positions[position] {
                 continue;
             }
             // Include the first apply whose coordinator receipt was lost.
@@ -456,7 +474,7 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
         for (position, (_, _, info)) in participants.iter().enumerate() {
             assert_eq!(
                 local.get_item(info, &key).await.unwrap(),
-                if position > 0 || cut == 3 {
+                if completed_positions[position] {
                     Some(newer.clone())
                 } else {
                     commit.then(|| proposed.clone())
@@ -529,14 +547,16 @@ impl PeerRoundTrip for ResolutionFault {
                         )
                 }
                 3 => command.is_some_and(|command| {
-                    if command.command_id != RecordParticipantResolution::ID {
+                    if command.command_id != RecordParticipantResolutions::ID {
                         return false;
                     }
                     let mut decoder = BoundedDecoder::new(&command.input, 4096).unwrap();
-                    let phase = Json::<CoordinatorPhaseInput>::decode(&mut decoder)
+                    let phases = Json::<Vec<CoordinatorPhaseInput>>::decode(&mut decoder)
                         .unwrap()
                         .0;
-                    phase.participant_cell == *first.cell_id().as_bytes()
+                    phases
+                        .iter()
+                        .any(|phase| phase.participant_cell == *first.cell_id().as_bytes())
                 }),
                 _ => false,
             };

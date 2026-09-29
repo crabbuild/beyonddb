@@ -43,7 +43,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 64 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(session)
         .build_unleased_for_maintenance()
@@ -389,7 +389,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
 
     let next_session = SessionId::from_bytes([214; 16]);
     let restored = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
+        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 64 * 1024 * 1024)
         .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
         .with_session(next_session)
         .build_unleased_for_maintenance()

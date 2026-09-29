@@ -13,7 +13,7 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
 ) {
     let session = SessionId::from_bytes([221; 16]);
     let runtime =
-        CellRuntime::new(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024, session).unwrap();
+        CellRuntime::new(SqlWorkerPool::new(1, 8).unwrap(), 64 * 1024 * 1024, session).unwrap();
     let signer = PeerSigner::new(
         session,
         registry.release_digest(),
@@ -80,8 +80,8 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         .unwrap();
     assert_eq!(
         lost.load(Ordering::SeqCst),
-        127,
-        "uploads, BEGIN, prepare, decision and resolution replies were dropped after dispatch"
+        15,
+        "inline BEGIN, prepare, decision and resolution replies were dropped after dispatch"
     );
     for info in &infos {
         assert_eq!(
@@ -181,7 +181,10 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         read,
         vec![Some(item.clone()), Some(new_item), None, Some(item.clone())]
     );
-    assert_eq!(lost.load(Ordering::SeqCst), 127);
+    assert_eq!(lost.load(Ordering::SeqCst), 15);
+    // The direct phase-command fixtures below exercise snapshot recovery,
+    // not lost replies. Keep the injector from consuming their uploads.
+    lost.store(127, Ordering::SeqCst);
     super::transaction_reads::assert_shared_snapshots(
         &client,
         &storage,

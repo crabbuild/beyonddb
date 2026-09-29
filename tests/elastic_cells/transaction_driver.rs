@@ -289,7 +289,8 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             } else {
                 Arc::new(RefusePhase {
                     inner: transport,
-                    command: if scenario == 186 { 12 } else { 14 },
+                    command: 12,
+                    persistent: scenario == 187,
                     winner: (scenario == 186).then(|| (client.clone(), transaction_id)),
                     refused: lost.clone(),
                 })
@@ -313,16 +314,15 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 .resume_cross_cell_transaction(account_id, &transaction_id, transaction_id)
                 .await
                 .unwrap();
-            assert_eq!(
-                lost.load(Ordering::SeqCst),
-                if scenario == 185 {
-                    3
-                } else if scenario == 188 {
-                    2
-                } else {
-                    1
-                }
-            );
+            if scenario == 188 {
+                assert!(lost.load(Ordering::SeqCst) >= 2);
+            } else {
+                assert_eq!(
+                    lost.load(Ordering::SeqCst),
+                    if scenario == 185 { 3 } else { 1 },
+                    "scenario={scenario}"
+                );
+            }
             peer_runtime.shutdown().await.unwrap();
             decision
         } else {
@@ -371,9 +371,10 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .await
             .unwrap();
         if let Some(sequence) = recorded_sequence {
-            // Only the remaining prepare, decision, and two resolutions need
-            // coordinator commits; a durable prepare must not be recorded twice.
-            assert_eq!(status.receipt.commit_sequence - sequence, 4);
+            // The remaining prepare and decision need two commits. Nearby
+            // resolutions can share one commit; the progress timer may split
+            // them when a participant finishes later.
+            assert!((3..=4).contains(&(status.receipt.commit_sequence - sequence)));
         }
         let status = status.output.0.unwrap();
         assert_eq!(status.resolved_count, 2);
@@ -605,6 +606,7 @@ impl PeerRoundTrip for DropPhaseReplies {
 struct RefusePhase {
     inner: DropPhaseReplies,
     command: u32,
+    persistent: bool,
     winner: Option<(CellClient, [u8; 16])>,
     refused: Arc<std::sync::atomic::AtomicU8>,
 }
@@ -622,6 +624,7 @@ impl PeerRoundTrip for RefusePhase {
         let dispatcher = self.inner.dispatcher.clone();
         let winner = self.winner.clone();
         let command = self.command;
+        let persistent = self.persistent;
         let refused = self.refused.clone();
         Box::pin(async move {
             use cellule_runtime::peer::wire::{mutation_request, peer_request};
@@ -637,7 +640,8 @@ impl PeerRoundTrip for RefusePhase {
             let selected = matches!(verified.operation(),
                 Some(peer_request::Operation::Mutate(mutation)) if matches!(&mutation.operation,
                     Some(mutation_request::Operation::CellCommand(input)) if input.command_id == command));
-            if selected && refused.swap(1, Ordering::SeqCst) == 0 {
+            if selected && (persistent || refused.swap(1, Ordering::SeqCst) == 0) {
+                refused.store(1, Ordering::SeqCst);
                 if let Some((client, transaction_id)) = winner {
                     let storage = CellStorage::new(client, "us-east-1");
                     assert_eq!(

@@ -1,8 +1,10 @@
 //! Serializable transactional reads from immutable participant snapshots.
 
+use cellule_runtime::client::InvocationError;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
+use std::time::Duration;
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
@@ -194,33 +196,37 @@ impl CellStorage {
                     }
                 };
                 let coordinator_cell = *coordinator.cell_id().as_bytes();
-                let released = match target {
-                    ReadTarget::Account(target) => {
-                        self.client
-                            .command::<ReleaseAccountTransactionReads>(
-                                &target,
-                                mutation_identity()?,
-                                Json(ReadTransactionInput {
-                                    transaction_id: identity.transaction_id,
-                                    coordinator_cell,
-                                }),
-                            )
-                            .await
+                let mutation = mutation_identity()?;
+                let mut admission_retries = 0;
+                let released = loop {
+                    let input = Json(ReadTransactionInput {
+                        transaction_id: identity.transaction_id,
+                        coordinator_cell,
+                    });
+                    let result = match &target {
+                        ReadTarget::Account(target) => {
+                            self.client
+                                .command::<ReleaseAccountTransactionReads>(target, mutation, input)
+                                .await
+                        }
+                        ReadTarget::Data(target) => {
+                            self.client
+                                .command::<ReleasePartitionTransactionReads>(
+                                    target, mutation, input,
+                                )
+                                .await
+                        }
+                    };
+                    match result {
+                        Err(InvocationError::NotStarted(cellule_runtime::Error::Capacity(_)))
+                            if admission_retries < 4 =>
+                        {
+                            admission_retries += 1;
+                            tokio::time::sleep(Duration::from_millis(2 << admission_retries)).await;
+                        }
+                        other => break other.map_err(cell_error)?,
                     }
-                    ReadTarget::Data(target) => {
-                        self.client
-                            .command::<ReleasePartitionTransactionReads>(
-                                &target,
-                                mutation_identity()?,
-                                Json(ReadTransactionInput {
-                                    transaction_id: identity.transaction_id,
-                                    coordinator_cell,
-                                }),
-                            )
-                            .await
-                    }
-                }
-                .map_err(cell_error)?;
+                };
                 if !released.output.0 {
                     return Err(StorageError::Internal(
                         "participant rejected read result release".into(),

@@ -4,6 +4,7 @@ use cellule_runtime::client::{InvocationError, Receipt};
 use cellule_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
+use std::time::Duration;
 
 use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
@@ -138,7 +139,21 @@ impl CellStorage {
         // capacity outcomes retain the prior participant order.
         let mut prepared = stream::iter(attempts.into_iter().map(
             |(position, payload, target, input)| async move {
-                let result = self.prepare_transaction_participant(&target, input).await;
+                let mut admission_retries = 0;
+                let result = loop {
+                    let result = self
+                        .prepare_transaction_participant(&target, input.clone())
+                        .await;
+                    match result {
+                        Err(PhaseError::Capacity(cellule_runtime::Error::Capacity(_)))
+                            if admission_retries < 4 =>
+                        {
+                            admission_retries += 1;
+                            tokio::time::sleep(Duration::from_millis(2 << admission_retries)).await;
+                        }
+                        other => break other,
+                    }
+                };
                 (position, payload, target, result)
             },
         ))
@@ -208,7 +223,7 @@ impl CellStorage {
         // Participant prepares already ran concurrently. Record their receipts
         // in one coordinator command so the coordinator publishes one durable
         // evidence update instead of one round trip per participant.
-        let phases = evidence
+        let phases: Vec<_> = evidence
             .into_iter()
             .map(|(position, target, receipt)| CoordinatorPhaseInput {
                 account_id: read.account_id.clone(),
@@ -219,6 +234,11 @@ impl CellStorage {
                 sequence: receipt.commit_sequence,
             })
             .collect();
+        if phases.is_empty() {
+            return self
+                .decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
+                .await;
+        }
         let recorded = self
             .client
             .command::<RecordParticipantPrepares>(&coordinator, mutation_identity()?, Json(phases))
@@ -417,6 +437,7 @@ impl CellStorage {
     }
 }
 
+#[derive(Clone)]
 enum ParticipantPrepare {
     Account(PrepareAccountTransactionInput),
     Data(PreparePartitionTransactionInput),
