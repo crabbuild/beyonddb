@@ -61,6 +61,8 @@ Same-Cell transactions now use one atomic Cell command after routing. This remov
 
 Cross-Cell read cleanup now records all participant release receipts in one coordinator command after the participant Cells have durably released their images. On a fresh four-partition fixture, random two-item signed SDK `TransactGetItems` measured 6.09 requests/s at one client (p95 268 ms) and 4.52 requests/s at eight clients (p95 6.46 s), with zero errors. The preceding equivalent run measured 5.58/3.43 requests/s and returned one eight-client `ServiceUnavailable`; this is a targeted stability and round-trip reduction, not evidence of SQLite-parity transaction capacity.
 
+Cross-Cell prepare and terminal-resolution receipts now use bounded coordinator batch commands after participant Cell work completes concurrently. A fresh four-partition fixture measured `TransactGetItems` at 5.71/4.28 requests/s for one/eight clients and `TransactWriteItems` at 1.17/1.26 requests/s, with zero errors. This removes one coordinator command per participant while retaining replay checks; the new fixture does not show a throughput increase, and durable participant publication remains the transaction bottleneck.
+
 Temporary stage timings on a separate instrumented fixture put typical credential, IAM, table record, and data Cell reads around 3–4 ms each, while each route traversal took around 6–7 ms. The requests perform several of these operations in sequence. The instrumented write fixture differed materially from the clean fixture, so its write timings are not a publication-cost estimate. A temporary S3 proxy disrupted publication and its counts were discarded.
 
 ## Run a repeatable point-operation sample
