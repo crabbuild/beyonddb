@@ -30,10 +30,11 @@ use crate::{
     ConditionCheckInput, DeleteItem, DeleteItemInput, GetItem, GetItemInput, GetItemOutcome,
     ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
     PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
-    PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PutItem, PutItemInput,
-    ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactionFailure,
-    TransactionOperation, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
+    PartitionPutNoReturn, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
+    PartitionQueryOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
+    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
+    ScanItemsOutcome, SortComparison, SortPredicate, TransactionFailure, TransactionOperation,
+    UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -94,30 +95,54 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             let key = extract_key(&item, &key_info.base_key_schema);
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
-                let outcome = self
-                    .client
-                    .command::<PartitionPut>(
-                        &partition,
-                        mutation_identity()?,
-                        Json(PartitionPutInput {
-                            table_id: key_info.table_id.clone(),
-                            epoch,
-                            item,
-                            condition,
-                        }),
-                    )
-                    .await;
-                let old = match outcome {
-                    Ok(committed) => match committed.output.0 {
-                        PartitionPutOutcome::Applied(old) => old,
-                        _ => return Err(StorageError::Internal("unexpected partition put".into())),
-                    },
-                    Err(InvocationError::Rejected(committed)) => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                            .await;
-                        return Err(partition_put_rejection(committed.output.0));
+                let input = Json(PartitionPutInput {
+                    table_id: key_info.table_id.clone(),
+                    epoch,
+                    item,
+                    condition,
+                });
+                let old = if return_old {
+                    match self
+                        .client
+                        .command::<PartitionPut>(&partition, mutation_identity()?, input)
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionPutOutcome::Applied(old) => old,
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition put".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_put_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
                     }
-                    Err(error) => return Err(cell_error(error)),
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionPutNoReturn>(&partition, mutation_identity()?, input)
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionPutOutcome::Applied(_) => None,
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition put".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_put_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
                 };
                 return Ok(if return_old { old } else { None });
             }
@@ -128,23 +153,44 @@ impl DataEngine for CellStorage {
                 item,
                 condition,
             };
-            let old = match self
-                .client
-                .command::<PutItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
-                Ok(committed) => match committed.output.0 {
-                    ItemMutationOutcome::Applied(old) => old,
-                    _ => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful put result".into(),
-                        ));
+            let old = if return_old {
+                match self
+                    .client
+                    .command::<PutItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(old) => old,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
                     }
-                },
-                Err(InvocationError::Rejected(committed)) => {
-                    return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    Err(error) => return Err(cell_error(error)),
                 }
-                Err(error) => return Err(cell_error(error)),
+            } else {
+                match self
+                    .client
+                    .command::<PutItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(_) => None,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
             };
             Ok(if return_old { old } else { None })
         })
@@ -317,25 +363,52 @@ impl DataEngine for CellStorage {
                     update,
                     condition,
                 };
-                let outcome = self
-                    .client
-                    .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
-                    .await;
-                let (old, new) = match outcome {
-                    Ok(committed) => match committed.output.0 {
-                        PartitionUpdateOutcome::Applied { old, new } => (old, new),
-                        _ => {
-                            return Err(StorageError::Internal(
-                                "unexpected partition update".into(),
-                            ));
+                let (old, new) = if return_old || return_new {
+                    match self
+                        .client
+                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition update".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_update_rejection(committed.output.0));
                         }
-                    },
-                    Err(InvocationError::Rejected(committed)) => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                            .await;
-                        return Err(partition_update_rejection(committed.output.0));
+                        Err(error) => return Err(cell_error(error)),
                     }
-                    Err(error) => return Err(cell_error(error)),
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionUpdateNoReturn>(
+                            &partition,
+                            mutation_identity()?,
+                            Json(input),
+                        )
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition update".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
+                                .await;
+                            return Err(partition_update_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
                 };
                 return Ok((
                     if return_old { old } else { None },
@@ -350,23 +423,44 @@ impl DataEngine for CellStorage {
                 update,
                 condition,
             };
-            let (old, new) = match self
-                .client
-                .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
-                Ok(committed) => match committed.output.0 {
-                    UpdateItemOutcome::Applied { old, new } => (old, new),
-                    _ => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful update result".into(),
-                        ));
+            let (old, new) = if return_old || return_new {
+                match self
+                    .client
+                    .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::Applied { old, new } => (old, new),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
                     }
-                },
-                Err(InvocationError::Rejected(committed)) => {
-                    return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    Err(error) => return Err(cell_error(error)),
                 }
-                Err(error) => return Err(cell_error(error)),
+            } else {
+                match self
+                    .client
+                    .command::<UpdateItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::Applied { old, new } => (old, new),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
             };
             Ok((
                 if return_old { old } else { None },

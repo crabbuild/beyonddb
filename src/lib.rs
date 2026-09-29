@@ -128,7 +128,7 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 28] = [
+static COMMANDS: [OperationDescriptor; 30] = [
     operation(1),
     operation(2),
     operation(3),
@@ -176,6 +176,8 @@ static COMMANDS: [OperationDescriptor; 28] = [
     operation(43),
     operation(44),
     operation(45),
+    operation(50),
+    operation(51),
 ];
 static QUERIES: [OperationDescriptor; 31] = [
     operation(4),
@@ -401,6 +403,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;
+        registry.bind_command::<PutItemNoReturn>()?;
         registry.bind_command::<DeleteItem>()?;
         registry.bind_command::<TransactWrite>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
@@ -414,6 +417,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ReadTableLifecycle>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
+        registry.bind_command::<UpdateItemNoReturn>()?;
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<authorization::PutPrincipalPolicy>()?;
         registry.bind_command::<authorization::DeletePrincipalPolicy>()?;
