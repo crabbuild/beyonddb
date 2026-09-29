@@ -1577,12 +1577,14 @@ fn write_item(
         let old = command_item(context, &key)?;
         crate::global_index::outbox::enqueue(context, table, &key, epoch, old, Some(item.clone()))?;
     }
+    let bytes = serde_json::to_vec(item)?;
+    let inline = bytes.len() <= crate::item_storage::CHUNK_BYTES;
     let (partition_key, sort_key) = index_key(item, &table.key_schema)?;
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
          (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch, logical_bytes) \
-         VALUES (?1, ?2, ?3, X'', ?4, ?5, ?6) ON CONFLICT(item_key) DO UPDATE SET \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(item_key) DO UPDATE SET \
          partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
          item = excluded.item, ttl_generation = excluded.ttl_generation, \
          ttl_epoch = excluded.ttl_epoch, logical_bytes = excluded.logical_bytes",
@@ -1590,12 +1592,15 @@ fn write_item(
             SqlValue::Blob(key.clone()),
             SqlValue::Blob(partition_key),
             SqlValue::Blob(sort_key),
+            SqlValue::Blob(if inline { bytes } else { Vec::new() }),
             ttl_generation,
             ttl_epoch,
             SqlValue::Integer(crate::statistics::item_bytes(item)?),
         ],
     ))?;
-    crate::item_storage::StoredValue::Partition(&key).write(context, item)?;
+    if !inline {
+        crate::item_storage::StoredValue::Partition(&key).write(context, item)?;
+    }
     crate::secondary_index::write(context, table, &key, item)
 }
 

@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, Result, SqlBatch, SqlResultSet, SqlValue, table::statement};
 
-const CHUNK_BYTES: usize = 256 * 1024;
+pub(crate) const CHUNK_BYTES: usize = 256 * 1024;
 
 pub(crate) enum StoredValue<'a> {
     Account {

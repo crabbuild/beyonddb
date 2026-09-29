@@ -587,17 +587,22 @@ fn write_item(
         let old = command_item(context, table_id, key)?;
         crate::global_index::outbox::enqueue(context, table, key, 0, old, Some(item.clone()))?;
     }
+    let bytes = serde_json::to_vec(item)?;
+    let inline = bytes.len() <= crate::item_storage::CHUNK_BYTES;
     context.sql(&statement(
-        "INSERT INTO ddb_items (table_id, item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, X'', ?5) ON CONFLICT(table_id, item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
+        "INSERT INTO ddb_items (table_id, item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(table_id, item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
         vec![
             SqlValue::Text(table_id.into()),
             SqlValue::Blob(key.to_vec()),
             SqlValue::Blob(crate::partition::key::partition_key_bytes(item, &table.key_schema)?),
             SqlValue::Blob(crate::partition::key::index_key(item, &table.key_schema)?.1),
+            SqlValue::Blob(if inline { bytes } else { Vec::new() }),
             SqlValue::Integer(crate::statistics::item_bytes(item)?),
         ],
     ))?;
-    crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
+    if !inline {
+        crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
+    }
     crate::secondary_index::write(context, table, key, item)
 }
 
