@@ -14,6 +14,7 @@ mod transaction_read;
 mod transaction_transport;
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -30,6 +31,7 @@ use extenddb_core::types::{
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
+use tokio::sync::RwLock;
 
 use super::{
     APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
@@ -87,6 +89,7 @@ pub struct CellStorage {
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
+    account_placement_cache: Arc<RwLock<HashSet<String>>>,
 }
 
 impl CellStorage {
@@ -105,6 +108,7 @@ impl CellStorage {
             region: region.into(),
             initial_partitions: None,
             coordinators: None,
+            account_placement_cache: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
