@@ -330,6 +330,10 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.account_placement_cache
+                .write()
+                .await
+                .remove(&previous.id);
             // A concurrent delete/recreate can change the name's generation.
             // Never attach the previous table's sample to the newly deleted one.
             let same_generation = record.id == previous.id;
