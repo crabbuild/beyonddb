@@ -5,6 +5,7 @@
 
 mod routed;
 
+use super::transaction_read::validate_read_size;
 use routed::{
     partition_delete_rejection, partition_put_rejection, partition_update_rejection,
     stale_partition,
@@ -31,15 +32,120 @@ use crate::{
     ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
     PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
     PartitionPutNoReturn, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
-    PartitionQueryOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
-    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
-    ScanItemsOutcome, SortComparison, SortPredicate, TransactionFailure, TransactionOperation,
+    PartitionQueryOutcome, PartitionTransactRead, PartitionTransactReadOutcome,
+    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteOutcome,
+    PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn, PartitionUpdateOutcome,
+    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
+    SortComparison, SortPredicate, TransactRead, TransactWrite, TransactWriteInput,
+    TransactionFailure, TransactionOperation, TransactionOutcome, TransactionReadOutcome,
     UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
 
 impl CellStorage {
+    async fn try_local_transaction_read(
+        &self,
+        account_id: &str,
+        inputs: Vec<GetItemInput>,
+        routing: Vec<(TableKeyInfo, Item)>,
+    ) -> Result<Option<Vec<Option<Item>>>, StorageError> {
+        let count = inputs.len();
+        let operations = inputs
+            .into_iter()
+            .map(TransactionOperation::Read)
+            .collect::<Vec<_>>();
+        let participants = self
+            .route_transaction_participants(account_id, operations.clone(), routing)
+            .await?;
+        if participants.len() != 1 {
+            return Ok(None);
+        }
+        let Some((_, participant)) = participants.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut participant_operations = participant.operations;
+        participant_operations.sort_unstable_by_key(|operation| operation.index);
+        let participant_operations = participant_operations
+            .into_iter()
+            .map(|operation| match operation.operation {
+                TransactionOperation::Read(input) => Ok(input),
+                _ => Err(()),
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(participant_operations) = participant_operations else {
+            return Ok(None);
+        };
+        if participant_operations.len() != count {
+            return Ok(None);
+        }
+        let transaction_operations = participant_operations
+            .into_iter()
+            .map(TransactionOperation::Read)
+            .collect();
+        match participant.target {
+            crate::CoordinatorParticipantTarget::Account => {
+                let target = target(account_id)?;
+                let result = self
+                    .client
+                    .command::<TransactRead>(
+                        &target,
+                        mutation_identity()?,
+                        Json(TransactWriteInput {
+                            operations: transaction_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => match committed.output.0 {
+                        TransactionReadOutcome::Applied(items) => Ok(Some(items)),
+                        TransactionReadOutcome::Rejected { index, reason } => {
+                            Err(transaction_canceled(index, reason, count, &[]))
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => match committed.output.0 {
+                        TransactionReadOutcome::Applied(_) => Err(StorageError::Internal(
+                            "unexpected rejected local account transaction read".into(),
+                        )),
+                        TransactionReadOutcome::Rejected { index, reason } => {
+                            Err(transaction_canceled(index, reason, count, &[]))
+                        }
+                    },
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+            crate::CoordinatorParticipantTarget::Data {
+                table_id,
+                partition_id,
+                epoch,
+            } => {
+                let target = crate::data_target(account_id, &table_id, &partition_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let result = self
+                    .client
+                    .command::<PartitionTransactRead>(
+                        &target,
+                        mutation_identity()?,
+                        Json(PartitionTransactWriteInput {
+                            table_id,
+                            epoch,
+                            operations: transaction_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => {
+                        local_partition_transaction_read_result(committed.output.0, count)
+                    }
+                    Err(InvocationError::Rejected(committed)) => {
+                        local_partition_transaction_read_result(committed.output.0, count)
+                    }
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+        }
+    }
+
     pub(super) async fn delete_expired_partition_item(
         &self,
         owner: &CellTarget,
@@ -789,6 +895,12 @@ impl DataEngine for CellStorage {
             .collect();
         Box::pin(async move {
             let (account_id, inputs) = prepared?;
+            if let Some(items) = self
+                .try_local_transaction_read(&account_id, inputs.clone(), routing.clone())
+                .await?
+            {
+                return validate_read_size(items);
+            }
             // Saved participant images keep a legal aggregate read from crossing
             // one Cell response. Use the same serialization boundary for every route.
             self.transaction_read(&account_id, inputs, routing).await
@@ -851,6 +963,19 @@ impl DataEngine for CellStorage {
                 ));
             }
             let count = operations.len();
+            if token.is_none()
+                && self
+                    .try_local_transaction_write(
+                        &account_id,
+                        operations.clone(),
+                        routing.clone(),
+                        count,
+                        &return_old_on_failure,
+                    )
+                    .await?
+            {
+                return Ok(());
+            }
             let admitted = self
                 .admit_transaction(&account_id, token, operations, routing)
                 .await?;
@@ -926,6 +1051,106 @@ fn segment_bounds(segment: u64, total: u64) -> ([u8; 16], Option<[u8; 16]>) {
     )
 }
 
+impl CellStorage {
+    async fn try_local_transaction_write(
+        &self,
+        account_id: &str,
+        operations: Vec<TransactionOperation>,
+        routing: Vec<(TableKeyInfo, Item)>,
+        count: usize,
+        return_old_on_failure: &[bool],
+    ) -> Result<bool, StorageError> {
+        let participants = self
+            .route_transaction_participants(account_id, operations.clone(), routing)
+            .await?;
+        if participants.len() != 1 {
+            return Ok(false);
+        }
+        let Some((_, participant)) = participants.into_iter().next() else {
+            return Ok(false);
+        };
+        // A coordinator is required as soon as a request spans Cells. The local
+        // commands already stage and apply every operation in one SQLite
+        // transaction, so bypassing the coordinator is safe for this case.
+        let mut participant_operations = participant.operations;
+        participant_operations.sort_unstable_by_key(|operation| operation.index);
+        let participant_operations = participant_operations
+            .into_iter()
+            .map(|operation| operation.operation)
+            .collect::<Vec<_>>();
+        if participant_operations.len() != operations.len() {
+            return Ok(false);
+        }
+        match participant.target {
+            crate::CoordinatorParticipantTarget::Account => {
+                let target = target(account_id)?;
+                let result = self
+                    .client
+                    .command::<TransactWrite>(
+                        &target,
+                        mutation_identity()?,
+                        Json(TransactWriteInput {
+                            operations: participant_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => match committed.output.0 {
+                        TransactionOutcome::Applied => Ok(true),
+                        TransactionOutcome::Rejected { index, reason } => Err(
+                            transaction_canceled(index, reason, count, return_old_on_failure),
+                        ),
+                    },
+                    Err(InvocationError::Rejected(committed)) => match committed.output.0 {
+                        TransactionOutcome::Applied => Err(StorageError::Internal(
+                            "unexpected rejected local account transaction".into(),
+                        )),
+                        TransactionOutcome::Rejected { index, reason } => Err(
+                            transaction_canceled(index, reason, count, return_old_on_failure),
+                        ),
+                    },
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+            crate::CoordinatorParticipantTarget::Data {
+                table_id,
+                partition_id,
+                epoch,
+            } => {
+                let target = crate::data_target(account_id, &table_id, &partition_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let result = self
+                    .client
+                    .command::<PartitionTransactWrite>(
+                        &target,
+                        mutation_identity()?,
+                        Json(PartitionTransactWriteInput {
+                            table_id,
+                            epoch,
+                            operations: participant_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => local_partition_transaction_result(
+                        committed.output.0,
+                        count,
+                        return_old_on_failure,
+                    ),
+                    Err(InvocationError::Rejected(committed)) => {
+                        local_partition_transaction_result(
+                            committed.output.0,
+                            count,
+                            return_old_on_failure,
+                        )
+                    }
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn transaction_canceled(
     index: usize,
     reason: TransactionFailure,
@@ -959,6 +1184,44 @@ pub(super) fn transaction_canceled(
         };
     }
     StorageError::TransactionCanceled(reasons)
+}
+
+fn local_partition_transaction_result(
+    outcome: PartitionTransactWriteOutcome,
+    count: usize,
+    return_old_on_failure: &[bool],
+) -> Result<bool, StorageError> {
+    match outcome {
+        PartitionTransactWriteOutcome::Applied => Ok(true),
+        PartitionTransactWriteOutcome::Rejected { index, reason } => Err(transaction_canceled(
+            index,
+            reason,
+            count,
+            return_old_on_failure,
+        )),
+        PartitionTransactWriteOutcome::NotInstalled
+        | PartitionTransactWriteOutcome::StaleRoute
+        | PartitionTransactWriteOutcome::Sealed
+        | PartitionTransactWriteOutcome::NotReady
+        | PartitionTransactWriteOutcome::WrongPartition => Err(stale_partition()),
+    }
+}
+
+fn local_partition_transaction_read_result(
+    outcome: PartitionTransactReadOutcome,
+    count: usize,
+) -> Result<Option<Vec<Option<Item>>>, StorageError> {
+    match outcome {
+        PartitionTransactReadOutcome::Applied(items) => Ok(Some(items)),
+        PartitionTransactReadOutcome::Rejected { index, reason } => {
+            Err(transaction_canceled(index, reason, count, &[]))
+        }
+        PartitionTransactReadOutcome::NotInstalled
+        | PartitionTransactReadOutcome::StaleRoute
+        | PartitionTransactReadOutcome::Sealed
+        | PartitionTransactReadOutcome::NotReady
+        | PartitionTransactReadOutcome::WrongPartition => Err(stale_partition()),
+    }
 }
 
 struct PreparedQuery {

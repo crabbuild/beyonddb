@@ -144,7 +144,7 @@ const fn no_return_operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 30] = [
+static COMMANDS: [OperationDescriptor; 31] = [
     operation(1),
     operation(2),
     operation(3),
@@ -194,6 +194,7 @@ static COMMANDS: [OperationDescriptor; 30] = [
     operation(45),
     no_return_operation(50),
     no_return_operation(51),
+    operation(52),
 ];
 static QUERIES: [OperationDescriptor; 31] = [
     operation(4),
@@ -434,6 +435,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
         registry.bind_command::<UpdateItemNoReturn>()?;
+        registry.bind_command::<TransactRead>()?;
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<authorization::PutPrincipalPolicy>()?;
         registry.bind_command::<authorization::DeletePrincipalPolicy>()?;

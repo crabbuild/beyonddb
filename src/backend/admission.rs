@@ -88,7 +88,7 @@ impl CellStorage {
         .await
     }
 
-    async fn route_transaction_participants(
+    pub(super) async fn route_transaction_participants(
         &self,
         account_id: &str,
         operations: Vec<TransactionOperation>,

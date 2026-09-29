@@ -185,6 +185,49 @@ pub(super) fn write(
     Ok(TransactionOutcome::Applied)
 }
 
+/// Result of an atomic read batch confined to one account Cell.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TransactionReadOutcome {
+    /// Every requested image was read from one Cell snapshot.
+    Applied(Vec<Option<Item>>),
+    /// No image was returned because one operation failed validation or locking.
+    Rejected {
+        /// Position of the failing read.
+        index: usize,
+        /// Validation or transaction conflict reason.
+        reason: TransactionFailure,
+    },
+}
+
+/// Read a transaction batch atomically when every item belongs to one account Cell.
+pub struct TransactRead;
+
+impl Command for TransactRead {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 52;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactWriteInput>;
+    type Output = Json<TransactionReadOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let staged = match stage(context, input.operations)? {
+            Ok(staged) => staged,
+            Err((index, reason)) => {
+                return Ok(CommandResult::Rejected(Json(
+                    TransactionReadOutcome::Rejected { index, reason },
+                )));
+            }
+        };
+        let images = staged.into_iter().map(|image| image.image).collect();
+        Ok(CommandResult::Success(Json(
+            TransactionReadOutcome::Applied(images),
+        )))
+    }
+}
+
 /// Prepare read or write operations on unrouted tables in one account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrepareAccountTransactionInput {
