@@ -1,5 +1,18 @@
 # Global secondary indexes
 
+## At a glance
+
+| Question | Current contract |
+| --- | --- |
+| When does the base write commit? | The item change and immutable projection journal entry commit together in the base Cell. |
+| When does an index change appear? | A worker applies the journal entry asynchronously, so GSI reads are eventually consistent. |
+| What prevents stale replay? | Each projected row carries a source epoch and sequence; tombstones retain deletion versions. |
+| What remains open? | Online index changes, bounded tombstone collection, projection throughput, and fleet recovery qualification. |
+
+Follow [durable asynchronous maintenance](#durable-asynchronous-maintenance)
+for the write path, [splits and recovery](#splits-and-recovery) for owner changes,
+and the [evidence map](#evidence-map) for code and tests.
+
 ## Current implementation
 
 CreateTable installs independent index range Cells before publishing the base
@@ -17,20 +30,29 @@ reads and ALL_ATTRIBUTES on partial projections.
 
 Indexes created with the table now support automatic HASH-range splits. Online
 Create/Delete/Update index operations, index statistics, tombstone collection,
-sealed-source storage collection, and fleet-scale recovery qualification remain unfinished. Each index range has
-a 512-MiB database budget and a 64-MiB capture budget. Adding initial ranges is
-not an unlimited scaling claim.
+sealed-source storage collection, and fleet-scale recovery qualification remain
+unfinished. Each index range has a 512-MiB database budget and a 64-MiB capture
+budget. Adding initial ranges is not an unlimited scaling claim.
 
 ## Durable asynchronous maintenance
 
-```mermaid
-flowchart LR
-    Base[Base Cell command] --> Item[Base item and local indexes]
-    Base --> Journal[Immutable projection journal]
-    Journal --> Worker[Bounded projection worker]
-    Worker --> Index[Versioned index range mutations]
-    Index --> Ack[Durable success or superseded version]
-    Ack --> Retire[Delete source journal entry]
+```text
+Base Cell command
+    +--> base item + local indexes
+    |
+    +--> immutable projection journal
+              |
+              v
+       bounded projection worker
+              |
+              v
+       versioned index range mutation
+              |
+              v
+       durable success or superseded version for every index
+              |
+              v
+       acknowledge and delete source journal entry
 ```
 
 A base Put, Update, or Delete inserts its journal entry in the same command as
@@ -38,6 +60,7 @@ the data change. Transaction PREPARE stores no projection entry. COMMIT creates
 entries while applying staged base images; ABORT discards the staged images
 without emitting projection work. Prepare reserves space for journal metadata
 and the old/new images in addition to the existing base/local-index claim.
+
 The account and routed participant paths use the same journal representation.
 At 4-KiB pages, eight additional worst-case B-tree edits per changed item add
 about 137.5 MiB of reservation for a 100-write participant, before image bytes.
@@ -49,25 +72,30 @@ and the source range epoch plus actor sequence. It is shared across the table's
 indexes. Payload reads use 128-KiB chunks, so large old/new pairs do not have to
 fit one SQL result or peer response. An unchanged projection creates no work.
 
-For each index, the worker removes the old entry when the canonical key changes,
-then writes the new projected entry. A same-key replacement writes only the new
-image. The source acknowledges the journal entry only after every required
-mutation has a durable successful result. A lost reply, failed index owner, or
-interrupted worker leaves the entry available for retry. A failed index does
-not suppress projection to later healthy indexes; acknowledgement still waits
-for all indexes. Failed delivery durably moves the entry behind work already
-queued on that source. Enqueue and deferral use the same monotonically increasing
-source commit sequence for scheduling, so retries and new changes cannot pin one
-another at the head. The immutable projection version remains unchanged. This
-lets later base writes reach healthy indexes while another index is unavailable.
-Concurrent workers may process the same entry safely; deferral after another
-worker acknowledges it is a no-op.
+For each index, the worker removes the old entry when the canonical key
+changes, then writes the new projected entry. A same-key replacement writes
+only the new image. The source acknowledges the journal entry only after every
+required mutation has a durable successful result. A lost reply, failed index
+owner, or interrupted worker leaves the entry available for retry.
+
+A failed index does not suppress projection to later healthy indexes;
+acknowledgement still waits for all indexes. Failed delivery durably moves the
+entry behind work already queued on that source. Enqueue and deferral use the
+same monotonically increasing source commit sequence for scheduling, so
+retries and new changes cannot pin one another at the head. The immutable
+projection version remains unchanged.
+
+This lets later base writes reach healthy indexes while another index is
+unavailable. Concurrent workers may process the same entry safely; deferral
+after another worker acknowledges it is a no-op.
 
 Each index row retains a lexicographically ordered `(source_epoch, sequence)`
 version, a content digest, and either its projected image or a tombstone.
 Older versions are ignored, equal versions with identical content replay, and
-equal versions with different content are rejected. A delayed old image cannot
-resurrect a removed entry. Index identities include the base key, so versions
+equal versions with different content are rejected.
+
+A delayed old image cannot resurrect a removed entry. Index identities include
+the base key, so versions
 from different base items do not compete. This relies on the base routing
 contract: a key has one owner and a split gives its successor a higher epoch.
 
@@ -103,10 +131,12 @@ key contract. Participant reservations reject overlapping plans.
 Publication retains the plan until both children are open. A sweep can discover
 that plan through either routed child after a crash at cutover. The controller
 replays the sealed export, verifies both fingerprints, publishes, opens both
-children, then removes the plan and reservations. Table deletion fences the
-account generation, retires its directory tree, and acknowledges retirement
+children, then removes the plan and reservations.
+
+Table deletion fences the account generation, retires its directory tree, and
+acknowledges retirement
 before removing the account anchor. Directory roots retain terminal fences.
-See [metadata ownership](METADATA_SHARDING.md) for cutover qualification.
+See [metadata ownership](metadata-sharding.md) for cutover qualification.
 
 The serving account capacity loop visits base ranges, then each index's ranges.
 It uses occupied SQLite pages, including tombstones, and the existing configured
@@ -143,6 +173,7 @@ table it visits base route pages to replay journals, then each index's route
 pages to restore read availability even without pending writes. Each iteration
 visits at most one page (64 ranges), with four range attempts in flight. It
 advances before admission so a failed range is revisited on a later sweep.
+
 Sweep cursors are transient; projection versions and journal contents are durable.
 The projection and statistics sweeps list only live table generations. Public
 listing and deletion recovery include generations while deletion is pending,
@@ -189,10 +220,12 @@ runtime read-replica rebase. The expanded elastic suite passed all 28 tests in
 86.28 seconds, including partial-projection restart and binary prefix bounds.
 The account and peer-owner tests passed in 3.41 and 99.12 seconds. These are
 selected-path results; fleet throughput and recovery remain unqualified.
+
 After rebasing onto `396e0ab1b40` and fixing optional replica-query stack growth,
 the account, elastic, and peer suites again passed all 30 tests (3.47, 92.80,
 and 101.82 seconds). The runtime snapshot-read/fencing test, strict BeyondDB
 Clippy, HTTP-server all-target check, and Cell/LTX layout checks also passed.
+
 The final rebased signed SDK/RustFS server-process smoke passed in 339.11
 seconds, including the added wrong-sort-operand validation check, GSI state
 recovery, and transaction-token replay after hard restart.
@@ -214,7 +247,9 @@ The signed peer fixture creates an indexed table on a live remote owner and
 checks that the already-serving recovery node leaves it there. After the old
 node stops renewing its lease, the worker must restore the base and index,
 preserve the old projected image, and propagate a subsequent signed SDK write
-without restarting the recovery node. It passed in 92.47 seconds. The initial
+without restarting the recovery node.
+
+It passed in 92.47 seconds. The initial
 attempt failed because the new fixture table was absent from its IAM policy;
 the fixture now grants only that table and index alongside its existing tables.
 
@@ -222,6 +257,7 @@ the fixture now grants only that table and index alongside its existing tables.
 owners and the existing provisioner to recover them. The server supplies its
 provisioner and NodeDirectory; transaction recovery and startup retain their
 current authority boundary. This adds no second ownership or lease mechanism.
+
 Before this change, serving projection visited only base routes and stopped at
 the first failed index. Startup could restore indexes, but an empty journal
 provided no serving-time discovery. `origin/main` has no BeyondDB subtree;
@@ -254,8 +290,10 @@ controller; plans remain discoverable until both children open.
 The signed SDK capacity regression fills an eight-slot serving node, forces an
 index split, and verifies the durable plan survives capacity refusal. A supervised
 sweep stays healthy under pressure and resumes both independent plans after a
-second node joins. Children are placed remotely over mTLS. SDK Query/Scan with
-retries disabled survive metadata/child owner restoration; delayed projection
+second node joins. Children are placed remotely over mTLS.
+
+SDK Query/Scan with retries disabled survive metadata/child owner restoration;
+delayed projection
 cannot resurrect a copied tombstone, and a later key move converges. The test
 also covers participant reservation conflicts, metadata changes during a plan,
 stale page epochs, and deletion of a table with a pending plan.
@@ -263,8 +301,9 @@ stale page epochs, and deletion of a table with a pending plan.
 The transfer regression and existing journal replay regression passed. The existing
 idle-owner discovery test failed twice with `target Cell is not locally owned`
 and passed alone in 1.95 seconds. This repeats the intermittent result already
-recorded in `SCALING.md`: its final ownership observation can precede local
+recorded in `scaling.md`: its final ownership observation can precede local
 activation (`acquire_idle_restored` claims authority before restoring the actor).
+
 The test assertions were not changed. This remains unresolved evidence, not an
 all-green GSI suite claim. Strict all-target Clippy, standalone server build,
 format, and Cell layout/policy checks pass.
@@ -279,6 +318,7 @@ Latest focused proof: both base/index SDK capacity regressions pass (11.23s),
 publication-window recovery passes (11.05s), and the base numeric Query/Scan
 capacity regression passes (3.44s). Strict all-target Clippy passes (11.07s),
 the standalone server builds (19.21s), and format/layout/policy checks pass.
+
 The previously recorded intermittent idle-owner test has not been resolved by
 this work. Automatic GSI growth is demonstrated in bounded fixtures, not a
 full DynamoDB replacement or fleet-capacity guarantee.

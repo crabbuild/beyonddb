@@ -203,7 +203,7 @@ hierarchy. Unsupported host measurements advertise no placement capacity,
 although configured owned Cells can still serve. Initial data/GSI placement,
 request-driven restoration, and settled-range movement exist; a general
 distributed recovery scheduler and fleet load qualification do not.
-[Measured placement requirements](../SCALING.md#fleet-controller-boundary)
+[Measured placement requirements](scaling.md#fleet-controller-boundary)
 
 ## Recovery and upgrade limits
 
