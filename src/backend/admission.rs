@@ -6,6 +6,7 @@ use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
+use futures_util::{StreamExt, stream};
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
@@ -38,11 +39,31 @@ impl CellStorage {
             || proposed_id.to_vec(),
             |token| token.token.as_bytes().to_vec(),
         );
+        let coordinator = coordinator_target(account_id, &routing_key)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        if token.is_none() {
+            // Coordinator publication and current data routing use independent
+            // Cells. Start both parts of admission together for new requests;
+            // retries with a client token still take the immutable-token path
+            // below without probing current routes.
+            let ((), participants) = tokio::try_join!(
+                provisioner.ensure(&self.client, account_id, &routing_key),
+                self.route_transaction_participants(account_id, operations, routing),
+            )?;
+            return self
+                .begin_transaction(
+                    account_id,
+                    routing_key,
+                    coordinator,
+                    proposed_id,
+                    None,
+                    participants,
+                )
+                .await;
+        }
         provisioner
             .ensure(&self.client, account_id, &routing_key)
             .await?;
-        let coordinator = coordinator_target(account_id, &routing_key)
-            .map_err(|error| StorageError::Internal(error.to_string()))?;
         // Lookup precedes current routes: split children must never replace the
         // immutable participant set of a previously admitted client token.
         if let Some(token) = &token
@@ -52,16 +73,49 @@ impl CellStorage {
                 .complete_admission(account_id, routing_key, id, decision)
                 .await;
         }
+        let participants = self
+            .route_transaction_participants(account_id, operations, routing)
+            .await?;
+        self.begin_transaction(
+            account_id,
+            routing_key,
+            coordinator,
+            proposed_id,
+            token,
+            participants,
+        )
+        .await
+    }
+
+    async fn route_transaction_participants(
+        &self,
+        account_id: &str,
+        operations: Vec<TransactionOperation>,
+        routing: Vec<(TableKeyInfo, Item)>,
+    ) -> Result<BTreeMap<[u8; 32], CoordinatorParticipant>, StorageError> {
+        let mut routed = stream::iter(operations.into_iter().zip(routing).enumerate().map(
+            |(index, (operation, (info, key)))| async move {
+                let target = match self.routed_partition(&info, &key).await? {
+                    Some((partition_id, epoch)) => CoordinatorParticipantTarget::Data {
+                        table_id: info.table_id,
+                        partition_id,
+                        epoch,
+                    },
+                    None => CoordinatorParticipantTarget::Account,
+                };
+                Ok::<_, StorageError>((index, operation, target))
+            },
+        ))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        routed.sort_unstable_by_key(|result| match result {
+            Ok((index, ..)) => *index,
+            Err(_) => usize::MAX,
+        });
         let mut participants: BTreeMap<[u8; 32], CoordinatorParticipant> = BTreeMap::new();
-        for (index, (operation, (info, key))) in operations.into_iter().zip(routing).enumerate() {
-            let target = match self.routed_partition(&info, &key).await? {
-                Some((partition_id, epoch)) => CoordinatorParticipantTarget::Data {
-                    table_id: info.table_id,
-                    partition_id,
-                    epoch,
-                },
-                None => CoordinatorParticipantTarget::Account,
-            };
+        for result in routed {
+            let (index, operation, target) = result?;
             let cell = target
                 .cell_id(account_id)
                 .map_err(|error| StorageError::Internal(error.to_string()))?;
@@ -82,6 +136,18 @@ impl CellStorage {
                 .operations
                 .push(IndexedTransactionOperation { index, operation });
         }
+        Ok(participants)
+    }
+
+    async fn begin_transaction(
+        &self,
+        account_id: &str,
+        routing_key: Vec<u8>,
+        coordinator: CellTarget,
+        proposed_id: [u8; 16],
+        token: Option<TransactionToken>,
+        participants: BTreeMap<[u8; 32], CoordinatorParticipant>,
+    ) -> Result<AdmittedTransaction, StorageError> {
         let input = BeginCrossCellTransactionInput {
             account_id: account_id.into(),
             transaction_id: proposed_id,

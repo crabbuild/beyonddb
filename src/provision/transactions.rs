@@ -660,18 +660,33 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 account_id: account_id.into(),
                 shard,
             };
-            let registered = client
-                .query::<crate::ReadCoordinatorRegistration>(&account, None, Json(input.clone()))
-                .await
-                .map_err(cell_error)?
-                .output
-                .0;
             // Registration is discovery, not residency. A released shard must
             // restore its published root before token lookup or a new BEGIN.
-            let observed = CellAuthority::new(self.layout.clone())
-                .load(target.cell_id())
-                .await
-                .map_err(provision_error)?;
+            // These reads use independent stores: the registration is in the
+            // account Cell and the authority record is local node metadata.
+            // Start them together so admission pays for the slower read once.
+            let (registered, observed) = tokio::try_join!(
+                async {
+                    Ok::<_, StorageError>(
+                        client
+                            .query::<crate::ReadCoordinatorRegistration>(
+                                &account,
+                                None,
+                                Json(input.clone()),
+                            )
+                            .await
+                            .map_err(cell_error)?
+                            .output
+                            .0,
+                    )
+                },
+                async {
+                    CellAuthority::new(self.layout.clone())
+                        .load(target.cell_id())
+                        .await
+                        .map_err(provision_error)
+                },
+            )?;
             if registered
                 && observed
                     .as_ref()

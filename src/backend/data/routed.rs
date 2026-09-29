@@ -32,6 +32,18 @@ impl CellStorage {
         key_info: &TableKeyInfo,
         key: &Item,
     ) -> Result<Option<([u8; 16], u64)>, StorageError> {
+        // Placement is immutable for a table generation. Once the account Cell
+        // has confirmed an account-local table, there can never be a directory
+        // for this table ID, so skip the route and placement reads on hot paths.
+        if !key_info.table_id.is_empty()
+            && self
+                .account_placement_cache
+                .read()
+                .await
+                .contains(&key_info.table_id)
+        {
+            return Ok(None);
+        }
         let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let account = target(&key_info.account_id)?;
@@ -49,6 +61,12 @@ impl CellStorage {
         {
             RoutePageOutcome::Unrouted => {
                 self.require_account_placement(key_info).await?;
+                if !key_info.table_id.is_empty() {
+                    self.account_placement_cache
+                        .write()
+                        .await
+                        .insert(key_info.table_id.clone());
+                }
                 Ok(None)
             }
             RoutePageOutcome::Changed => Err(stale_partition()),

@@ -4,7 +4,7 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state,
+    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state_with_cache,
     measured_node_capacity, shutdown_serving_node,
 };
 use cellule_app::CellApplication;
@@ -55,6 +55,10 @@ struct Config {
     initial_partitions: u16,
     #[serde(default = "default_split_threshold")]
     split_threshold_bytes: u64,
+    /// Enable ExtendDB's stale-while-revalidate auth and table metadata caches.
+    /// Changes made on another node become visible after the cache TTL.
+    #[serde(default)]
+    auth_cache_enabled: bool,
     bootstrap: Option<BootstrapConfig>,
 }
 
@@ -350,7 +354,7 @@ async fn serve_ready(
             )
             .await?;
     }
-    let mut state = build_http_state(
+    let mut state = build_http_state_with_cache(
         node,
         client.clone(),
         layout.clone(),
@@ -358,6 +362,7 @@ async fn serve_ready(
         encryption_key,
         &config.region,
         config.public_endpoint.clone(),
+        config.auth_cache_enabled,
     )?;
     state.tls_enabled = public_tls.is_some();
     let peer_cancel = CancellationToken::new();
