@@ -325,19 +325,17 @@ pub async fn read_route_page(
     if input.start_hash.is_some() && input.after_lower.is_some() {
         return Err(StorageError::Validation("invalid directory cursor".into()));
     }
-    if client
-        .query::<ReadRouteDirectory>(account, None, Json(input.table_id.clone()))
-        .await
-        .map_err(cell_error)?
-        .output
-        .0
-        .is_none()
-    {
+    let hash = input.after_lower.or(input.start_hash).unwrap_or([0; 16]);
+    // The directory is installed before its live anchor is published. Read
+    // both independently, but let the anchor decide whether the route exists.
+    let (anchor, page) = tokio::join!(
+        client.query::<ReadRouteDirectory>(account, None, Json(input.table_id.clone())),
+        crate::read_directory_leaf(&client, account.tenant(), &input.table_id, hash),
+    );
+    if anchor.map_err(cell_error)?.output.0.is_none() {
         return Ok(RoutePageOutcome::Unrouted);
     }
-    let hash = input.after_lower.or(input.start_hash).unwrap_or([0; 16]);
-    let mut page =
-        crate::read_directory_leaf(&client, account.tenant(), &input.table_id, hash).await?;
+    let mut page = page?;
     if input
         .expected_epoch
         .is_some_and(|expected| expected != page.version)
