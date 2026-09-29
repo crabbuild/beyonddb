@@ -1,0 +1,60 @@
+[
+  {
+    "run": 1,
+    "git_revision": "af8fab7",
+    "release_binary": "/Users/haipingfu/Workspace/crabbuild-target/beyonddb-duplicate-batcher-check-20260929/release/beyonddb",
+    "payload_bytes": 1024,
+    "seed_keys": 64,
+    "initial_partitions": 4,
+    "auth_cache_enabled": true,
+    "sql_workers": 12,
+    "node_retained_bytes": 1073741824,
+    "seconds_per_case": 5,
+    "clients": [
+      1,
+      8
+    ],
+    "sdk_retries": 0,
+    "benchmark_exit_code": 1,
+    "host_load_end": [
+      30.6328125,
+      24.6064453125,
+      23.73291015625
+    ],
+    "host_load_start": [
+      16.84033203125,
+      21.82666015625,
+      22.78173828125
+    ],
+    "server_warning_count": 3
+  },
+  {
+    "run": 2,
+    "git_revision": "af8fab7",
+    "release_binary": "/Users/haipingfu/Workspace/crabbuild-target/beyonddb-duplicate-batcher-check-20260929/release/beyonddb",
+    "payload_bytes": 1024,
+    "seed_keys": 64,
+    "initial_partitions": 4,
+    "auth_cache_enabled": true,
+    "sql_workers": 12,
+    "node_retained_bytes": 1073741824,
+    "seconds_per_case": 5,
+    "clients": [
+      1,
+      8
+    ],
+    "sdk_retries": 0,
+    "benchmark_exit_code": 0,
+    "host_load_end": [
+      34.5322265625,
+      28.69775390625,
+      25.5830078125
+    ],
+    "host_load_start": [
+      35.06640625,
+      25.62548828125,
+      24.09765625
+    ],
+    "server_warning_count": 3
+  }
+]
