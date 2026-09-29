@@ -1,6 +1,9 @@
 //! Encrypted, access-key-sharded credentials for ExtendDB SigV4 verification.
 
-use std::sync::OnceLock;
+use std::{
+    collections::HashSet,
+    sync::{OnceLock, RwLock},
+};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -262,6 +265,9 @@ pub struct CellCredentialStore {
     client: CellClient,
     layout: CellStorageLayout,
     encryption_key: Zeroizing<[u8; 32]>,
+    // Catalog provisioning is monotonic for credential Cells. Cache only
+    // existence, never a credential record or its active/revoked state.
+    known_cells: RwLock<HashSet<[u8; 32]>>,
 }
 
 impl CellCredentialStore {
@@ -271,6 +277,7 @@ impl CellCredentialStore {
             client,
             layout,
             encryption_key: Zeroizing::new(encryption_key),
+            known_cells: RwLock::new(HashSet::new()),
         }
     }
 
@@ -320,7 +327,7 @@ impl CellCredentialStore {
             is_active: credential.is_active,
             encrypted_secret,
         };
-        match self
+        let outcome = match self
             .client
             .command::<PutCredential>(&target, mutation_identity()?, Json(record))
             .await
@@ -341,7 +348,11 @@ impl CellCredentialStore {
                 )),
             },
             Err(error) => Err(cell_error(error)),
+        };
+        if outcome.is_ok() {
+            self.remember_cell(target.cell_id().as_bytes());
         }
+        outcome
     }
 
     fn encrypt(&self, aad: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, StorageError> {
@@ -384,14 +395,18 @@ impl CellCredentialStore {
     ) -> std::result::Result<Option<StoredCredential>, DynamoDbError> {
         let target = credential_target(access_key_id)
             .map_err(|_| DynamoDbError::UnrecognizedClientException("invalid access key".into()))?;
-        let catalog = CellCatalog::new(self.layout.clone(), target.tenant());
-        if catalog
-            .lookup(target.cell_id())
-            .await
-            .map_err(|_| internal_error())?
-            .is_none()
-        {
-            return Ok(None);
+        let cell_id = *target.cell_id().as_bytes();
+        if !self.cell_is_known(&cell_id) {
+            let catalog = CellCatalog::new(self.layout.clone(), target.tenant());
+            if catalog
+                .lookup(target.cell_id())
+                .await
+                .map_err(|_| internal_error())?
+                .is_none()
+            {
+                return Ok(None);
+            }
+            self.remember_cell(&cell_id);
         }
         let output = self
             .client
@@ -403,6 +418,18 @@ impl CellCredentialStore {
             .0
             .map(|record| self.decrypt(record))
             .transpose()
+    }
+
+    fn cell_is_known(&self, cell_id: &[u8; 32]) -> bool {
+        self.known_cells
+            .read()
+            .is_ok_and(|known| known.contains(cell_id))
+    }
+
+    fn remember_cell(&self, cell_id: &[u8; 32]) {
+        if let Ok(mut known) = self.known_cells.write() {
+            known.insert(*cell_id);
+        }
     }
 
     fn decrypt(

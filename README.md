@@ -22,6 +22,7 @@ workload.
 | Send AWS CLI requests | [User guide](docs/user-guide.md) |
 | Check an operation or limitation | [API coverage](docs/api.md) |
 | Understand Cells, routing, and transactions | [Architecture](docs/architecture.md) |
+| Measure latency and throughput | [Performance guide](docs/performance.md) |
 | Follow implementation evidence and open gates | [Implementation status](docs/implementation-status.md) |
 
 ## Architecture at a glance

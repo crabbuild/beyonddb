@@ -287,7 +287,13 @@ impl CellStorage {
         use std::time::Duration;
         let mut accounts: std::collections::VecDeque<_> = accounts
             .into_iter()
-            .map(|account| (account, ProjectionCursor::default()))
+            .map(|account| {
+                (
+                    account,
+                    ProjectionCursor::default(),
+                    tokio::time::Instant::now(),
+                )
+            })
             .collect();
         if accounts.is_empty() {
             return Ok(());
@@ -298,12 +304,22 @@ impl CellStorage {
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! { () = cancellation.cancelled() => return Ok::<(), StorageError>(()), _ = ticks.tick() => {} }
-                let Some((account, mut cursor)) = accounts.pop_front() else { return Ok(()); };
+                let Some((account, mut cursor, due)) = accounts.pop_front() else { return Ok(()); };
+                if tokio::time::Instant::now() < due {
+                    accounts.push_back((account, cursor, due));
+                    continue;
+                }
                 let result = tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
                     result = self.project_account_page(&account, &mut cursor, &provisioner, &nodes) => result,
                 };
-                accounts.push_back((account, cursor));
+                // An exhausted table scan or failed admission has no immediate
+                // work to retry. Keep active directory pages at the 100 ms pace.
+                let delay = match &result {
+                    Ok(true) => Duration::ZERO,
+                    Ok(false) | Err(_) => Duration::from_secs(1),
+                };
+                accounts.push_back((account, cursor, tokio::time::Instant::now() + delay));
                 if let Err(error) = result { tracing::warn!(%error, "global index projection deferred"); }
             }
         }).map_err(|error| StorageError::Internal(error.to_string()))
@@ -315,7 +331,7 @@ impl CellStorage {
         cursor: &mut ProjectionCursor,
         provisioner: &crate::CellInitialPartitionProvisioner,
         nodes: &cellule_runtime::node::NodeDirectory,
-    ) -> Result<(), StorageError> {
+    ) -> Result<bool, StorageError> {
         use futures_util::{StreamExt, stream};
         if cursor.table.is_none() {
             let page = self
@@ -340,17 +356,17 @@ impl CellStorage {
             };
             let Some(name) = page.names.first() else {
                 cursor.after_table = None;
-                return Ok(());
+                return Ok(false);
             };
             cursor.after_table = Some(name.clone());
             let table = self.record(account, name).await?;
             if table.global_secondary_indexes.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
             cursor.table = Some(table);
         }
         let Some(table) = cursor.table.as_ref() else {
-            return Ok(());
+            return Ok(false);
         };
         let table_id = table.id.clone();
         let index = cursor
@@ -394,7 +410,7 @@ impl CellStorage {
             RoutePageOutcome::Changed => {
                 cursor.epoch = None;
                 cursor.after_range = None;
-                return Ok(());
+                return Ok(true);
             }
             RoutePageOutcome::Unrouted => {
                 cursor.after_range = None;
@@ -449,6 +465,6 @@ impl CellStorage {
                 failure.get_or_insert(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or(Ok(true), Err)
     }
 }

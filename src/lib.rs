@@ -182,6 +182,9 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(7),
     OperationDescriptor {
         codec_version: 2,
+        // ListTables returns at most 100 names of at most 255 bytes each.
+        // The worker queries this account Cell on every projection sweep.
+        output_limit: 64 * 1024,
         ..operation(8)
     },
     operation(9),
@@ -192,13 +195,22 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(21),
     operation(22),
     operation(23),
-    operation(24),
+    OperationDescriptor {
+        // A discovery page contains at most 100 fixed-size shard records.
+        // Reserve for the page rather than a full item-operation result.
+        output_limit: 128 * 1024,
+        ..operation(24)
+    },
     participant::phase_operation(25),
     operation(26),
     operation(27),
     operation(28),
     OperationDescriptor {
         codec_version: 3,
+        // This query returns only an optional root spec, never item data.
+        // Reserving the generic 4 MiB result budget for every route lookup
+        // needlessly fills the account Cell mailbox under concurrent reads.
+        output_limit: 4 * 1024,
         ..operation(29)
     },
     participant::phase_operation(30),

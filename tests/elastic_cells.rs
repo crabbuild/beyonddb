@@ -1427,9 +1427,10 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
     let account = account_target("123456789012").unwrap();
     let session = SessionId::from_bytes([70; 16]);
     let directory = tempfile::TempDir::new().unwrap();
+    let storage_prefix = object_store::path::Path::from("beyonddb-sort-query-test");
     let layout = CellStorageLayout::new(
         Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("beyonddb-sort-query-test"),
+        storage_prefix.clone(),
         *account.application().as_bytes(),
     );
     let host = CellNodeBuilder::new(Arc::clone(&application))
@@ -2003,6 +2004,62 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
         )
         .await
         .unwrap();
+    // A warm credential lookup must still read the Cell record, while it can
+    // reuse the immutable catalog proof instead of fetching two store objects.
+    let catalog_reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_reads = std::sync::Arc::clone(&catalog_reads);
+    let observed_layout = CellStorageLayout::new(
+        layout
+            .store()
+            .clone()
+            .with_read_request_observer(std::sync::Arc::new(move |_| {
+                observed_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })),
+        storage_prefix,
+        *layout.application_id(),
+    );
+    let observed_credentials = CellCredentialStore::new(
+        CellClient::local(Arc::clone(&registry), credential_handle.clone()),
+        observed_layout,
+        TEST_ENCRYPTION_KEY,
+    );
+    assert!(
+        observed_credentials
+            .lookup_credential(TEST_ACCESS_KEY)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let first_catalog_reads = catalog_reads.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(first_catalog_reads >= 2);
+    assert!(
+        observed_credentials
+            .lookup_credential(TEST_ACCESS_KEY)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        catalog_reads.load(std::sync::atomic::Ordering::Relaxed),
+        first_catalog_reads
+    );
+    let missing_same_cell = (0..10_000)
+        .map(|index| format!("AKIAMISSING{index:05}"))
+        .find(|key| {
+            beyonddb::credential_target(key).unwrap().cell_id() == credential_target.cell_id()
+        })
+        .expect("one missing key should share the credential Cell");
+    assert!(
+        observed_credentials
+            .lookup_credential(&missing_same_cell)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        catalog_reads.load(std::sync::atomic::Ordering::Relaxed),
+        first_catalog_reads
+    );
     let authorization = Arc::new(CellAuthorizationStore::new(CellClient::local_runtime(
         Arc::clone(&registry),
         host.runtime(),
@@ -2448,6 +2505,16 @@ async fn numeric_sort_query_pages_in_key_order_through_one_data_cell() {
             .revoke_credential(TEST_ACCESS_KEY)
             .await
             .unwrap()
+    );
+    let observed_revoked = observed_credentials
+        .lookup_credential(TEST_ACCESS_KEY)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!observed_revoked.is_active);
+    assert_eq!(
+        catalog_reads.load(std::sync::atomic::Ordering::Relaxed),
+        first_catalog_reads
     );
     let revoked = tokio::time::timeout(
         Duration::from_secs(10),
