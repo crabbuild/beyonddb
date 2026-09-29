@@ -37,6 +37,8 @@ struct Config {
     disk_budget_bytes: u64,
     #[serde(default = "default_node_retained_bytes")]
     node_retained_bytes: usize,
+    #[serde(default = "default_max_active_cells")]
+    max_active_cells: usize,
     encryption_key_file: PathBuf,
     region: String,
     peer_bind: SocketAddr,
@@ -87,6 +89,10 @@ const fn default_node_retained_bytes() -> usize {
     1024 * 1024 * 1024
 }
 
+const fn default_max_active_cells() -> usize {
+    128
+}
+
 #[tokio::main]
 async fn main() -> ServerResult<()> {
     tracing_subscriber::fmt()
@@ -125,8 +131,12 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     if config.disk_budget_bytes == 0
         || config.node_retained_bytes == 0
         || config.split_threshold_bytes == 0
+        || config.max_active_cells == 0
     {
-        return Err(invalid("disk, retained-byte, and split budgets must be positive").into());
+        return Err(invalid(
+            "disk, retained-byte, split, and active-cell budgets must be positive",
+        )
+        .into());
     }
     if !["s3://", "gs://", "az://"]
         .iter()
@@ -197,7 +207,10 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let session_dir = config.data_dir.join(session_uuid.to_string());
     tokio::fs::create_dir_all(&config.data_dir).await?;
     let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::for_system(64)?, config.node_retained_bytes)
+        .with_runtime(
+            SqlWorkerPool::for_system(config.max_active_cells)?,
+            config.node_retained_bytes,
+        )
         .with_replica_host(
             Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
         )

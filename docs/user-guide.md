@@ -47,7 +47,7 @@ aws dynamodb describe-table \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only.
+The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only. The node's `max_active_cells` budget must include those data Cells plus account, coordinator, and management Cells; if the budget is too small, provisioning remains pending until capacity is available.
 
 ## Write and read an item
 
