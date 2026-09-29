@@ -119,23 +119,38 @@ impl NoReturnBatcher {
                 let epoch = first.mutation.epoch;
                 let mut keys = Vec::new();
                 let mut selected = Vec::new();
-                while selected.len() < MAX_BATCH_OPERATIONS {
+                let mut deferred = VecDeque::new();
+                let queued_len = queued.len();
+                while selected.len() < MAX_BATCH_OPERATIONS && !queued.is_empty() {
                     let Some(candidate) = queued.front() else {
                         break;
                     };
-                    if candidate.mutation.table_id != table_id
-                        || candidate.mutation.epoch != epoch
-                        || keys
-                            .iter()
-                            .any(|key: &Vec<u8>| key == &candidate.mutation.key)
+                    if candidate.mutation.table_id != table_id || candidate.mutation.epoch != epoch
                     {
                         break;
                     }
                     let Some(candidate) = queued.pop_front() else {
                         break;
                     };
-                    keys.push(candidate.mutation.key.clone());
-                    selected.push(candidate);
+                    if keys
+                        .iter()
+                        .any(|key: &Vec<u8>| key == &candidate.mutation.key)
+                    {
+                        // Keep repeated keys for a later command, but continue
+                        // collecting independent keys behind them. Reordering
+                        // concurrent requests for different items is already
+                        // allowed; requests for one item stay FIFO.
+                        deferred.push_back(candidate);
+                    } else {
+                        keys.push(candidate.mutation.key.clone());
+                        selected.push(candidate);
+                    }
+                    if selected.len() + deferred.len() >= queued_len {
+                        break;
+                    }
+                }
+                while let Some(candidate) = deferred.pop_back() {
+                    queued.push_front(candidate);
                 }
                 (table_id, epoch, selected)
             };
