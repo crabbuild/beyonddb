@@ -46,10 +46,11 @@ record. Catalog reads and record queries apply a 24-hour visibility cutoff;
 the old stream remains readable after deletion and table name reuse. The
 account Cell test covers this lifecycle. A signed process smoke creates a
 routed table, reads its record, restarts the server hard, and reads the same
-record again. Supervised account and active routed Cell commands now delete
-expired journal rows in bounded batches. Account cleanup includes deleted table
-generations. Dormant and deleted routed Cells and expired catalog rows still
-need recoverable collection; policy replacement remains unsupported.
+record again. Supervised account and routed Cell commands now delete expired
+journal rows in bounded batches. Active routed owners are swept locally. A
+durable per-account cursor scans verified tenant catalog shards to reach idle
+and deleted table Cells after owner restart. Expired stream catalog rows still
+need collection; policy replacement remains unsupported.
 The TTL worker submits a marked delete to the routed owner Cell. That Cell
 checks its current TTL policy and the item's expiry before committing the
 deletion and stream record together. Its REMOVE record carries the

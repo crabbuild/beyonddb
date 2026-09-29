@@ -58,6 +58,12 @@ CREATE TABLE ddb_ttl_schedule (
 );
 INSERT INTO ddb_ttl_schedule (singleton, last_table) VALUES (1, NULL);
 
+CREATE TABLE ddb_stream_gc_schedule (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    next_shard INTEGER NOT NULL CHECK (next_shard BETWEEN 0 AND 255)
+);
+INSERT INTO ddb_stream_gc_schedule (singleton, next_shard) VALUES (1, 0);
+
 CREATE TABLE ddb_coordinator_shards (
     shard INTEGER PRIMARY KEY CHECK (shard BETWEEN 0 AND 4095),
     settled BLOB

@@ -421,6 +421,7 @@ async fn serve_ready(
         if !config.owned_accounts.is_empty() {
             let storage = CellStorage::new(client.clone(), config.region.clone());
             let accounts = config.owned_accounts.clone();
+            let stream_layout = layout.clone();
             let cancellation = tasks.cancellation_token();
             tasks.spawn(async move {
                 let mut ticks = tokio::time::interval(Duration::from_secs(30));
@@ -439,6 +440,15 @@ async fn serve_ready(
                         }
                         if let Err(error) = storage.sweep_account_stream_records(account_id).await {
                             tracing::warn!(account_id, %error, "account stream retention sweep failed");
+                        }
+                        // Cancellation leaves the durable shard cursor in place, so
+                        // the next owner can repeat an interrupted catalog scan.
+                        let result = tokio::select! {
+                            () = cancellation.cancelled() => return Ok(()),
+                            result = storage.sweep_account_catalog_stream_records(account_id, &stream_layout) => result,
+                        };
+                        if let Err(error) = result {
+                            tracing::warn!(account_id, %error, "catalog stream retention sweep failed");
                         }
                     }
                 }

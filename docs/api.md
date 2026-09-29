@@ -56,7 +56,8 @@ current and deleted table generations during the 24-hour retention window.
 A signed SDK write and CLI Streams read survived a hard server restart.
 
 This is **partial Streams support**. `UpdateTable` cannot enable, disable, or
-change the view type. Dormant or deleted routed Cell cleanup, catalog cleanup,
+change the view type. Bounded retention sweeps cover active routed owners and
+catalog-discovered dormant or deleted data Cells. Expired stream catalog rows,
 full split-lineage and iterator qualification, and fleet-scale retention work
 remain open. See [Streams contract](../STREAMS_CONTRACT.md) and
 [implementation status](implementation-status.md#streams-dependency-contract).

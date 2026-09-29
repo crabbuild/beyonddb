@@ -6,9 +6,9 @@ use beyonddb::{
     DeleteItemInput, DescribeTable, GetItem, GetItemInput, GetItemOutcome, ItemMutationOutcome,
     Json, ListTables, ListTablesInput, ListTablesOutcome, PartitionQueryInput,
     PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadAccountStreamJournal,
-    ReadTtlSchedule, ReadTtlSweep, StreamConfig, StreamJournalInput, StreamJournalOutcome,
-    TableSpec, TransactWrite, TransactWriteInput, TransactionOperation, TransactionOutcome,
-    UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    ReadStreamGcShard, ReadTtlSchedule, ReadTtlSweep, StreamConfig, StreamJournalInput,
+    StreamJournalOutcome, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
+    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
 };
 use cellule_app::CellApplication;
 use cellule_host::CellNodeBuilder;
@@ -1286,6 +1286,26 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             .unwrap(),
         0
     );
+    let before = client
+        .query::<ReadStreamGcShard>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(
+        routed_storage
+            .sweep_account_catalog_stream_records("123456789012", &layout)
+            .await
+            .unwrap(),
+        0
+    );
+    let after = client
+        .query::<ReadStreamGcShard>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert_eq!(after, before.wrapping_add(1));
     let (first_streams, cursor) = storage
         .list_streams("123456789012", None, 1, None)
         .await
