@@ -1,6 +1,7 @@
 //! ExtendDB table operations routed to account Cells.
 
 mod admission;
+mod batch;
 mod data;
 mod global_index;
 mod recovery;
@@ -37,6 +38,8 @@ use extenddb_core::types::{
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
+
+use batch::NoReturnBatcher;
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -84,6 +87,7 @@ pub trait CoordinatorProvisioner: Send + Sync {
 /// ExtendDB table backend over already-provisioned and routable account Cells.
 pub struct CellStorage {
     client: CellClient,
+    no_return_batcher: Arc<NoReturnBatcher>,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
@@ -116,8 +120,10 @@ impl CellStorage {
     /// its requests through this backend. All reads use the current owner so
     /// transaction decisions and prepared intents cannot come from stale snapshots.
     pub fn new(client: CellClient, region: impl Into<String>) -> Self {
+        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         Self {
-            client: client.with_read_policy(ReadPolicy::CurrentOwner),
+            no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
+            client,
             region: region.into(),
             initial_partitions: None,
             coordinators: None,

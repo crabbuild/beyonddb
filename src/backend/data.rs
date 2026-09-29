@@ -5,6 +5,7 @@
 
 mod routed;
 
+use super::batch::NoReturnMutation;
 use super::transaction_read::validate_read_size;
 use routed::{
     partition_delete_rejection, partition_put_rejection, partition_update_rejection,
@@ -30,17 +31,16 @@ use crate::expression_wire::{WireCondition, WireUpdate};
 use crate::{
     ConditionCheckInput, DeleteItem, DeleteItemInput, DeleteItemNoReturn, GetItem, GetItemInput,
     GetItemOutcome, ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput,
-    PartitionDeleteNoReturn, PartitionDeleteOutcome, PartitionGet, PartitionGetInput,
-    PartitionGetOutcome, PartitionPut, PartitionPutInput, PartitionPutNoReturn,
-    PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
-    PartitionTransactReadOutcome, PartitionTransactReadQuery, PartitionTransactWrite,
-    PartitionTransactWriteInput, PartitionTransactWriteNoReturn, PartitionTransactWriteOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn, PartitionUpdateOutcome,
-    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
-    SortComparison, SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput,
-    TransactWriteNoReturn, TransactionFailure, TransactionOperation, TransactionOutcome,
-    TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome,
-    data_key_hash,
+    PartitionDeleteOutcome, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut,
+    PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
+    PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
+    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
+    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateNoReturn,
+    PartitionUpdateOutcome, PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput,
+    ScanItemsOutcome, SortComparison, SortPredicate, TransactReadQuery, TransactWrite,
+    TransactWriteInput, TransactWriteNoReturn, TransactionFailure, TransactionOperation,
+    TransactionOutcome, TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn,
+    UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -193,6 +193,31 @@ impl DataEngine for CellStorage {
             let key = extract_key(&item, &key_info.base_key_schema);
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
                 let no_return = !return_old && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Put(PutItemInput {
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    item,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                    }
+                    result?;
+                    return Ok(None);
+                }
                 let input = Json(PartitionPutInput {
                     table_id: key_info.table_id.clone(),
                     epoch,
@@ -207,26 +232,6 @@ impl DataEngine for CellStorage {
                     {
                         Ok(committed) => match committed.output.0 {
                             PartitionPutOutcome::Applied(old) => old,
-                            _ => {
-                                return Err(StorageError::Internal(
-                                    "unexpected partition put".into(),
-                                ));
-                            }
-                        },
-                        Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
-                            return Err(partition_put_rejection(committed.output.0));
-                        }
-                        Err(error) => return Err(cell_error(error)),
-                    }
-                } else if no_return {
-                    match self
-                        .client
-                        .command::<PartitionPutNoReturn>(&partition, mutation_identity()?, input)
-                        .await
-                    {
-                        Ok(committed) => match committed.output.0 {
-                            PartitionPutOutcome::Applied(_) => None,
                             _ => {
                                 return Err(StorageError::Internal(
                                     "unexpected partition put".into(),
@@ -411,6 +416,33 @@ impl DataEngine for CellStorage {
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let no_return = !return_old && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Delete(DeleteItemInput {
+                                    return_old: false,
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    key,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                    }
+                    result?;
+                    return Ok(None);
+                }
                 let input = Json(PartitionDeleteInput {
                     return_old,
                     table_id: key_info.table_id.clone(),
@@ -419,16 +451,10 @@ impl DataEngine for CellStorage {
                     condition,
                     ttl: false,
                 });
-                let no_return = !return_old && input.0.condition.is_none();
-                let outcome = if no_return {
-                    self.client
-                        .command::<PartitionDeleteNoReturn>(&partition, mutation_identity()?, input)
-                        .await
-                } else {
-                    self.client
-                        .command::<PartitionDelete>(&partition, mutation_identity()?, input)
-                        .await
-                };
+                let outcome = self
+                    .client
+                    .command::<PartitionDelete>(&partition, mutation_identity()?, input)
+                    .await;
                 let old = match outcome {
                     Ok(committed) => match committed.output.0 {
                         PartitionDeleteOutcome::Applied(old) => old,
