@@ -98,8 +98,12 @@ struct CachedRoute {
 
 struct RouteCacheState {
     account_placement: HashSet<String>,
-    routes: HashMap<(String, String), CachedRoute>,
+    routes: HashMap<(String, String), Vec<CachedRoute>>,
 }
+
+// Keep a bounded set of directory leaf pages for large routed tables. A stale
+// epoch still fences the data Cell and invalidates the complete table entry.
+const MAX_CACHED_ROUTE_PAGES: usize = 64;
 
 impl CellStorage {
     pub(crate) fn client(&self) -> &CellClient {
@@ -145,7 +149,7 @@ impl CellStorage {
         self
     }
 
-    /// Enables process-local caching for complete, immutable route pages.
+    /// Enables process-local caching for immutable route leaf pages.
     ///
     /// A stale cached route is rejected by the data Cell and invalidated; the
     /// next request reads the current directory. Keep this opt-in alongside
@@ -184,14 +188,16 @@ impl CellStorage {
         hash: [u8; 16],
     ) -> Option<([u8; 16], u64)> {
         let lookup = |cache: &RouteCacheState| {
-            cache.routes.get(key).and_then(|route| {
-                route
-                    .partitions
-                    .iter()
-                    .find(|partition| {
-                        hash >= partition.lower && partition.upper.is_none_or(|upper| hash < upper)
-                    })
-                    .map(|partition| (partition.partition_id, partition.epoch))
+            cache.routes.get(key).and_then(|pages| {
+                pages.iter().find_map(|page| {
+                    page.partitions
+                        .iter()
+                        .find(|partition| {
+                            hash >= partition.lower
+                                && partition.upper.is_none_or(|upper| hash < upper)
+                        })
+                        .map(|partition| (partition.partition_id, partition.epoch))
+                })
             })
         };
         match self.route_cache.read() {
@@ -215,19 +221,45 @@ impl CellStorage {
         &self,
         key: (String, String),
         partitions: Vec<crate::RoutePagePartition>,
+        complete: bool,
     ) {
         match self.route_cache.write() {
             Ok(mut cache) => {
-                cache.routes.insert(key, CachedRoute { partitions });
+                cache_route_pages(&mut cache, key, partitions, complete);
             }
             Err(poisoned) => {
-                poisoned
-                    .into_inner()
-                    .routes
-                    .insert(key, CachedRoute { partitions });
+                cache_route_pages(&mut poisoned.into_inner(), key, partitions, complete);
             }
         }
     }
+}
+
+fn cache_route_pages(
+    cache: &mut RouteCacheState,
+    key: (String, String),
+    partitions: Vec<crate::RoutePagePartition>,
+    complete: bool,
+) {
+    let pages = cache.routes.entry(key).or_default();
+    if complete {
+        pages.clear();
+        pages.push(CachedRoute { partitions });
+        return;
+    }
+    let Some(first_lower) = partitions.first().map(|partition| partition.lower) else {
+        return;
+    };
+    if let Some(page) = pages
+        .iter_mut()
+        .find(|page| page.partitions.first().map(|partition| partition.lower) == Some(first_lower))
+    {
+        page.partitions = partitions;
+        return;
+    }
+    if pages.len() >= MAX_CACHED_ROUTE_PAGES {
+        pages.remove(0);
+    }
+    pages.push(CachedRoute { partitions });
 }
 
 impl TableEngine for CellStorage {

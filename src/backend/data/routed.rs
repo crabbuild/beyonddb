@@ -77,8 +77,8 @@ impl CellStorage {
             } => {
                 let range = partitions.first().ok_or_else(stale_partition)?;
                 let selected = (range.partition_id, range.epoch);
-                if self.route_cache_enabled && !has_more {
-                    self.cache_route(cache_key, partitions);
+                if self.route_cache_enabled {
+                    self.cache_route(cache_key, partitions, !has_more);
                 }
                 Ok(Some(selected))
             }
