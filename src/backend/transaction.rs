@@ -15,7 +15,7 @@ use crate::{
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
     ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
-    TransactionFailure, account_target, coordinator_target, data_target,
+    TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -338,22 +338,57 @@ impl CellStorage {
         // the participant Cell. Avoid a separate state query on the normal
         // first-attempt path; only an ambiguous reply needs a follow-up read.
         let identity = mutation_identity()?;
+        let inline = match &input {
+            ParticipantPrepare::Account(input) => serde_json::to_vec(input),
+            ParticipantPrepare::Data(input) => serde_json::to_vec(input),
+        }
+        .map_err(|error| StorageError::Internal(error.to_string()))?
+        .len()
+            <= crate::transaction_transport::INLINE_BYTES;
         let result = match input {
             ParticipantPrepare::Account(input) => {
-                let reference = self
-                    .upload_transaction::<PrepareAccountTransaction>(target, identity, &input)
-                    .await?;
-                self.client
-                    .command::<PrepareAccountTransaction>(target, identity, Json(reference))
-                    .await
+                if inline {
+                    self.client
+                        .command::<PrepareAccountTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Inline(input)),
+                        )
+                        .await
+                } else {
+                    let reference = self
+                        .upload_transaction::<PrepareAccountTransaction>(target, identity, &input)
+                        .await?;
+                    self.client
+                        .command::<PrepareAccountTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Reference(reference)),
+                        )
+                        .await
+                }
             }
             ParticipantPrepare::Data(input) => {
-                let reference = self
-                    .upload_transaction::<PreparePartitionTransaction>(target, identity, &input)
-                    .await?;
-                self.client
-                    .command::<PreparePartitionTransaction>(target, identity, Json(reference))
-                    .await
+                if inline {
+                    self.client
+                        .command::<PreparePartitionTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Inline(input)),
+                        )
+                        .await
+                } else {
+                    let reference = self
+                        .upload_transaction::<PreparePartitionTransaction>(target, identity, &input)
+                        .await?;
+                    self.client
+                        .command::<PreparePartitionTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Reference(reference)),
+                        )
+                        .await
+                }
             }
         };
         match result {

@@ -26,7 +26,11 @@ macro_rules! transaction_command {
                     .unwrap();
             }
             client
-                .command::<$command>(target, identity, beyonddb::Json(reference))
+                .command::<$command>(
+                    target,
+                    identity,
+                    beyonddb::Json(beyonddb::TransactionCommandInput::Reference(reference)),
+                )
                 .await
         }
     };

@@ -13,8 +13,8 @@ use crate::{
     BeginCrossCellTransaction, BeginCrossCellTransactionInput, BeginCrossCellTransactionOutcome,
     CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
     IndexedTransactionOperation, Json, ReadCoordinatorToken, ReadCoordinatorTokenOutcome,
-    ReadCrossCellTransaction, ReadCrossCellTransactionInput, TransactionOperation,
-    TransactionToken, coordinator_target,
+    ReadCrossCellTransaction, ReadCrossCellTransactionInput, TransactionCommandInput,
+    TransactionOperation, TransactionToken, coordinator_target,
 };
 
 pub(super) struct AdmittedTransaction {
@@ -155,13 +155,30 @@ impl CellStorage {
             participants: participants.into_values().collect(),
         };
         let identity = mutation_identity()?;
-        let reference = self
-            .upload_transaction::<BeginCrossCellTransaction>(&coordinator, identity, &input)
-            .await?;
-        let result = self
-            .client
-            .command::<BeginCrossCellTransaction>(&coordinator, identity, Json(reference))
-            .await;
+        let inline = serde_json::to_vec(&input)
+            .map_err(|error| StorageError::Internal(error.to_string()))?
+            .len()
+            <= crate::transaction_transport::INLINE_BYTES;
+        let result = if inline {
+            self.client
+                .command::<BeginCrossCellTransaction>(
+                    &coordinator,
+                    identity,
+                    Json(TransactionCommandInput::Inline(input)),
+                )
+                .await
+        } else {
+            let reference = self
+                .upload_transaction::<BeginCrossCellTransaction>(&coordinator, identity, &input)
+                .await?;
+            self.client
+                .command::<BeginCrossCellTransaction>(
+                    &coordinator,
+                    identity,
+                    Json(TransactionCommandInput::Reference(reference)),
+                )
+                .await
+        };
         let (transaction_id, prior) = match result {
             Ok(result) => match result.output.0 {
                 BeginCrossCellTransactionOutcome::Begun => {

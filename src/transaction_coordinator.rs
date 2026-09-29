@@ -235,7 +235,7 @@ impl Command for BeginCrossCellTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<crate::TransactionPayloadRef>;
+    type Input = Json<crate::TransactionCommandInput<BeginCrossCellTransactionInput>>;
     type Output = Json<BeginCrossCellTransactionOutcome>;
 
     fn execute(

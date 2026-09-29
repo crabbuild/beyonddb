@@ -58,8 +58,8 @@ pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
 pub use transaction_transport::{
-    MultipartTransactionCommand, TransactionPayloadChunk, TransactionPayloadRef,
-    UploadTransactionPayload,
+    MultipartTransactionCommand, TransactionCommandInput, TransactionPayloadChunk,
+    TransactionPayloadRef, UploadTransactionPayload,
 };
 pub use ttl::*;
 

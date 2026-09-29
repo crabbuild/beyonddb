@@ -1,5 +1,5 @@
 use crate::*;
-use beyonddb::{TransactionPayloadRef, UploadTransactionPayload};
+use beyonddb::{TransactionCommandInput, TransactionPayloadRef, UploadTransactionPayload};
 
 fn mutation() -> MutationIdentity {
     let identity = identity(246);
@@ -115,7 +115,11 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
     );
     assert!(
         client
-            .command::<BeginCrossCellTransaction>(&coordinator, mutation(), Json(reference.clone()))
+            .command::<BeginCrossCellTransaction>(
+                &coordinator,
+                mutation(),
+                Json(TransactionCommandInput::Reference(reference.clone())),
+            )
             .await
             .is_err()
     );
@@ -156,7 +160,11 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
         .unwrap();
     assert!(
         client
-            .command::<BeginCrossCellTransaction>(&coordinator, mutation(), Json(forged))
+            .command::<BeginCrossCellTransaction>(
+                &coordinator,
+                mutation(),
+                Json(TransactionCommandInput::Reference(forged)),
+            )
             .await
             .is_err()
     );
@@ -235,18 +243,30 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
     }
     let identity = mutation();
     let first = client
-        .command::<BeginCrossCellTransaction>(&coordinator, identity, Json(reference.clone()))
+        .command::<BeginCrossCellTransaction>(
+            &coordinator,
+            identity,
+            Json(TransactionCommandInput::Reference(reference.clone())),
+        )
         .await
         .unwrap();
     assert_eq!(first.output.0, BeginCrossCellTransactionOutcome::Begun);
     let replay = client
-        .command::<BeginCrossCellTransaction>(&coordinator, identity, Json(reference.clone()))
+        .command::<BeginCrossCellTransaction>(
+            &coordinator,
+            identity,
+            Json(TransactionCommandInput::Reference(reference.clone())),
+        )
         .await
         .unwrap();
     assert_eq!(first.receipt, replay.receipt);
     assert_eq!(
         client
-            .command::<BeginCrossCellTransaction>(&coordinator, mutation(), Json(competing))
+            .command::<BeginCrossCellTransaction>(
+                &coordinator,
+                mutation(),
+                Json(TransactionCommandInput::Reference(competing)),
+            )
             .await
             .unwrap()
             .output
@@ -260,7 +280,11 @@ async fn upload_seals_only_complete_immutable_inputs_after_owner_replacement() {
     // payload remains authoritative and is independently readable in pieces.
     assert!(
         client
-            .command::<BeginCrossCellTransaction>(&coordinator, mutation(), Json(reference))
+            .command::<BeginCrossCellTransaction>(
+                &coordinator,
+                mutation(),
+                Json(TransactionCommandInput::Reference(reference)),
+            )
             .await
             .is_err()
     );
@@ -516,7 +540,9 @@ async fn abort_during_upload_fences_delayed_account_and_data_prepares() {
                 .command::<PrepareAccountTransaction>(
                     target,
                     mutation(),
-                    Json(references[index].clone()),
+                    Json(TransactionCommandInput::Reference(
+                        references[index].clone(),
+                    )),
                 )
                 .await
         } else {
@@ -524,7 +550,9 @@ async fn abort_during_upload_fences_delayed_account_and_data_prepares() {
                 .command::<PreparePartitionTransaction>(
                     target,
                     mutation(),
-                    Json(references[index].clone()),
+                    Json(TransactionCommandInput::Reference(
+                        references[index].clone(),
+                    )),
                 )
                 .await
         };
