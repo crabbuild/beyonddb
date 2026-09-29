@@ -2,6 +2,7 @@
 
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
+use futures_util::{StreamExt, stream};
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
@@ -11,6 +12,12 @@ use crate::{
     TransactionFailure, TransactionOperation, TransactionReadResult, account_target,
     coordinator_target, data_target,
 };
+
+#[derive(Clone)]
+enum ReadTarget {
+    Account(cellule_runtime::identity::CellTarget),
+    Data(cellule_runtime::identity::CellTarget),
+}
 
 impl CellStorage {
     pub(super) async fn transaction_read(
@@ -51,28 +58,35 @@ impl CellStorage {
             .output
             .0
             .ok_or_else(|| StorageError::Internal("read transaction disappeared".into()))?;
-        let mut items = vec![None; count];
-        for position in 0..status.participant_count {
-            let input = ReadCoordinatorParticipantInput {
+        let participant_inputs =
+            (0..status.participant_count).map(|position| ReadCoordinatorParticipantInput {
                 account_id: account_id.into(),
                 transaction_id: identity.transaction_id,
                 routing_key: identity.routing_key.clone(),
                 position,
                 chunk: 0,
-            };
-            let participant = self
-                .coordinator_participant(&coordinator, input)
-                .await?
-                .ok_or_else(|| {
-                    StorageError::Internal("committed read operations are missing".into())
-                })?;
+            });
+        let participant_results = stream::iter(
+            participant_inputs
+                .map(|input| async { self.coordinator_participant(&coordinator, input).await }),
+        )
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        let mut image_reads = Vec::new();
+        for result in participant_results {
+            let participant = result?.ok_or_else(|| {
+                StorageError::Internal("committed read operations are missing".into())
+            })?;
             let target = match &participant.target {
-                CoordinatorParticipantTarget::Account => account_target(account_id),
+                CoordinatorParticipantTarget::Account => {
+                    account_target(account_id).map(ReadTarget::Account)
+                }
                 CoordinatorParticipantTarget::Data {
                     table_id,
                     partition_id,
                     ..
-                } => data_target(account_id, table_id, partition_id),
+                } => data_target(account_id, table_id, partition_id).map(ReadTarget::Data),
             }
             .map_err(|error| StorageError::Internal(error.to_string()))?;
             for (position, operation) in participant.operations.into_iter().enumerate() {
@@ -81,21 +95,29 @@ impl CellStorage {
                         "read transaction contains a write".into(),
                     ));
                 }
-                let input = Json(ReadTransactionResultInput {
-                    transaction: ReadTransactionInput {
-                        transaction_id: identity.transaction_id,
-                        coordinator_cell: *coordinator.cell_id().as_bytes(),
-                    },
-                    position: u8::try_from(position)
-                        .map_err(|_| StorageError::Internal("invalid read position".into()))?,
-                });
-                let image = match participant.target {
-                    CoordinatorParticipantTarget::Account => {
+                image_reads.push((
+                    operation.index,
+                    target.clone(),
+                    Json(ReadTransactionResultInput {
+                        transaction: ReadTransactionInput {
+                            transaction_id: identity.transaction_id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                        },
+                        position: u8::try_from(position)
+                            .map_err(|_| StorageError::Internal("invalid read position".into()))?,
+                    }),
+                ));
+            }
+        }
+        let images = stream::iter(image_reads.into_iter().map(
+            |(index, target, input)| async move {
+                let image = match target {
+                    ReadTarget::Account(target) => {
                         self.client
                             .query::<ReadAccountTransactionResult>(&target, None, input)
                             .await
                     }
-                    CoordinatorParticipantTarget::Data { .. } => {
+                    ReadTarget::Data(target) => {
                         self.client
                             .query::<ReadPartitionTransactionResult>(&target, None, input)
                             .await
@@ -109,14 +131,29 @@ impl CellStorage {
                         "committed read image is missing".into(),
                     ));
                 };
-                let slot = items.get_mut(usize::from(operation.index)).ok_or_else(|| {
-                    StorageError::Internal("invalid transaction read index".into())
-                })?;
-                if slot.replace(image).is_some() {
-                    return Err(StorageError::Internal(
-                        "duplicate transaction read index".into(),
-                    ));
-                }
+                Ok((index, image))
+            },
+        ))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        let mut items = vec![None; count];
+        for result in images {
+            let (index, image) = result?;
+            let slot = items
+                .get_mut(usize::from(index))
+                .ok_or_else(|| StorageError::Internal("invalid transaction read index".into()))?;
+            if slot.replace(image).is_some() {
+                return Err(StorageError::Internal(
+                    "duplicate transaction read index".into(),
+                ));
+            }
+        }
+        for item in &items {
+            if item.is_none() {
+                return Err(StorageError::Internal(
+                    "transaction read result is incomplete".into(),
+                ));
             }
         }
         let items = items

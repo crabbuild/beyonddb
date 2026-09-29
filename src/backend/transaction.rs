@@ -3,6 +3,7 @@
 use cellule_runtime::client::{InvocationError, Receipt};
 use cellule_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
+use futures_util::{StreamExt, stream};
 
 use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
@@ -48,26 +49,40 @@ impl CellStorage {
             .map_err(cell_error)?
             .output
             .0;
-        for participant in participants {
-            // Durable prepare evidence survives driver and owner replacement.
-            // Keep these participants in recovery's list until resolution, but
-            // do not re-upload their payloads or publish another prepare receipt.
-            if participant.prepared {
-                continue;
-            }
-            let Some(payload) = self
-                .coordinator_participant(
-                    &coordinator,
-                    ReadCoordinatorParticipantInput {
+        // Fetch immutable participant payloads concurrently. Each participant
+        // has its own durable cell, so these reads do not need to be serialized.
+        let payloads = stream::iter(
+            participants
+                .into_iter()
+                .filter(|participant| {
+                    // Durable prepare evidence survives driver and owner replacement.
+                    // Keep these participants in recovery's list until resolution, but
+                    // do not re-upload their payloads or publish another prepare receipt.
+                    !participant.prepared
+                })
+                .map(|participant| {
+                    let participant_coordinator = coordinator.clone();
+                    let input = ReadCoordinatorParticipantInput {
                         account_id: read.account_id.clone(),
                         transaction_id,
                         routing_key: read.routing_key.clone(),
                         position: participant.position,
                         chunk: 0,
-                    },
-                )
-                .await?
-            else {
+                    };
+                    async move {
+                        let payload = self
+                            .coordinator_participant(&participant_coordinator, input)
+                            .await?;
+                        Ok::<_, StorageError>((participant.position, payload))
+                    }
+                }),
+        )
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        let mut attempts = Vec::new();
+        for payload in payloads {
+            let (position, Some(payload)) = payload? else {
                 return self.finish_transaction(&coordinator, &read).await;
             };
             let operations = payload
@@ -103,30 +118,46 @@ impl CellStorage {
                 ),
             };
             let target = target.map_err(|error| StorageError::Internal(error.to_string()))?;
-            let (outcome, receipt) =
-                match self.prepare_transaction_participant(&target, input).await {
-                    Ok(prepared) => prepared,
-                    Err(PhaseError::Capacity(error)) => {
-                        tracing::warn!(%error, "transaction participant capacity refused");
-                        let operation = payload.operations.first().ok_or_else(|| {
-                            StorageError::Internal("participant has no operations".into())
-                        })?;
-                        // The refusal proves no mutation from this attempt committed.
-                        // Competing drivers may still win COMMIT; the coordinator CAS
-                        // decides, and all resolutions finish before cancellation returns.
-                        return self
-                            .decide_transaction(
-                                &coordinator,
-                                &read,
-                                CoordinatorDecision::Abort {
-                                    index: Some(operation.index),
-                                    reason: Some(TransactionFailure::Throttled),
-                                },
-                            )
-                            .await;
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+            attempts.push((position, payload, target, input));
+        }
+
+        // Prepare independent participant cells concurrently. Results are
+        // sorted before coordinator evidence is recorded so rejection and
+        // capacity outcomes retain the prior participant order.
+        let mut prepared = stream::iter(attempts.into_iter().map(
+            |(position, payload, target, input)| async move {
+                let result = self.prepare_transaction_participant(&target, input).await;
+                (position, payload, target, result)
+            },
+        ))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        prepared.sort_unstable_by_key(|(position, ..)| *position);
+        for (position, payload, target, result) in prepared {
+            let (outcome, receipt) = match result {
+                Ok(prepared) => prepared,
+                Err(PhaseError::Capacity(error)) => {
+                    tracing::warn!(%error, "transaction participant capacity refused");
+                    let operation = payload.operations.first().ok_or_else(|| {
+                        StorageError::Internal("participant has no operations".into())
+                    })?;
+                    // The refusal proves no mutation from this attempt committed.
+                    // Competing drivers may still win COMMIT; the coordinator CAS
+                    // decides, and all resolutions finish before cancellation returns.
+                    return self
+                        .decide_transaction(
+                            &coordinator,
+                            &read,
+                            CoordinatorDecision::Abort {
+                                index: Some(operation.index),
+                                reason: Some(TransactionFailure::Throttled),
+                            },
+                        )
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let rejection = match outcome {
                 PrepareTransactionOutcome::Prepared | PrepareTransactionOutcome::Replay => None,
                 PrepareTransactionOutcome::Rejected { index, reason } => Some((index, reason)),
@@ -167,7 +198,7 @@ impl CellStorage {
                         account_id: read.account_id.clone(),
                         transaction_id,
                         routing_key: read.routing_key.clone(),
-                        position: participant.position,
+                        position,
                         participant_cell: *target.cell_id().as_bytes(),
                         sequence: receipt.commit_sequence,
                     }),
