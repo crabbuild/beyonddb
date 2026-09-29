@@ -35,11 +35,12 @@ impl CellStorage {
         // Placement is immutable for a table generation. Once the account Cell
         // has confirmed an account-local table, there can never be a directory
         // for this table ID, so skip the route and placement reads on hot paths.
-        if self
-            .account_placement_cache
-            .read()
-            .await
-            .contains(&key_info.table_id)
+        if !key_info.table_id.is_empty()
+            && self
+                .account_placement_cache
+                .read()
+                .await
+                .contains(&key_info.table_id)
         {
             return Ok(None);
         }
@@ -60,10 +61,12 @@ impl CellStorage {
         {
             RoutePageOutcome::Unrouted => {
                 self.require_account_placement(key_info).await?;
-                self.account_placement_cache
-                    .write()
-                    .await
-                    .insert(key_info.table_id.clone());
+                if !key_info.table_id.is_empty() {
+                    self.account_placement_cache
+                        .write()
+                        .await
+                        .insert(key_info.table_id.clone());
+                }
                 Ok(None)
             }
             RoutePageOutcome::Changed => Err(stale_partition()),
