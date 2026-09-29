@@ -29,6 +29,11 @@
   <line x1="850" y1="148" x2="850" y2="588" class="life"/>
   <line x1="1100" y1="148" x2="1100" y2="588" class="life"/>
 
+  <!-- Activation bars sit behind the message arrows. -->
+  <rect x="344" y="186" width="12" height="394" rx="2" fill="#082d3b" stroke="#22d3ee"/>
+  <rect x="594" y="246" width="12" height="305" rx="2" fill="#083c32" stroke="#34d399"/>
+  <rect x="844" y="306" width="12" height="216" rx="2" fill="#34204e" stroke="#a78bfa"/>
+
   <!-- Messages -->
   <line x1="100" y1="186" x2="350" y2="186" class="call"/>
   <text x="225" y="174" class="message" text-anchor="middle">1 · signed PutItem</text>
@@ -46,11 +51,6 @@
   <text x="475" y="540" class="return" text-anchor="middle">7 · backend result</text>
   <line x1="350" y1="580" x2="100" y2="580" class="reply"/>
   <text x="225" y="569" class="return" text-anchor="middle">8 · DynamoDB response</text>
-
-  <!-- Activation bars -->
-  <rect x="344" y="186" width="12" height="394" rx="2" fill="#082d3b" stroke="#22d3ee"/>
-  <rect x="594" y="246" width="12" height="305" rx="2" fill="#083c32" stroke="#34d399"/>
-  <rect x="844" y="306" width="12" height="216" rx="2" fill="#34204e" stroke="#a78bfa"/>
 
   <!-- Atomic command note masks the lifeline underneath -->
   <rect x="666" y="326" width="370" height="60" rx="8" fill="#0f172a"/>
