@@ -134,6 +134,7 @@ impl CellStorage {
         .collect::<Vec<_>>()
         .await;
         prepared.sort_unstable_by_key(|(position, ..)| *position);
+        let mut evidence = Vec::with_capacity(prepared.len());
         for (position, payload, target, result) in prepared {
             let (outcome, receipt) = match result {
                 Ok(prepared) => prepared,
@@ -189,21 +190,39 @@ impl CellStorage {
                 };
                 return self.decide_transaction(&coordinator, &read, decision).await;
             }
-            let recorded = self
-                .client
-                .command::<RecordParticipantPrepare>(
-                    &coordinator,
-                    mutation_identity()?,
-                    Json(CoordinatorPhaseInput {
-                        account_id: read.account_id.clone(),
-                        transaction_id,
-                        routing_key: read.routing_key.clone(),
-                        position,
-                        participant_cell: *target.cell_id().as_bytes(),
-                        sequence: receipt.commit_sequence,
-                    }),
-                )
-                .await;
+            evidence.push((position, target, receipt));
+        }
+
+        // Evidence records are independent CAS updates on the coordinator.
+        // Publish them concurrently after all participant prepares succeed;
+        // durable ordering is carried by each participant position.
+        let recorded = stream::iter(evidence.into_iter().map(|(position, target, receipt)| {
+            let coordinator = coordinator.clone();
+            let read = read.clone();
+            async move {
+                let result = self
+                    .client
+                    .command::<RecordParticipantPrepare>(
+                        &coordinator,
+                        mutation_identity()?,
+                        Json(CoordinatorPhaseInput {
+                            account_id: read.account_id,
+                            transaction_id,
+                            routing_key: read.routing_key,
+                            position,
+                            participant_cell: *target.cell_id().as_bytes(),
+                            sequence: receipt.commit_sequence,
+                        }),
+                    )
+                    .await;
+                Ok::<_, StorageError>(result)
+            }
+        }))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+        for result in recorded {
+            let recorded = result?;
             match recorded {
                 Ok(result)
                     if matches!(
@@ -315,21 +334,9 @@ impl CellStorage {
                 coordinator_cell: input.coordinator_cell,
             },
         };
-        let prior = self.participant_state(target, read.clone()).await?;
-        match prior.output.0 {
-            ParticipantTransactionState::Committed => {
-                return Ok((PrepareTransactionOutcome::Committed, prior.receipt));
-            }
-            ParticipantTransactionState::Aborted => {
-                return Ok((PrepareTransactionOutcome::Aborted, prior.receipt));
-            }
-            ParticipantTransactionState::CoordinatorMismatch => {
-                return Ok((PrepareTransactionOutcome::Mismatch, prior.receipt));
-            }
-            // Re-submit prepared payloads to verify their immutable digest. The
-            // application record supplies idempotency beyond the runtime ledger.
-            ParticipantTransactionState::Prepared | ParticipantTransactionState::Missing => {}
-        }
+        // The prepare command performs the durable idempotency lookup inside
+        // the participant Cell. Avoid a separate state query on the normal
+        // first-attempt path; only an ambiguous reply needs a follow-up read.
         let identity = mutation_identity()?;
         let result = match input {
             ParticipantPrepare::Account(input) => {
