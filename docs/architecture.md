@@ -65,7 +65,7 @@ sequenceDiagram
     HTTP->>HTTP: SigV4, IAM, validation, expressions
     HTTP->>Route: StorageEngine.put_item
     Route->>Owner: Command for table generation and range epoch
-    Owner->>Owner: Check condition; update item, LSI, journal, stream
+    Owner->>Owner: Check condition and update item, LSI, journal, stream
     Owner->>Store: Publish LTX and current root
     Store-->>Owner: Conditional publication succeeds
     Owner-->>HTTP: Committed result
