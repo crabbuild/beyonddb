@@ -216,6 +216,34 @@ pub fn build_http_state(
     region: &str,
     server_addr: String,
 ) -> Result<AppState, StorageError> {
+    build_http_state_with_cache(
+        node,
+        client,
+        layout,
+        provisioner,
+        encryption_key,
+        region,
+        server_addr,
+        false,
+    )
+}
+
+/// Build the serving state with an explicit auth and metadata cache policy.
+///
+/// Caching is opt-in because credentials and table generations can be changed
+/// by another node. When enabled, ExtendDB's stale-while-revalidate caches are
+/// wired to BeyondDB's management invalidation registry; changes made on
+/// another node become visible after the configured cache TTL.
+pub fn build_http_state_with_cache(
+    node: &CellNode,
+    client: CellClient,
+    layout: CellStorageLayout,
+    provisioner: Arc<CellInitialPartitionProvisioner>,
+    encryption_key: [u8; 32],
+    region: &str,
+    server_addr: String,
+    cache_enabled: bool,
+) -> Result<AppState, StorageError> {
     if !node.is_ready() {
         return Err(StorageError::Connection(
             "BeyondDB Cell node is not ready to serve".into(),
@@ -231,15 +259,34 @@ pub fn build_http_state(
             .with_transaction_coordinators(provisioner.clone())
             .with_initial_partitions(provisioner),
     );
-    let credentials = CellCredentialStore::new(client.clone(), layout, encryption_key);
-    let catalog = Arc::new(CellCatalogStore::new(client));
-    let authz_cache = Arc::new(CachedAuthzStore::pass_through(
-        catalog.clone(),
-        AuthzCacheConfig::default(),
+    let credentials: Arc<dyn extenddb_auth::CredentialStore> = Arc::new(CellCredentialStore::new(
+        client.clone(),
+        layout,
+        encryption_key,
     ));
+    let cached_credentials = Arc::new(if cache_enabled {
+        extenddb_auth::CachedCredentialStore::with_arc(credentials.clone(), Default::default())
+    } else {
+        extenddb_auth::CachedCredentialStore::pass_through_arc(credentials, Default::default())
+    });
+    let catalog = Arc::new(CellCatalogStore::new(client));
+    let authz_cache = Arc::new(if cache_enabled {
+        CachedAuthzStore::new(catalog.clone(), AuthzCacheConfig::default())
+    } else {
+        CachedAuthzStore::pass_through(catalog.clone(), AuthzCacheConfig::default())
+    });
+    let table_key_info_cache = Arc::new(if cache_enabled {
+        CachedTableKeyInfoStore::new(storage.clone(), Default::default())
+    } else {
+        CachedTableKeyInfoStore::pass_through(storage.clone(), Default::default())
+    });
+    let auth_cache = AuthCacheRegistry::empty()
+        .with_credential(cached_credentials.clone())
+        .with_authz_invalidator(authz_cache.clone())
+        .with_table_key_info_invalidator(table_key_info_cache.clone());
     Ok(AppState {
         storage: Arc::clone(&storage),
-        auth: Arc::new(BuiltinAuthProvider::new(credentials)),
+        auth: Arc::new(BuiltinAuthProvider::new((*cached_credentials).clone())),
         limits: Arc::new(LimitsConfig::default()),
         region: Arc::from(region),
         server_addr,
@@ -251,14 +298,9 @@ pub fn build_http_state(
         import_paths: Arc::from([]),
         export_paths: Arc::from([]),
         throttle: Arc::default(),
-        auth_cache: AuthCacheRegistry::empty(),
+        auth_cache,
         authz_cache,
-        // Table generations can change through any server. Process-local cache
-        // invalidation cannot prevent routing a recreated name to its deleted ID.
-        table_key_info_cache: Arc::new(CachedTableKeyInfoStore::pass_through(
-            storage,
-            Default::default(),
-        )),
+        table_key_info_cache,
         config_entries: Vec::new(),
         docs_store: None,
     })

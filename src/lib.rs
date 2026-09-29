@@ -41,7 +41,7 @@ pub use provision::*;
 pub use routing::*;
 pub use server::{
     BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PublishedNodeLease, build_http_state,
-    measured_node_capacity, shutdown_serving_node,
+    build_http_state_with_cache, measured_node_capacity, shutdown_serving_node,
 };
 pub use split::*;
 pub use stream_journal::{

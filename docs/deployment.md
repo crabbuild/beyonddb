@@ -135,6 +135,7 @@ Save the next JSON block as `config.json` in the repository root. Replace its ob
   "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
   "initial_partitions": 4,
   "split_threshold_bytes": 268435456,
+  "auth_cache_enabled": false,
   "bootstrap": {
     "account_id": "123456789012",
     "access_key_id": "AKIAIOSFODNN7EXAMPLE",
@@ -144,6 +145,13 @@ Save the next JSON block as `config.json` in the repository root. Replace its ob
   }
 }
 ```
+
+`auth_cache_enabled` is disabled in the example because credentials and table
+generations can be changed by another node. Set it to `true` only when the
+cache's 60-second cross-node visibility window is acceptable. Local management
+mutations invalidate cached credentials, policies, boundaries, and table
+metadata immediately; changes made through another node become visible after
+the cache TTL.
 
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
