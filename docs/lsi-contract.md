@@ -104,7 +104,9 @@ read bytes along with items and continuation. Fetches happen in the same
 storage read context as the index page, preserving each item's committed
 visibility. The engine uses those measures for table/index capacity arms and
 keeps filtering, projection, Count, and evaluated-key pagination in their
-current owner. No protocol parsing or request-local hidden state belongs in
+current owner.
+
+No protocol parsing or request-local hidden state belongs in
 BeyondDB's backend.
 
 Update every DataEngine implementation and mock in the same upstream change:
@@ -126,7 +128,9 @@ The initial ALL path stores ordered index keys and reads the base image in the
 same Cell query. Index updates share base write/transaction/import commands.
 The [logical 400-KiB item limit](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Constraints.html#limits-items)
 includes base and corresponding ALL projections, even though physical images
-are not duplicated. Five LSI B-tree pairs add to
-prepare-time capacity reservations. A 512-MiB Cell can still throttle an item
+are not duplicated.
+
+Five LSI B-tree pairs add to prepare-time capacity reservations. A 512-MiB
+Cell can still throttle an item
 collection below DynamoDB's 10-GiB LSI limit; fleet scale and larger hot item
 collections remain unqualified.

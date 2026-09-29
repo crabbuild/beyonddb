@@ -61,13 +61,17 @@ Coordinator: durable COMMIT or ABORT
 Driver or recovery worker: idempotent participant resolution
 ```
 
-If all three prepares succeed, the coordinator durably changes BEGIN to COMMIT.
-If a condition definitively fails while it is still BEGIN, it changes to ABORT.
-COMMIT and ABORT are immutable. A timeout provides neither decision. Success is
-returned only after all three participants have durably applied COMMIT and their
-resolution receipts have been recorded. Two keys in the same Cell share one
-prepare and one resolution; the public adapter currently uses this protocol
-even when every key belongs to one Cell.
+| After prepare | Durable action | Caller-visible result |
+| --- | --- | --- |
+| Every participant prepared | Coordinator changes `BEGIN` to `COMMIT`. | Success follows durable apply and a resolution receipt from every participant. |
+| A condition definitively fails while still in `BEGIN` | Coordinator changes `BEGIN` to `ABORT`. | Return the ordered cancellation result after abort resolution. |
+| A reply or caller times out | Read the coordinator decision and participant state during retry or recovery. | The timeout alone does not establish `COMMIT` or `ABORT`. |
+
+`COMMIT` and `ABORT` are immutable. A participant that has not yet applied a
+durable `COMMIT` remains locked until resolution.
+
+Two keys in the same Cell share one prepare and one resolution. The public
+adapter uses this protocol even when every key belongs to one Cell.
 
 ### Atomicity includes what concurrent readers can observe
 
@@ -108,8 +112,10 @@ subsequent writes verify both terminal paths released their locks.
 The driver fixture exercises this deterministic interleaving through actual
 coordinator/participant commands and published Cell state. Removing condition
 check locks temporarily makes the regression fail: T2 commits instead of
-conflicting. The production source is restored unchanged. The account sibling
-already tests that checked keys reject ordinary puts and deletes while prepared.
+conflicting. The production source is restored unchanged.
+
+The account sibling already tests that checked keys reject ordinary puts and
+deletes while prepared.
 This adds a specific write-skew regression, not a general serializable-history
 checker, cloud API comparison, or fleet-scale proof.
 
@@ -143,7 +149,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
-| API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; non-ALL LSIs, online GSI lifecycle/splitting, and Streams remain incomplete; aggregate evaluated Update-size semantics remain unqualified | Complete the engine read contract, local stream effects, and index lifecycle; qualify size/error semantics against AWS before claiming compatibility. |
+| API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; committed writes append stream records locally. Non-ALL LSIs, online GSI lifecycle, Streams policy transitions, and aggregate evaluated Update-size semantics remain incomplete or unqualified. | Complete the engine read contract, index lifecycle, and Streams qualification; compare size and error semantics with AWS before claiming compatibility. |
 
 With 10,000 data Cells at a 256-MiB live-data split target, the arithmetic storage
 envelope is about 2.44 TiB. This excludes metadata, retained history, claims,
@@ -164,8 +170,10 @@ Review verification: the existing `elastic_cells` suite passed all 24 tests in
 read barriers, replay, split fences, capacity exhaustion, and owner recovery.
 This review changes documentation only. The previously recorded signed
 SDK/RustFS process smoke at the same implementation passed in 358.24 seconds;
-it was not rerun for this documentation update. Neither run qualifies 10,000
-active Cells or multi-TB storage. Detailed failure reproductions follow below.
+it was not rerun for this documentation update.
+
+Neither run qualifies 10,000 active Cells or multi-TB storage. Detailed
+failure reproductions follow below.
 
 ## Contract and current boundary
 
@@ -173,7 +181,9 @@ This document describes the implemented write and read protocols and the
 remaining recovery and scale qualification work. Public `TransactWriteItems`
 now routes Put, Delete, Update, and ConditionCheck through a durable coordinator, including requests
 confined to one Cell. Account and data Cells prepare, lock, and resolve their
-operations. The adapter returns success only after every participant apply is
+operations.
+
+The adapter returns success only after every participant apply is
 published. Token lookup precedes current table routing and uses that same
 coordinator authority. The earlier account claims and local token receipts
 have been removed.
@@ -188,8 +198,9 @@ Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
 work after restoring its published Cell state. An internal resolver can now
 finish a terminal decision across account and data Cell participants, using participant
-state after an ambiguous reply and recording each resolution durably. A
-transaction driver can also resume a published `BEGIN`: it reads the
+state after an ambiguous reply and recording each resolution durably.
+
+A transaction driver can also resume a published `BEGIN`: it reads the
 immutable participant payloads, prepares in Cell order, records receipts,
 publishes one decision, and finishes resolution before returning that decision.
 
@@ -197,7 +208,9 @@ Concurrent resumes and lost prepare/decision replies use durable state as the
 authority. Definitive condition, lock, or routing failures request an abort;
 an already-published terminal decision wins. Transport uncertainty leaves
 recoverable work and never becomes cancellation. Shard admission now registers a fixed shard number in the account Cell before it
-returns to a caller. On startup, the server pages that account-owned registry,
+returns to a caller.
+
+On startup, the server pages that account-owned registry,
 recovers idle shards and shards whose owner lease expired, including when the
 replacement uses a different endpoint, then aborts unfinished
 `BEGIN` records and completes terminal decisions before accepting traffic.
@@ -221,10 +234,15 @@ to 100 unique items and a request-side 4-MiB estimate across tables before
 calling the backend. That estimate does not establish an aggregate bound on
 evaluated Update images; see the review findings below.
 
-BeyondDB currently rejects transaction writes with stream capture, so that
-separate gap must be closed before claiming full compatibility. The target
-is atomic writes and serializable `TransactGetItems` relative to transactional
-writes and individual `GetItem`/`PutItem`/`UpdateItem`/`DeleteItem` calls.
+Account and routed participant apply paths now append a stream record in the
+same Cell command as each committed base mutation. Aborted or rejected writes
+do not emit records. Streams policy transitions and broader public API
+qualification remain open; see [the Streams contract](streams-contract.md).
+
+The target is atomic writes and serializable `TransactGetItems` relative to
+transactional writes and individual
+`GetItem`/`PutItem`/`UpdateItem`/`DeleteItem` calls.
+
 `Query`, `Scan`, and batch operations need per-item read-committed visibility;
 they need not expose one snapshot for the whole response.
 These targets follow the [DynamoDB transaction isolation contract](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
@@ -244,14 +262,18 @@ would expose intermediate changes and require compensation, which does not
 meet the requested contract. Distributed MVCC could reduce reader/writer
 conflicts, but would require version retention, globally comparable visibility
 boundaries, and recovery/collection rules that the current Cell model does not
-provide. It remains a future architectural option if measured contention
+provide.
+
+It remains a future architectural option if measured contention
 justifies that cost.
 
 The tradeoffs are explicit: this is blocking two-phase commit. An unavailable
 decision owner can hold affected keys until recovery. Prepare visits participants
 sequentially; terminal resolution keeps up to four participants in flight per
-call and replenishes the window as any attempt finishes. Latency still depends
-on participant count and publication/network latency. A shared read also publishes durable
+call and replenishes the window as any attempt finishes.
+
+Latency still depends on participant count and publication/network latency. A
+shared read also publishes durable
 state; it costs more than independent Get calls. Hot-key contention does not
 disappear by adding Cells. Coordinator sharding spreads independent requests,
 but activation, placement, retained history, and recovery throughput must also
@@ -277,7 +299,9 @@ The coordinator itself serializes `2P + 2` of those commands. Two participant
 Cells therefore need ten phase commands; 100 participants need 402. Multiple
 keys in one Cell share one prepare and resolution, so partition distribution
 matters as much as item count. Independent transactions can use different
-coordinator shards. Within one transaction, prepare remains sequential and
+coordinator shards.
+
+Within one transaction, prepare remains sequential and
 terminal resolution has a four-participant window. Coordinator progress writes
 remain serialized by their Cell owner.
 
@@ -285,6 +309,7 @@ All transactional reads pay the same phase cost and persist their captured
 images; assembly additionally queries each saved item. A same-Cell read therefore
 requires six phase commands, at least two upload commands, and result queries. Before optimizing the protocol, measure publication latency,
 participant count, hot-key conflicts, recovery competition, and retained bytes.
+
 Terminal resolution now overlaps independent participants after a durable
 decision. Batching coordinator progress or parallelizing prepare requires new
 failure/concurrency proof; neither optimization is implemented here.
@@ -296,7 +321,9 @@ token, or from a generated transaction ID if no token was supplied. Its Cell
 target is fixed when the transaction begins and independent of table range
 splits. Spread coordinator targets across admitted Cells; routing every
 transaction through the account directory Cell would retain its single-writer
-bottleneck. A participant is one table range data Cell, or the account Cell
+bottleneck.
+
+A participant is one table range data Cell, or the account Cell
 for an unrouted table. Sort participants by stable Cell ID before preparing.
 
 Each participant owns all keys for its range, including their local index,
@@ -332,10 +359,11 @@ reads within one request share one lock while retaining separate result slots.
 A prepared record, captured read images, and all its locks publish in **one**
 participant command. Proposed images are separate from live item rows. No
 ordinary read, TTL sweep, index writer, or stream reader may expose them
-before commit. A commit-resolution command applies base items, existing local
-indexes, TTL metadata, and the applied marker together. Future stream capture
-must join that same command. An abort-resolution command removes intent and
-locks together.
+before commit. A commit-resolution command applies base items, local indexes,
+TTL metadata, GSI projection journal entries, stream records, and the applied
+marker together.
+
+An abort-resolution command removes intent and locks together.
 
 It records `ABORTED` even if the prepare has not arrived, so a delayed prepare
 cannot acquire locks after recovery declares the participant resolved. A
@@ -356,7 +384,9 @@ These durable phase payloads are distinct from the temporary wire-upload rows
 described below. Locks, chunk counts, and phase payload rows commit or roll back
 together. Participant resolution reads its chunks into memory, deletes the
 staged rows to reclaim their pages, applies images, releases locks, and sets
-its terminal marker inside one command. A failed apply rolls back the deletion
+its terminal marker inside one command.
+
+A failed apply rolls back the deletion
 as well as any partial image writes. Decisions and participant replay markers
 remain retained. [Terminal operation compaction](#terminal-operation-compaction)
 now releases coordinator write images at resolution; full history retirement
@@ -367,7 +397,9 @@ JSON escapes can make their encoded images exceed 1 MiB. The shared
 `src/item_storage.rs` path clears the old image, allocates its exact encoded
 size with `zeroblob`, and writes 256-KiB slices through
 `CommandContext::write_sql_blob` inside the command that updates indexes and TTL
-metadata. Incremental writes reuse allocated pages rather than repeatedly
+metadata.
+
+Incremental writes reuse allocated pages rather than repeatedly
 copying a growing BLOB. These item columns have no SQL triggers, CHECK
 constraints, or indexes; the application maintains the separate index and TTL
 columns in the same command. Reads use
@@ -383,8 +415,10 @@ longer place several large images in one SQL result.
 The shared SDK fixture exercises ten 380-KiB items grouped into two participants,
 then Updates, full TransactGet, and token replay after owner replacement. A
 second case includes control characters and UTF-8 characters: each item fits
-DynamoDB's item limit while its JSON exceeds the SQL limit. It also checks
-Query, Scan, and cancellation with `ALL_OLD`. The process smoke exercises the
+DynamoDB's item limit while its JSON exceeds the SQL limit.
+
+It also checks Query, Scan, and cancellation with `ALL_OLD`. The process smoke
+exercises the
 same requests across a hard restart. The mixed account/data host fixture drops
 BEGIN, prepare, decision, and apply replies for large payloads, then confirms
 replay cannot recreate subsequently deleted items.
@@ -393,7 +427,9 @@ The expanded process fixture surfaced intermittent `ServiceUnavailable` during
 table recreation after its transaction/restart assertions. A focused host test
 reproduced coordinator movement-budget exhaustion: admitting four data ranges
 on a full node needed more than the runtime's two releases per one-second
-window. The provisioner now waits one window and retries a capacity-refused
+window.
+
+The provisioner now waits one window and retries a capacity-refused
 release once. Generation and settled-work checks still run at the runtime
 boundary; persistent pressure still fails retryably. This addresses that
 admission pattern, not all overload or owner-availability failures.
@@ -423,7 +459,9 @@ All transactional reads now use shared prepare, durable decision, resolution,
 and individual saved-image retrieval. The account and data aggregate snapshot
 queries and the adapter's route-dependent branch are removed. The public API
 retains one ordered, serializable result; HTTP response assembly happens above
-the Cell wire boundary. A saved image remains immutable after lock release,
+the Cell wire boundary.
+
+A saved image remains immutable after lock release,
 so fetching its siblings later cannot mix newer live versions into the result.
 The adapter and participant still enforce the raw 4-MiB read limit.
 
@@ -470,8 +508,9 @@ without extending the input lifetime.
 The receiving command checks the index and exact expected chunk length. A
 retry accepts identical bytes and rejects changed bytes. Each input and the
 aggregate temporary payload per Cell are capped at 32 MiB. This bounds
-serialized transport; it does not change DynamoDB's item/request limits. A
-sealing handler assembles the complete serialized input in memory, so
+serialized transport; it does not change DynamoDB's item/request limits.
+
+A sealing handler assembles the complete serialized input in memory, so
 per-worker peak memory still needs measurement and admission proof before
 fleet qualification.
 
@@ -480,7 +519,9 @@ receiver allows deadlines up to six minutes ahead of its logical clock,
 accounting for the runtime's five-minute sender-clock tolerance. Already
 expired references are rejected. Each arriving chunk collects at most eight
 expired rows; the deadline is part of the identity, so a delayed expired
-upload cannot recreate collected input. Collection is demand-driven, not a
+upload cannot recreate collected input.
+
+Collection is demand-driven, not a
 background history collector.
 
 BEGIN or prepare assembles every piece, checks total length and digest, and
@@ -488,23 +529,29 @@ decodes the complete input inside its original application savepoint. It consume
 the temporary rows atomically with the phase. Failure or rejection rolls this
 consumption back. BEGIN still validates participants and claims the client token;
 prepare still validates the coordinator and routing, evaluates conditions, locks
-keys, and saves images in one published command. Chunk arrival never counts as a
-prepare vote, claims a token, or creates a transaction decision.
+keys, and saves images in one published command.
+
+Chunk arrival never counts as a prepare vote, claims a token, or creates a
+transaction decision.
 
 After successful sealing, coordinator operations and participant images belong
 to the durable transaction record and do not expire with the upload. Recovery
 reads coordinator operations through bounded chunk queries, then uses the same
 participant upload/prepare path. Lost upload replies can repeat the immutable
 chunk; lost phase replies still use the original coordinator/participant outcome
-rules. Expired input can be uploaded again under a fresh reference while the
+rules.
+
+Expired input can be uploaded again under a fresh reference while the
 published transaction identity and decision remain unchanged.
 
 The host regression covers duplicate, conflicting, incomplete, expired,
 excessively future, and forged input, then resumes an unsealed upload on a
 replacement owner. Its sender clock is 30 seconds ahead: this reproduced a
 first-chunk rejection before the receiver's deadline bound included runtime
-clock tolerance. It also
-seals two independent uploads with identical bytes and deadlines; both converge
+clock tolerance.
+
+It also seals two independent uploads with identical bytes and deadlines; both
+converge
 on the same durable transaction. The mixed
 account/data fixture drops upload and phase replies. Signed SDK fixtures include
 ten 380-KiB binary values and four 380-KiB control-character strings grouped into
@@ -620,8 +667,10 @@ Acquire all participant prepares in a stable order and fail or back off on
 lock conflict. Do not wait while holding one participant's locks for another
 conflicting transaction to release its locks. This avoids a distributed wait
 cycle. Conditions and updates are evaluated in the same serialized command
-as conflict checking and lock acquisition; preflight evaluation is advisory. Single-item writes,
-same-Cell transactions, TTL deletion, and table deletion must consult the
+as conflict checking and lock acquisition; preflight evaluation is advisory.
+
+Single-item writes, same-Cell transactions, TTL deletion, and table deletion
+must consult the
 same lock table. A separate prepare path without those sibling changes is
 unsafe.
 
@@ -644,16 +693,19 @@ The client token maps to one coordinator record for its account and
 fingerprint. `ReadCoordinatorToken` now resolves that identity before any
 table routing. A matching token/fingerprint in `BeginCrossCellTransaction`
 returns the original record even when a retry proposes different partition
-epochs or Cell targets; its stored participant set is never rewritten. The
-fingerprint is supplied by ExtendDB, computed from `TransactItems`
+epochs or Cell targets; its stored participant set is never rewritten.
+
+The fingerprint is supplied by ExtendDB, computed from `TransactItems`
 independently of data Cell routing.
 
 Replay reads the terminal decision and returns the existing outcome without
 reapplying writes. A mismatched fingerprint fails. Retain the successful token
 outcome for the external ten-minute replay window measured from completion;
 retain undecided records and participant resolution evidence until every
-participant is resolved, regardless of age. After the replay window, safe
-garbage collection requires a terminal decision, all-resolution proof, and no
+participant is resolved, regardless of age.
+
+After the replay window, safe garbage collection requires a terminal decision,
+all-resolution proof, and no
 split or backup pin.
 
 Reuse after expiry starts a new transaction.
@@ -662,8 +714,10 @@ The coordinator records `completed_at_ms` atomically when the last unresolved
 participant receipt is recorded. Repeated resolution receipts do not move it.
 Token lookup and admission retain every unresolved record, regardless of age.
 After ten minutes from successful completion, admission may unlink the old
-token slot and bind a new transaction/fingerprint. A fully resolved `ABORT`
-unlinks its token immediately: ExtendDB's SQLite backend rolls token storage
+token slot and bind a new transaction/fingerprint.
+
+A fully resolved `ABORT` unlinks its token immediately: ExtendDB's SQLite
+backend rolls token storage
 back with canceled writes, so a corrected condition or released lock must
 allow the same request to retry. Releasing before all aborts resolve could
 leave two attempts competing with unfinished intents.
@@ -692,8 +746,10 @@ The implemented barrier fails closed until a participant resolves. `GetItem`
 checks its canonical key; transactional read prepare checks every requested
 key and returns an ordered `TransactionConflict` cancellation reason.
 `Query` probes an intent index using the same HASH key, numeric sort bounds,
-direction, and continuation as its live-row query. `Scan` checks locks after
-its continuation. Both detect pending creates even when no live row exists.
+direction, and continuation as its live-row query.
+
+`Scan` checks locks after its continuation. Both detect pending creates even
+when no live row exists.
 The lock check and item reads execute in one serialized Cell query. Ordinary
 read conflicts map through ExtendDB to retryable `ServiceUnavailable` errors.
 
@@ -714,7 +770,9 @@ old-value fallback.
 Each Cell query helps at most one transaction, bounded by the existing
 100-participant limit. A routed Scan can help once per Cell query/page, so the
 whole request may resolve multiple transactions. Another blocker or a new concurrent writer remains a
-retryable conflict on the repeated read. BatchGet inherits the keyed path;
+retryable conflict on the repeated read.
+
+BatchGet inherits the keyed path;
 transactional read prepares retain their ordered
 transaction-conflict cancellation behavior. They do not independently help
 blocking writes. Shared read locks do not block ordinary reads.
@@ -723,6 +781,7 @@ The routing key is published with the participant prepare and included in its
 immutable request digest. It cannot be reconstructed from the transaction ID
 when a client token selected the shard. Conflict metadata is read with the
 lock in the same serialized Cell query, including absent prepared creates.
+
 Abort tombstones have no locks and do not need a routing key. These are
 unshipped schema/wire changes; there is no compatibility reader.
 Read barriers ignore shared read locks; writes, TTL deletion, table deletion,
@@ -746,7 +805,9 @@ publish BEGIN with original keys, operation indexes, and participant targets
 prepare until the first committed resolution. All those intervals overlap
 once the final prepare publishes. COMMIT occurs inside that common interval.
 An overlapping write either precedes the capture, conflicts, or follows lock
-release. Saved images remain immutable after release, so subsequent writes
+release.
+
+Saved images remain immutable after release, so subsequent writes
 cannot change a response that is still being assembled. Missing items require
 locks too: otherwise a concurrent create could invalidate the snapshot.
 
@@ -754,8 +815,10 @@ Read images live in `ddb_transaction_reads`, keyed by transaction ID and local
 position. They become queryable only after participant COMMIT and a matching
 coordinator identity. ABORT deletes them with lock release. Each image is read
 through one bounded Cell query, preserving missing items and repeated keys
-without forcing the entire response through one RPC. The storage contract
-preserves repeated positions; ExtendDB rejects duplicate keys at the public
+without forcing the entire response through one RPC.
+
+The storage contract preserves repeated positions; ExtendDB rejects duplicate
+keys at the public
 HTTP boundary. Participant preparation and final assembly enforce the 4-MiB
 aggregate item limit.
 
@@ -791,8 +854,10 @@ Admit a transaction only if coordinator, every participant, and their
 prepared images fit their Cell budgets. The external request limit is 4 MiB,
 but staging, old images, locks, receipts, and LTX capture consume additional
 space. Bound concurrent prepares per Cell and the total unresolved age; shed
-load before a Cell reaches its capture or database limit. Distribute recovery
-workers by coordinator Cell and scan bounded due indexes rather than walking
+load before a Cell reaches its capture or database limit.
+
+Distribute recovery workers by coordinator Cell and scan bounded due indexes
+rather than walking
 all accounts or 10,000 data Cells per tick. Track prepared count, oldest
 intent age, decision-to-resolution lag, conflict rate, retries, and capacity
 rejections. A permanently unavailable coordinator is an availability issue,
@@ -804,7 +869,9 @@ not permission to discard a prepared transaction.
 coordinator record. It never reroutes participant keys or reconstructs the
 request from an HTTP retry. It skips participants whose prepare receipts are
 already recorded; unresolved prepared participants remain discoverable for
-owner recovery and resolution. For the others, it reads one payload at a time
+owner recovery and resolution.
+
+For the others, it reads one payload at a time
 and prepares them in their persisted Cell-ID order. Participant-local failures
 map back to the original operation index before the abort decision is stored.
 
@@ -816,7 +883,9 @@ returns `TransactionCanceled` with ordered reasons instead of the single-item
 commit, replay, recorded and unrecorded prepare receipts, concurrent resumes,
 condition failure, competing locks, and stale routing. The signed peer
 transport drops replies after a published prepare and commit decision; the
-driver still completes from durable state. Aborted transactions release their
+driver still completes from durable state.
+
+Aborted transactions release their
 locks and preserve both original item images. The SDK test checks ordered
 write cancellation and rollback alongside transactional read cancellation.
 
@@ -824,6 +893,7 @@ write cancellation and rollback alongside transactional read cancellation.
 adapter against mixed account/data participants. It drops replies after BEGIN,
 prepare, decision, and resolution; verifies durable recovery, token replay and
 mismatch; and retries a canceled token after its condition becomes satisfiable.
+
 The read path also drops all four phase replies and checks ordered existing,
 missing, and repeated-key results. `transaction_reads.rs` prepares two shared
 readers over account/data participants, proves writes remain blocked after
@@ -847,6 +917,7 @@ Coordinator token tests restore historical BEGIN, partially resolved COMMIT,
 and completed COMMIT snapshots. They verify indefinite pinning of unresolved
 work, a fresh replay window after delayed completion, mismatch rejection,
 route-independent replay, and reuse with a new fingerprint after expiry.
+
 The owner-restart test discovers the pending token, then verifies its release
 after fenced recovery resolves every abort.
 SQL query plans use the token and transaction-ID indexes rather than scanning
@@ -899,19 +970,26 @@ remain governed by durable transaction state.
 `tests/elastic_cells/transaction_recovery.rs` exercises an unavailable participant
 before a partially prepared healthy transaction in the same shard. The worker
 finishes healthy work, retains the unavailable BEGIN, then completes it when
-connectivity returns without a client retry. A newly admitted shard's prepared
-ABORT is also resolved without exposing its staged image. The two-owner mTLS
-test abandons a published COMMIT after one apply, then verifies worker completion
-and signed SDK reads across owner replacement. It also starts discovery on the
-survivor before creating a new remote shard, verifies that the live owner stays
-in place, stops that owner, and waits for resolution without another mutation
-or a survivor restart. Signed SDK reads then verify both recovered images.
+connectivity returns without a client retry.
+
+A newly admitted shard's prepared ABORT is resolved without exposing its
+staged image.
+
+The two-owner mTLS test abandons a published COMMIT after one apply, then
+verifies worker completion and signed SDK reads across owner replacement. It
+also starts discovery on the survivor before creating a new remote shard. The
+live owner stays in place; after it stops, resolution finishes without another
+mutation or a survivor restart.
+
+Signed SDK reads then verify both recovered images.
 
 This is one serial worker per serving node. At one discovery per 250 ms, a full
 4,096-shard registry needs over 17 minutes even before I/O, activation, multiple
 accounts, and transaction work. Discovery of an expired owner is therefore not
 a recovery-time guarantee. Its backlog drain rate and worst-case latency at
-10,000 Cells remain unmeasured. The configured account must stay reachable and
+10,000 Cells remain unmeasured.
+
+The configured account must stay reachable and
 the survivor must have capacity for recovered participants. Fleet placement,
 general data/account/credential activation, data-only-node startup, active node
 log recovery, and history collection remain separate requirements.
@@ -940,8 +1018,10 @@ The runtime's independent pressure policy can shed other settled Cells;
 general on-demand reactivation remains a product availability gap. The runtime
 rechecks the exact generation and settled-work gate, closes SQLite, publishes
 Idle ownership, and releases its reservation. Local Cell activations are
-serialized; cross-node ownership still uses authority CAS. A capacity-refused
-release waits one second for the runtime's movement window and retries once
+serialized; cross-node ownership still uses authority CAS.
+
+A capacity-refused release waits one second for the runtime's movement window
+and retries once
 with the same generation.
 
 The admission mutex remains held; runtime fencing and settled-work checks
@@ -956,11 +1036,15 @@ The pending-work check is not a distributed transaction lease: a BEGIN can
 race it. After release, admission compares the published root with the empty-work
 query receipt. Only an Idle owner with matching incarnation and commit
 sequence proves that no intervening BEGIN appeared; that shard leaves the
-local recovery schedule. The admission mutex protects retirement against
+local recovery schedule.
+
+The admission mutex protects retirement against
 local reactivation, which registers the shard again. Unproven releases stay
 scheduled. The worker reactivates an Idle shard before scanning, then resumes
-any durable work. It drops local scheduling when another node has acquired the shard. A request
-interrupted by release can retry; no timeout or release implies ABORT.
+any durable work. It drops local scheduling when another node has acquired the shard.
+
+A request interrupted by release can retry; no timeout or release implies
+ABORT.
 
 Startup pages the registry and completes each local shard's fenced recovery
 before moving to the next. The private peer listener is already available;
@@ -972,8 +1056,10 @@ Cell's saved image.
 host, admits a new data Cell by reclaiming completed coordinators, verifies
 concurrent replay without reverting a newer value, and recovers a prepared
 shared read after coordinator release. The serving-process test exercises seventy distinct shards through signed SDK
-writes, then hard restart and token replay. These tests bound residency;
-they do not establish fleet throughput. Startup still visits the historical
+writes, then hard restart and token replay.
+
+These tests bound residency; they do not establish fleet throughput. Startup
+still visits the historical
 registry. Its cost, movement limits, data-owner activation, and history collection remain production work.
 
 A full eight-slot host regression fills seven slots with idle coordinators, then
@@ -988,7 +1074,9 @@ capacity worker preserves readiness and its pending split across retries.
 both participant types: immutable prepare identity, replay/mismatch, abort
 before prepare, terminal decision conflicts, and staged-image retention.
 Account and data wrappers own their image format, local index updates, and
-lock release. Their completion callbacks and terminal marker run in the same
+lock release.
+
+Their completion callbacks and terminal marker run in the same
 Cell command savepoint. This replaces the data-only phase implementation;
 there is no second account decision protocol.
 
@@ -996,17 +1084,21 @@ Account prepares and account-local TransactWrite share staging and validation
 in `src/items/transaction.rs`. Put, Delete, Update, and ConditionCheck each
 lock `(table_id, item_key)`, including absent items. DeleteTable and initial
 route activation check the table's lock prefix: otherwise a prepared create
-could commit into a deleted table or an obsolete account destination. Table
-updates do not change primary-key schemas; tags and TTL configuration do not
+could commit into a deleted table or an obsolete account destination.
+
+Table updates do not change primary-key schemas; tags and TTL configuration do
+not
 mutate account item images. Data Cell split and TTL write fences are unchanged.
 
-`tests/elastic_cells/account_participant.rs` runs a mixed account/data driver,
-restores all three Cell owners from their object-store roots with an account
-prepare pending, then races two resumes through COMMIT. It verifies staged
-Put/Delete/Update/ConditionCheck behavior, table-scoped conflicts, ordinary
-read/write and same-Cell transaction rejection, scan continuation, deletion
-and empty-table route fences, replay/mismatch, abort tombstones, prepared
-abort cleanup, and an account condition failure rolling back the data write.
+`tests/elastic_cells/account_participant.rs` restores three Cell owners from
+their object-store roots while an account prepare is pending, then races two
+mixed account/data resumes through COMMIT. The fixture checks:
+
+- Staged Put, Delete, Update, and ConditionCheck behavior; table-scoped
+  conflicts; ordinary read/write and same-Cell transaction rejection.
+- Scan continuation, deletion and empty-table route fences, token replay and
+  mismatch, abort tombstones, and prepared-abort cleanup.
+- An account condition failure rolling back the data write.
 
 Existing data driver and read-barrier tests exercise the shared state machine
 through the other wrapper. This is host-level proof, not a signed public
@@ -1032,12 +1124,16 @@ and introduce a check/read race.
 These checks run in `tests/elastic_cells.rs` and its
 `elastic_cells/transaction_visibility.rs` module. Account Get (also used
 by hash-only Query) and Scan apply the same lock barrier, keyed by table ID and
-canonical item key. Account transactional reads enforce it during shared prepare. Account Scan conservatively fences the
+canonical item key. Account transactional reads enforce it during shared prepare.
+
+Account Scan conservatively fences the
 unvisited range, including pending creates without live rows. The account
 participant test checks these barriers and their persistence across owner
 restart; SQLite query plans use covering primary-key lookups for item, range,
-and table fences and an owner index for lock cleanup. Shared read modes use
-partial indexes for exclusive-intent lookup. TTL candidate reads are internal hints; deletion still uses the
+and table fences and an owner index for lock cleanup.
+
+Shared read modes use partial indexes for exclusive-intent lookup. TTL
+candidate reads are internal hints; deletion still uses the
 lock-aware item command. Usage/statistics queries do not expose item images.
 
 The prior branch behavior returned live images without checking intents.
@@ -1065,13 +1161,14 @@ fleet-availability findings remain open.
 | Durability | Cell command savepoint → runtime publication → owner authority | `Committed<T>` releases after publication; `CellExecutor::query` refuses an unpublished head. Restart/peer tests exercise this dependency. |
 | Recovery discovery | Account shard registry → provisioner → serving/startup resolver | Changed-endpoint startup and serving discovery for configured accounts, live-owner isolation, and coordinator reactivation; fleet placement and measured recovery capacity remain missing. |
 
-BeyondDB source paths in the table are relative to `src/`.
-Read the driver, both participant wrappers, coordinator, and provisioner
-together with the named tests above. Runtime contracts are in
-`crates/cellule-runtime/src/client.rs`,
-`crates/cellule-runtime/src/publication.rs`,
-`crates/cellule-runtime/src/cell/executor.rs`, and
-`crates/cellule-runtime/src/primitives/sql.rs`.
+BeyondDB source paths in the table are relative to `src/`. Read the driver,
+both participant wrappers, coordinator, and provisioner with the named tests.
+The runtime contracts are in:
+
+- `crates/cellule-runtime/src/client.rs`
+- `crates/cellule-runtime/src/publication.rs`
+- `crates/cellule-runtime/src/cell/executor.rs`
+- `crates/cellule-runtime/src/primitives/sql.rs`
 
 ExtendDB source was checked at the Cargo-pinned revision
 `bdb7b3df4ace3b80a6e928f144036d056aec0327`, including its transaction engine,
@@ -1103,8 +1200,10 @@ locks remain held for a later client call.
 This is a crash/omission failure protocol with trusted fleet code. The
 participant resolution input contains a coordinator Cell ID and a `commit`
 boolean. `participant::resolve` checks identity and phase consistency but does
-not contact the coordinator or verify a signed decision certificate. Likewise,
-prepare progress stores a participant Cell ID and sequence supplied by the
+not contact the coordinator or verify a signed decision certificate.
+
+Likewise, prepare progress stores a participant Cell ID and sequence supplied
+by the
 driver. The private listener authenticates fleet peers, and the driver reads
 published state before issuing these commands. That is the current authority
 boundary; it must not be described as Byzantine fault tolerance or proof against
@@ -1123,8 +1222,10 @@ A temporary host-level probe extended the mixed account/data integration
 fixture with six items, each carrying a 360-KiB string. Three items belonged to
 the account participant and three to the data participant. A transaction set a
 small Boolean attribute on all six. The preexisting images totaled 2,211,966
-bytes, below 4 MiB, and each individual image was below 400 KiB. A new token
-was routed to an already active coordinator to exclude admission pressure.
+bytes, below 4 MiB, and each individual image was below 400 KiB.
+
+A new token was routed to an already active coordinator to exclude admission
+pressure.
 The local runtime path returned:
 
 ```text
@@ -1140,8 +1241,10 @@ response alone did not establish the source of the failure.
 At that baseline, a valid large Put group could fail while recording BEGIN.
 A small Update request could publish BEGIN and then fail while recording its
 much larger prepared image. The serving driver treated that failure as retryable; it has no rule
-that changes this deterministic size error into a durable ABORT. Earlier
-participants, if any prepared, can therefore retain locks while recovery keeps
+that changes this deterministic size error into a durable ABORT.
+
+Earlier participants, if any prepared, can therefore retain locks while
+recovery keeps
 retrying. This latter failure schedule follows the code; the probe did not
 establish earlier-participant lock retention.
 
@@ -1149,8 +1252,10 @@ The implemented fix changes BeyondDB's payload layout to bounded chunks while
 keeping the complete local prepare/apply inside one Cell command savepoint.
 It covers account and data participants, coordinator admission/recovery reads,
 and item/saved-read SQL transfers. Increasing the database limit alone would
-not fix this failure. JSON/peer
-encoding also needs explicit qualification: encoded bytes may exceed DynamoDB
+not fix this failure.
+
+JSON/peer encoding also needs explicit qualification: encoded bytes may exceed
+DynamoDB
 item bytes, especially for binary values and escaped strings.
 
 ### Recovery after a peer endpoint changes
@@ -1166,7 +1271,9 @@ now share `recover_discovered_owner`. A live remote session is left in place.
 Range discovery reads table and route metadata through the authenticated routed
 client. The account Cell may have moved to a live peer before a failed data
 owner is replaced; requiring a local account handle would leave its idle ranges
-undiscovered. Startup leaves that live owner in place and recovers registered
+undiscovered.
+
+Startup leaves that live owner in place and recovers registered
 work through private peer routing before accepting public requests. The recovery
 test moves the account to a peer, releases a data range, then checks startup
 recovery restores its owner and a signed SDK read.
@@ -1181,8 +1288,10 @@ wait for the previous lease to expire.
 The signed network fixture leaves a COMMIT on the failed owner after one
 participant apply but before recording that apply receipt. A replacement at a
 new endpoint discovers the ranges and registered coordinator, completes the
-original decision, and exposes both items through SDK reads. A second live
-owner retains its ranges. The separate process fixture changes the peer address
+original decision, and exposes both items through SDK reads.
+
+A second live owner retains its ranges. The separate process fixture changes
+the peer address
 after killing the server and checks SDK data, transaction reads, and token replay
 through the replacement.
 
@@ -1212,7 +1321,9 @@ Startup scans still resolve coordinator shards sequentially before public admiss
 account and data participants each prepared four 380-KiB items in 2-MiB SQLite
 Cells, accepted an unrelated 100-KiB write, then could not resolve the committed
 transaction. Both prepare receipts and the coordinator COMMIT were already
-published. A temporary probe located `SQLITE_FULL` inside item application.
+published.
+
+A temporary probe located `SQLITE_FULL` inside item application.
 These smaller budgets exercise the actual compiled handlers through the raw
 runtime; production Cell declarations remain 512 MiB.
 
@@ -1220,7 +1331,9 @@ There were two allocation problems. Resolution retained staged rows while
 creating live images. Deleting the staged rows first was insufficient: each
 SQL concatenation of the growing item still needed replacement BLOB pages.
 Resolution now releases staged rows after loading them, and item storage uses
-fixed-size incremental writes. Both operations remain inside the application
+fixed-size incremental writes.
+
+Both operations remain inside the application
 savepoint. The same account/data regression now resolves COMMIT and verifies
 every item byte through the storage adapter.
 
@@ -1228,6 +1341,7 @@ The runtime SQL integration fixture verifies a BLOB larger than 1 MiB, bounded
 writes, protected-table denial, out-of-range writes, rollback after partial
 writes on both rejection and handler error, and publication/owner restore.
 The method exposes no raw handle and closes its handle before returning.
+
 SQLite incremental I/O bypasses SQL authorizers, triggers, and CHECK evaluation;
 the runtime explicitly denies protected table names and documents the caller's
 application-invariant obligations. SQLite additionally rejects writable indexed
@@ -1278,11 +1392,14 @@ The artifact came from the download linked by the
 [AWS local setup guide](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.DownloadingAndRunning.html),
 verified against its published SHA-256:
 `f80bcec477f85f57e2c77f8d54aa6b672a8403fceff0c450560aee1cf6c21163`.
+
 The [cloud API contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)
 states a 4-MiB aggregate limit, but does not distinguish request-side data from
 old or evaluated images precisely enough to resolve this observed difference.
-Local acceptance is not cloud parity proof. Rejecting these operations now
-would deliberately diverge from the available executable reference.
+Local acceptance is not cloud parity proof.
+
+Rejecting these operations now would deliberately diverge from the available
+executable reference.
 
 `scripts/probe-transaction-size.py` reproduces the matrix through the AWS CLI,
 verifies all affected items, and deletes its uniquely named temporary table.
@@ -1297,6 +1414,7 @@ A cloud run is still required before changing this rejection policy. If it
 requires evaluated accounting, participant prepare must durably record the
 required byte count and replay it after ambiguous replies; the coordinator
 must decide ABORT before any apply when the aggregate exceeds the bound.
+
 Delete, ConditionCheck, shrinking Update, and replacement Put must use the
 same reference-backed convention. Apply headroom remains necessary regardless
 of which bytes the public API counts.
@@ -1419,12 +1537,15 @@ Verification: the network regression passed in 89.06 seconds after the
 45-second failure-window timeout reproduced the gap. The 19 account/elastic
 tests and strict all-target Clippy passed. Disabling the empty-root cache made
 the residency test fail from continuous reacquisition; with the cache restored
-it passed in 20.37 seconds. The separate signed SDK/RustFS process smoke passed
+it passed in 20.37 seconds.
+
+The separate signed SDK/RustFS process smoke passed
 in 415.02 seconds, including 70 historical coordinator shards, changed-address
 hard restart, token replay, and graceful restart. Its previous run took 368.03
 seconds; this fixture duration is not a throughput benchmark, and the added
-discovery/activation cost still needs scale measurement. No binary rebuild
-occurred during that smoke. Format and diff checks passed.
+discovery/activation cost still needs scale measurement.
+
+No binary rebuild occurred during that smoke. Format and diff checks passed.
 
 This closes configured-account transaction discovery during serving. It does
 not qualify 10,000 Cells, multi-TB storage, fleet placement, or bounded recovery
@@ -1449,8 +1570,10 @@ second table, even though the previous published root was intact.
 The correction belongs in `cellule-ltx::Db::transaction_with`: on callback error,
 an active transaction still requires explicit rollback. If SQLite already
 restored autocommit and the WAL observer saw no commit, rollback is proven and
-the original error is returned as `TransactionError::Operation`. An observed
-commit or rollback failure retains the fencing path. The source contract was
+the original error is returned as `TransactionError::Operation`.
+
+An observed commit or rollback failure retains the fencing path. The source
+contract was
 checked against pinned rusqlite 0.34 and bundled SQLite, and SQLite's
 [autocommit documentation](https://www.sqlite.org/c3ref/get_autocommit.html).
 No dependency version, public API, or storage format changes are needed.
@@ -1466,14 +1589,18 @@ uncaptured commit, exact LTX restore before and after a later successful write,
 refund of disk admission, and fencing if a callback illegally commits before
 returning an error. The runtime test verifies a refused write leaves the same
 owner usable and the next successful command advances sequence from zero to
-one. The account/data regression now refuses filler writes, finishes the
+one.
+
+The account/data regression now refuses filler writes, finishes the
 irrevocable COMMIT, and reads every item successfully.
 
 Verification: 21 BeyondDB account/elastic/signed-peer tests, five runtime
 handler lifecycle tests, ten minimal LTX capture tests, and fourteen replica
 capture tests passed. The updated disk-accounting assertions also passed in the
 minimal build. Strict all-target Clippy passed for LTX, Cell runtime, and
-BeyondDB with production replica features. The separate SDK/RustFS process smoke
+BeyondDB with production replica features.
+
+The separate SDK/RustFS process smoke
 passed in 402.83 seconds, including changed-address hard restart, large
 transactions, token replay across 70 historical shards, and graceful restart.
 
@@ -1494,8 +1621,10 @@ following section describes the current admission fix.
 The 8-KiB filler refusal left enough slack for the previous capacity regression.
 Continuing with empty-payload items consumed that slack. Both four 380-KiB
 writes and fifty small writes per participant then reproduced `SQLITE_FULL`
-during item application after the coordinator published COMMIT. Temporary
-probes located the failure inside `write_item`; releasing lock rows before
+during item application after the coordinator published COMMIT.
+
+Temporary probes located the failure inside `write_item`; releasing lock rows
+before
 apply did not cure it. Those probes and the ineffective reordering were removed.
 The later dense tests subsume the original near-full and 8-KiB-exhaustion cases.
 
@@ -1503,6 +1632,7 @@ Before the page-reservation change below, the dense cases verified failure behav
 an unchanged durable COMMIT, and a raw participant read that still reports the
 transaction lock. Reclaiming an unrelated item in each blocked participant lets
 the same decision finish and every prepared item is read back byte-for-byte.
+
 The current version requires resolution without reclaim, using the page
 reservation introduced below. The earlier version allowed either outcome.
 This is recovery after resource relief, not a guarantee of autonomous progress
@@ -1512,6 +1642,7 @@ The reclaim attempt exposed a second allocation problem. Account and data
 `DeleteItem` handlers always returned the old image, so the runtime copied it
 into `sys_requests` even when the storage caller requested no image. At full
 capacity this could fail or provide no useful space for transaction resolution.
+
 Both handlers now carry the existing `return_old` choice through to their
 durable successful result. The adapter no longer discards that image only after
 publication. Conditional failures still carry the old image; transactional
@@ -1519,8 +1650,11 @@ Delete keeps its existing compact success outcome.
 
 The pinned ExtendDB engine requests an old image for `ALL_OLD`, Streams, or
 consumed-capacity accounting. That boolean is preserved, including capacity
-requests whose public response has no attributes. Streams remain unsupported.
+requests whose public response has no attributes. At that recorded revision,
+Streams were unsupported; the current journal and read path are described in
+[the Streams contract](streams-contract.md).
 The SQLite reference backend likewise returns an old image only when requested.
+
 The new Cell input field is required, with all repository callers updated;
 BeyondDB is unpublished and absent from current main, so there is no shipped
 wire format requiring a fallback reader. No dependency or SQL schema changed.
@@ -1535,8 +1669,9 @@ image can still require extra capacity, as its durable receipt must retain it.
 Evidence map: SDK/ExtendDB delete → `backend/data.rs` → account `DeleteItem` or
 data `PartitionDelete` → runtime `CellExecutor::execute`/`sys_requests`.
 `backend/recovery.rs` resolves the fixed participant list; `participant::resolve`
-and both item apply implementations share the command transaction. The
-capacity suite exercises both participant kinds; existing account/elastic
+and both item apply implementations share the command transaction.
+
+The capacity suite exercises both participant kinds; existing account/elastic
 coverage checks conditions, old-image returns, and transaction operations.
 Current main has no BeyondDB implementation; the comparison is against the
 preceding draft-PR commit.
@@ -1552,6 +1687,7 @@ This reproduction motivated prepare-time admission that protects
 apply and terminal-receipt space from unrelated writes, or a storage layout
 that installs indexed versions during prepare and resolves by a bounded state
 change. Payload reuse alone has now been disproved as a sufficient guarantee.
+
 Any reservation needs bounds for B-tree/index changes, receipts, WAL/local disk,
 and peak memory, plus tests across item/key sizes, concurrent prepares, owner
 restart, and split barriers. The 10,000-Cell/multi-TB target remains unqualified.
@@ -1561,8 +1697,10 @@ dense exhaustion/reclaim cases. Strict all-target Clippy, formatting, diff, and
 Cell/LTX layout checks passed. The separate signed SDK/RustFS process smoke
 passed in 430.21 seconds: `NONE`, `ALL_OLD`, and consumed-capacity delete
 responses, deleted-item absence after changed-address hard restart, large
-transactions/reads, historical token replay, and graceful restart. The binary
-remained fixed throughout that process test. Production growth is seven net
+transactions/reads, historical token replay, and graceful restart.
+
+The binary remained fixed throughout that process test. Production growth is
+seven net
 lines for the existing result-selection contract; the additional test fixture
 covers the newly reproduced shortage and its recovery boundary.
 
@@ -1580,7 +1718,9 @@ The runtime checks occupied pages plus held pages against `max_page_count` after
 all application, receipt, and metadata writes. Commands, rejected-command
 receipts, effect inboxes, bootstrap, and migrations share this boundary. The
 primitive maintains a running total, avoiding a scan of every transaction per
-commit. Claims are small ledger rows, not large zero-filled allocations.
+commit.
+
+Claims are small ledger rows, not large zero-filled allocations.
 Resolution releases its own claim in the same SQLite transaction as apply,
 lock cleanup, and the terminal marker. Failure restores the claim; other held
 claims remain protected. Claims never expire on age or owner change.
@@ -1596,7 +1736,9 @@ allowance `b`, the participant reserves:
 A write/delete budgets four additional tree edits per declared LSI: delete and
 insert in the entry table and its ordered query index. New entry bytes include
 table/index identity, base item key, HASH key, index sort key, base sort key, and
-record framing, twice for the two trees. They are reserved separately because
+record framing, twice for the two trees.
+
+They are reserved separately because
 five indexes can repeat keys more often than the staged item payload. Read and
 ConditionCheck intents do not mutate index trees. Schemas without LSIs retain
 `i = b = 0`.
@@ -1606,7 +1748,9 @@ The pinned SQLite 3.49.1 source (libsqlite3-sys 0.32.0) defines
 reusing old pages, and `balance_deeper` accounts for root expansion. The 44-page
 allowance covers that structural growth per tree edit. The per-operation bound
 covers eight item/index edits, five lock-tree deletions, two saved-read tree
-deletions on ABORT, and a spare edit. One tree edit per staged chunk covers
+deletions on ABORT, and a spare edit.
+
+One tree edit per staged chunk covers
 its WITHOUT ROWID payload deletion. Sixteen fixed edits cover the reservation
 ledger/total, participant phase, request receipt/index, and runtime metadata,
 including delete/insert forms of updates. The payload allowance covers new item
@@ -1617,13 +1761,16 @@ This accounting follows `items::transaction::apply`,
 `StoredItem::write`, participant cleanup, and the runtime receipt schemas.
 Incremental BLOB writes do not grow an already allocated image. The current
 schemas have no application triggers and use the default `auto_vacuum=NONE`.
+
 Any change to SQLite, these schemas,
 indexes, or resolve writes requires re-auditing the bound.
 
 At 4-KiB pages, 100 small local operations without LSIs claim about 278 MiB
 before payload allowance. Five LSIs add about 344 MiB for 100 writes under this
 conservative bound, exceeding the current 512-MiB Cell budget even for small
-items; those requests throttle rather than publishing an unsafe COMMIT. This is intentionally conservative and reduces concurrency within a
+items; those requests throttle rather than publishing an unsafe COMMIT.
+
+This is intentionally conservative and reduces concurrency within a
 512-MiB Cell. It is not an efficient packing or 10,000-Cell throughput result.
 A two-MiB Cell cannot admit even the four-operation regression under this rule;
 that refusal is explicitly tested. Production limits remain unchanged.
@@ -1638,8 +1785,10 @@ unresolved intents to child Cells.
 The runtime tests exercise a large receipt refused despite a tiny handler
 write, effect-inbox refusal and retry, release rollback for errors and durable
 rejections, recovery from the published root in a new runtime/session/address,
-and bootstrap/migration refusal before publication. Protected SQL and BLOB
-paths reject capacity-ledger access. Participant tests fill account and data
+and bootstrap/migration refusal before publication.
+
+Protected SQL and BLOB paths reject capacity-ledger access. Participant tests
+fill account and data
 Cells with successively smaller unrelated items until refusal, assert the
 reservation boundary, publish COMMIT, and verify every prepared image without
 manual reclamation. They also assert claims are released after resolution.
@@ -1648,6 +1797,7 @@ manual reclamation. They also assert claims are released after resolution.
 inbox, and migration allocations, so an application-only limit cannot protect
 the promise. A durable runtime claim enforces it across those sibling paths
 without replicating padding bytes. The application owns its apply-size bound.
+
 Current main has no BeyondDB; its runtime lacks this optional primitive. This
 unshipped application installs the new primitive directly and needs no legacy
 reader or root-schema migration.
@@ -1689,15 +1839,19 @@ The phase transport now preserves `InvocationError::NotStarted(Error::Capacity)`
 through both input upload and prepare. The driver proposes an authoritative
 ABORT with `TransactionFailure::Throttled` at the first original request index
 in that participant. It uses the existing coordinator decision command and
-participant resolver. A cancellation is returned only after every resolution
+participant resolver.
+
+A cancellation is returned only after every resolution
 receipt is recorded; a failed decision or cleanup remains retryable. An ABORT
 slot releases its token only after all participants finish, as before.
 
 A competing driver can win COMMIT before this refusal reaches the caller. The
 coordinator CAS then rejects ABORT, and the driver completes and returns COMMIT.
 No capacity failure can replace a terminal decision. `Pending` remains ambiguous
-even if its nested transport cause is a capacity error. Timeouts, generic errors,
-and owner unavailability are not converted into cancellation by this rule.
+even if its nested transport cause is a capacity error.
+
+Timeouts, generic errors, and owner unavailability are not converted into
+cancellation by this rule.
 Capacity during BEGIN upload remains a retryable admission error: no participant
 was admitted by that upload. Capacity during resolution of an existing COMMIT
 also remains retryable.
@@ -1705,11 +1859,14 @@ also remains retryable.
 Both public transaction APIs expose the new reason as `ThrottlingError` inside
 ordered `TransactionCanceledException.CancellationReasons`; unaffected positions
 keep `None`. This uses the [DynamoDB cancellation reason contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html).
+
 The message describes capacity exhaustion and retry with backoff, without
 claiming that an autoscaler has already supplied more capacity. The pinned
 ExtendDB engine forwards storage cancellation reasons unchanged; its SQLite
 backend claims tokens inside the same SQL transaction and rolls them back on
-cancellation. No dependency, runtime wire code, or SQL schema changed here.
+cancellation.
+
+No dependency, runtime wire code, or SQL schema changed here.
 The added serialized reason is in the unpublished BeyondDB application.
 
 ### Evidence map and decision
@@ -1729,7 +1886,9 @@ The added serialized reason is in the unpublished BeyondDB application.
 failure into a durable business rejection: that rejection itself needs receipt
 space. The transaction driver already owns the authoritative decision and can
 resolve both previously prepared participants and abort-before-prepare
-tombstones. Preserving one typed error distinction at that boundary prevents
+tombstones.
+
+Preserving one typed error distinction at that boundary prevents
 unbounded retry without adding another cancellation authority or matching error
 strings. A generic transient error remains appropriate for unknown outcomes.
 
@@ -1747,8 +1906,10 @@ The signed two-owner test exposed a second issue while admitting a coordinator:
 `entry Cell digest mismatch`. It was intermittent because account/coordinator
 and credential Cells use different tenants but share one application layout.
 The catalog validated entries against its tenant, while its mutable head path
-contained only the application and first Cell-ID byte. A cross-tenant shard
-collision therefore mixed incompatible entries in one head. The deterministic
+contained only the application and first Cell-ID byte.
+
+A cross-tenant shard collision therefore mixed incompatible entries in one
+head. The deterministic
 runtime regression reproduces the same failure with two tenants in one shard.
 
 Catalog heads now include the tenant:
@@ -1790,7 +1951,9 @@ The account, elastic-Cell, and peer-network suites passed all 22 tests; the
 elastic suite took 57.13 seconds and the signed two-owner test 99.42 seconds.
 Eleven catalog tests, one backup/restore test, and four retention tests passed.
 The separate live RustFS retention test remains ignored; no live retention
-qualification is claimed. The explicitly enabled signed SDK/RustFS process
+qualification is claimed.
+
+The explicitly enabled signed SDK/RustFS process
 smoke passed in 380.07 seconds, including hard restart and restored transaction
 state. Its server binary remained fixed throughout execution.
 
@@ -1815,7 +1978,9 @@ The local phase adapter now recognizes only direct `NotStarted(Sqlite(FULL))`,
 retaining the original SQLite cause in its capacity error. The peer typed-command
 dispatcher maps direct FULL to the existing `RESOURCE_EXHAUSTED` / `NOT_STARTED`
 wire contract. No enum, wire format, schema, dependency, or transaction-state
-transition changes. The driver uses the existing durable ABORT and resolution
+transition changes.
+
+The driver uses the existing durable ABORT and resolution
 path; public cancellation still waits for every participant's cleanup. Existing
 COMMIT resolution keeps retrying and cannot turn into ABORT.
 
@@ -1823,8 +1988,10 @@ FULL alone does not establish rollback. SQLite documents that some errors may
 roll back a statement or a whole transaction, and applications must inspect the
 transaction state. The actual proof here is the pinned managed writer contract:
 `Db::transaction_with` returns `Operation` only after rollback, while commit,
-rollback, and capture ambiguity fences the worker. Command execution inspects
-worker state and wraps fenced failures in `OutcomeUnknown`. The peer mapping
+rollback, and capture ambiguity fences the worker.
+
+Command execution inspects worker state and wraps fenced failures in
+`OutcomeUnknown`. The peer mapping
 never descends into that wrapper. See [SQLite transaction error handling](https://www.sqlite.org/lang_transaction.html)
 and [SQLite result codes](https://www.sqlite.org/rescode.html#full).
 
@@ -1880,7 +2047,9 @@ Resolution now attempts every participant in the captured unresolved list,
 retaining the first error for the caller. Each successful apply/cleanup and its
 coordinator receipt remain durable progress. A retry reads only unresolved
 participants; an apply whose receipt was lost is recognized through the
-participant's terminal state. Neither an error nor partial progress changes
+participant's terminal state.
+
+Neither an error nor partial progress changes
 the coordinator decision. The caller still receives a retryable error for
 transport uncertainty, and cannot report success or cancellation while work
 remains unresolved. Even if a concurrent resolver finishes everything, an
@@ -1890,12 +2059,16 @@ The regression covers COMMIT and ABORT across mixed account/data participants,
 with three cuts: the first participant state read, its apply command, and the
 first coordinator resolution receipt. Each injected transport failure occurs
 before dispatch but is reported as an unknown outcome, so the caller cannot
-assume refusal. Raw participant queries establish that the healthy later Cell
+assume refusal.
+
+Raw participant queries establish that the healthy later Cell
 resolved before any read helper runs. Its key accepts a newer write; completing
 the original transaction afterward preserves that newer image. The lost-receipt
 case also changes the first participant after its apply and verifies that
-recovery recognizes its terminal record without applying again. The coordinator
-keeps its original decision and one unresolved receipt until retry completes.
+recovery recognizes its terminal record without applying again.
+
+The coordinator keeps its original decision and one unresolved receipt until
+retry completes.
 
 | Boundary | Evidence and remaining scope |
 | --- | --- |
@@ -1912,15 +2085,19 @@ keeps its original decision and one unresolved receipt until retry completes.
 retain the existing decision authority. A failed participant does not invalidate
 another participant's instruction to resolve the already-published decision.
 Continuing that bounded list improves recovery without introducing a second
-protocol or changing the public completion contract. The production change
-adds 23 net lines, primarily separating one participant's apply/receipt attempt
+protocol or changing the public completion contract.
+
+The production change adds 23 net lines, primarily separating one
+participant's apply/receipt attempt
 from the loop's progress policy.
 
 At this revision the loop remained sequential and visited at most 100
 participants. Progress required a failed attempt to return and the caller to
 remain alive. The admission change below addressed owner discovery, and the
-later bounded-resolution change removes waiting behind one slow RPC. Persistent
-history collection and 10,000-Cell/multi-TB qualification remain separate work.
+later bounded-resolution change removes waiting behind one slow RPC.
+
+Persistent history collection and 10,000-Cell/multi-TB qualification remain
+separate work.
 This earlier fix required no API, schema, wire format, dependency, or lockfile
 changes.
 
@@ -1968,8 +2145,10 @@ Startup owns a fenced coordinator and can durably abort BEGIN. It attempts
 participant admission across its pending pages, then runs fenced resolution even
 if admission reported an error. Resolution advances through later pending records
 after a failed transaction. Both phases retain errors: startup readiness fails
-until a subsequent pass completes successfully. Initial account-registry and
-coordinator authority reads are still prerequisites; this does not make discovery
+until a subsequent pass completes successfully.
+
+Initial account-registry and coordinator authority reads are still
+prerequisites; this does not make discovery
 possible when those authorities are unavailable.
 
 | Evidence boundary | Proof |
@@ -1986,7 +2165,9 @@ possible when those authorities are unavailable.
 layers. Continuing bounded work and preserving errors closes this failure path
 without a new authority, retry service, timeout-based decision, or wire format.
 The per-record startup helper allows error retention across a page while
-keeping decision handling in the backend. The registered-account entry point
+keeping decision handling in the backend.
+
+The registered-account entry point
 owns the data-admission/coordinator-recovery ordering used by both the binary
 and its fault fixture. The production change adds 76 net lines for this error
 retention and lifecycle ordering. No production dependency or lockfile
@@ -2003,7 +2184,9 @@ Verification: both regressions failed on the preceding draft: startup observed
 BEGIN with zero resolved participants; serving observed COMMIT with zero resolved
 participants. With the fix, 26 tests passed across account, elastic-Cell, and
 signed two-owner network suites (24 elastic tests in 120.69 seconds; peer test
-in 94.25 seconds). After wiring the binary through registered-account recovery,
+in 94.25 seconds).
+
+After wiring the binary through registered-account recovery,
 the two fault tests passed again in 8.89 seconds, covering all six scenarios.
 
 The explicitly enabled signed SDK/RustFS server-process smoke passed on the final
@@ -2024,7 +2207,9 @@ the other five participants had no reason to retain their locks behind that RPC.
 participant resolutions concurrently. Each attempt still reads the participant,
 applies or recognizes its terminal record, and records its coordinator receipt
 in that order. As any attempt finishes, the window admits the next participant;
-it does not wait for a whole batch. Returned errors are retained while other
+it does not wait for a whole batch.
+
+Returned errors are retained while other
 attempts continue. The first observed error can depend on completion order;
 the stored ABORT reason and its original operation index remain authoritative.
 Overall success still requires every durable receipt.
@@ -2035,7 +2220,9 @@ the global 4-MiB-plus-64-KiB output ceiling even though their result is a
 small enum. Four simultaneous receipts exceeded the runtime's 16-MiB per-Cell
 mailbox. Participant state queries and resolution commands had the same
 inflated reservation, which also exhausted the node budget in the existing
-concurrent driver regressions. All six small phase operations now share 4-KiB
+concurrent driver regressions.
+
+All six small phase operations now share 4-KiB
 input/output ceilings.
 
 Their input is bounded identity, position, and sequence: account and routing
@@ -2059,7 +2246,9 @@ The tests inspect raw participant and coordinator state before public reads can
 help recovery. All five healthy participants must finish while the first RPC
 remains paused, which also proves progress beyond the initial four-attempt
 window. New writes prove their locks were released, and retry preserves those
-new images. Both the original two-owner fixture and the six-owner fixture run
+new images.
+
+Both the original two-owner fixture and the six-owner fixture run
 with the original 16-MiB node budget. The binary defaults to 256 MiB. These tests
 establish functional progress under those budgets, not a fleet memory-admission
 guarantee.
@@ -2068,15 +2257,19 @@ guarantee.
 Bounded futures reuse the existing idempotent resolution and receipt paths,
 including their error handling. Tight receipt limits belong in the application
 descriptor that knows their actual shape. No new worker, decision authority,
-runtime fallback, or configuration surface is needed. Cargo only adds a direct
-edge to the already locked workspace `futures-util`; no dependency version,
+runtime fallback, or configuration surface is needed.
+
+Cargo only adds a direct edge to the already locked workspace `futures-util`;
+no dependency version,
 checksum, patch, or override changes.
 
 The bound is per resolver call, not a node-wide concurrency quota. Four stalled
 attempts can still fill its window; readiness and completion still depend on
 deadlines, recovery, and available resources. A dropped request can leave an
 already dispatched command durable, so the next resolver must continue reading
-phase state before retrying. Owner admission and coordinator-shard scheduling
+phase state before retrying.
+
+Owner admission and coordinator-shard scheduling
 remain sequential and can delay entry to the terminal resolver. This change
 does not reduce command count, parallelize prepare, collect history, or qualify
 the 10,000-Cell/multi-TB target.
@@ -2085,8 +2278,10 @@ Verification: 27 account, elastic-Cell, and signed two-owner peer tests passed
 on the final implementation (25 elastic tests in 59.10 seconds; peer test in
 113.72 seconds). The explicitly enabled signed SDK/RustFS server-process smoke
 passed in 363.50 seconds, including transactional writes and reads, token replay,
-hard restart at a changed endpoint, and TTL recovery. The six-owner paused-RPC
-cuts run through signed loopback peers; the process smoke verifies the public
+hard restart at a changed endpoint, and TTL recovery.
+
+The six-owner paused-RPC cuts run through signed loopback peers; the process
+smoke verifies the public
 API and persistence path without those injected pauses. Strict all-target
 Clippy, formatting, diff, and Cell/LTX layout checks passed. The source change
 adds 13 net production lines for bounded polling and the six shared descriptors.
@@ -2097,15 +2292,19 @@ ALL-projection local secondary indexes now share the base item's Cell command.
 Prepare validates the evaluated item, stages its image, and reserves additional
 capacity for both index B-trees. COMMIT updates base storage and ordered index
 entries before releasing locks and the capacity claim; ABORT leaves both live
-representations unchanged. Import rebuilds entries from each base image while
+representations unchanged.
+
+Import rebuilds entries from each base image while
 the split child is still unavailable. Ordinary writes and TTL deletion use the
 same index mutation functions.
 
 Indexed Query cannot use only the base sort-key lock range: an unresolved write
 may move an existing item into the requested index range, or create a row absent
 from the live index. The routed query fences exclusive intents across its HASH
-group; the account query conservatively fences its table. Indexed Scan orders
-by base item key and fences the unvisited base-key range. Lock inspection and
+group; the account query conservatively fences its table.
+
+Indexed Scan orders by base item key and fences the unvisited base-key range.
+Lock inspection and
 base-image loading happen within the same Cell query. The existing resolver
 helps a published decision and repeats the query; BEGIN remains retryable.
 
@@ -2127,7 +2326,9 @@ account, elastic-Cell, and peer-network suites pass 28 tests with two test
 threads (3.62s, 96.54s, and 100.54s respectively). A preceding default-parallel
 run failed the mixed account/data fixture's large transaction with
 `Cell is not active on its assigned worker`; that fixture passes alone (39.15s)
-and in the two-thread run. The failure's cause is not established, so the latter
+and in the two-thread run.
+
+The failure's cause is not established, so the latter
 runs do not qualify arbitrary concurrent load. The upstream full protocol suite
 and 10,000-Cell/multi-TB workload remain unqualified.
 
@@ -2143,8 +2344,10 @@ established by the successful repeat.
 Within the coordinator pass, reaching shard 56 took 5.15s; reaching shard 80 took
 20.53s. Startup must reclaim settled coordinators when the node's 64 active-Cell
 slots are occupied. The runtime's `MovementBudget::new(2, 1_000)` and the
-provisioner's one-window admission wait constrain this tail. These measurements
-expose limited readiness margin and do not establish a fleet RTO. The fixture
+provisioner's one-window admission wait constrain this tail.
+
+These measurements expose limited readiness margin and do not establish a
+fleet RTO. The fixture
 now captures both server output streams and reports the failing readiness call
 site; the temporary production probes are removed.
 
@@ -2166,14 +2369,18 @@ coordinator shard. Startup and serving discovery share this record; the serving
 loop's separate memory cache is removed. Recovery records an observation only
 after `ReadPendingTransactionBoundary` returns no unfinished transactions and
 its receipt matches the current published root's Cell, incarnation, and commit
-sequence. The observation contains the root digest, incarnation, ownership epoch,
+sequence.
+
+The observation contains the root digest, incarnation, ownership epoch,
 code, and schema. It is an optimization hint, not a transaction decision.
 
 Both consumers require an authoritative Idle control with no owner or recovery
 overlay and an exact observation match, including the installed module code and
 supported schema. Serving or expired owners still take fenced recovery because
-there may be a durable log tail beyond the published root. A new BEGIN changes
-the root; reacquisition changes the ownership epoch. Either invalidates the hint.
+there may be a durable log tail beyond the published root.
+
+A new BEGIN changes the root; reacquisition changes the ownership epoch.
+Either invalidates the hint.
 A concurrent change after observation, or a late older registry write, therefore
 causes ordinary recovery on the next discovery pass. Hints never authorize
 history, token, result-image, or participant-tombstone deletion.
@@ -2183,6 +2390,7 @@ token lookup or new work. The capacity reclaimer also does not write the registr
 because its node may not own the account Cell. Startup and serving recovery use
 their existing routed client. They write only when the observed root changes;
 a shard evicted before either observes it has no hint and must be restored.
+
 Registry write errors propagate through the existing startup-readiness or
 serving-retry boundary. This avoids assuming that every clean eviction is cached.
 
@@ -2191,8 +2399,10 @@ in one account command. Serving discovery uses the same command for its single
 observation. The command accepts 1–100 entries with a 64-KiB encoded input limit;
 an empty page produces no write. Every entry still requires the same empty-work
 receipt and exact published-root checks before collection, and readers recheck
-the authoritative Idle root before skipping recovery. A mutation or owner change
-while the batch is buffered only makes its hint stale. Transaction decisions and
+the authoritative Idle root before skipping recovery.
+
+A mutation or owner change while the batch is buffered only makes its hint
+stale. Transaction decisions and
 participant resolutions are never buffered in this batch.
 
 The private account command 24 now uses codec version 2 for the vector input;
@@ -2214,8 +2424,10 @@ development fixtures need reprovisioning. This is not a rolling-upgrade proof.
 existing recovery client. A separate object-store cache would add a storage and
 retention contract; writing from reclamation would add account-owner routing to
 local capacity admission. One durable representation removes the memory-only
-path while preserving the normal recovery path for every unproven root. The
-change adds about 130 net production lines for serialization and shared checks;
+path while preserving the normal recovery path for every unproven root.
+
+The change adds about 130 net production lines for serialization and shared
+checks;
 the new metadata changes the unreleased format, so development roots require
 reprovisioning. No dependency or lockfile changes are needed.
 
@@ -2227,8 +2439,10 @@ history, qualify fleet RTO, or demonstrate 10,000 Cells and multi-TB storage.
 Verification on the final implementation: five focused coordinator tests pass in
 19.68s. Account, elastic-Cell, and signed two-owner peer suites pass all 29 tests
 with two test threads (3.32s, 92.68s, and 92.21s). Strict all-target Clippy passes
-in 31.17s; formatting, diff, and Cell/LTX layout checks pass. The explicitly
-enabled signed SDK/RustFS process smoke passes in 361.74s, including hard and
+in 31.17s; formatting, diff, and Cell/LTX layout checks pass.
+
+The explicitly enabled signed SDK/RustFS process smoke passes in 361.74s,
+including hard and
 graceful restart, local-index contents, transaction replay, and TTL recovery.
 
 That total duration is functional evidence, not a before/after readiness or
@@ -2253,7 +2467,9 @@ Before rebasing onto the runtime read-replica change, the signed SDK/RustFS
 process smoke passed in 330.55 seconds, including all three GSI projections,
 transaction key moves/deletes, and replay after hard restart. The account test,
 28 elastic-Cell tests, and peer-owner test also passed (3.41, 86.28, and 99.12
-seconds). The elastic suite includes interrupted partial GSI application with
+seconds).
+
+The elastic suite includes interrupted partial GSI application with
 large chunked old/new images, split fencing, and delayed-version suppression.
 These runs qualify selected paths, not sustained projection capacity, automatic
 index splitting, history collection, or the 10,000-Cell/multi-TB target.
@@ -2278,7 +2494,9 @@ After rebasing onto `396e0ab1b40`, the unchanged
 `data_ranges_use_independent_cells_and_survive_owner_restart` fixture aborted
 with stack overflow, both in the elastic suite and alone. The runtime's typed
 query future now embedded replica placement/admission work even when the
-capability selected CurrentOwner. Boxing only the optional replica-router
+capability selected CurrentOwner.
+
+Boxing only the optional replica-router
 future fixed the original default-stack reproduction (1.78 seconds). No test
 assertion or stack configuration changed. The debugger did not produce a trace;
 the reproducible failure and one-change passing run establish the fix evidence.
@@ -2305,12 +2523,14 @@ a full workspace gate or a serializable-history, cloud-reference, or fleet
 performance qualification.
 
 The final signed AWS SDK/RustFS server-process smoke passed in 339.11 seconds.
-It exercises the compiled binary, ordinary and transactional index changes,
+It exercised the compiled binary, ordinary and transactional index changes,
 all three GSI projections, rejected strong reads and wrong sort-operand types,
-hard restart, and client-token replay. This supplies the durable client-to-server
-proof for the initial GSI path; online index lifecycle, automatic GSI splitting,
-retention, full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification
-remain open.
+hard restart, and client-token replay.
+
+This supplied durable client-to-server proof for the initial GSI path. At that
+revision, online index lifecycle and automatic GSI splitting remained open.
+Current split status is in [global indexes](global-indexes.md); retention,
+full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification remain open.
 
 ## Terminal operation compaction
 
@@ -2325,8 +2545,10 @@ in proportion to all historical write bytes.
 position and sets its chunk count to NULL in the same Cell command that records
 the resolved receipt. BEGIN and unresolved participants retain their payloads.
 The NULL is an explicit absence of operation images; the participant identity,
-prepare/resolution receipts and decision stay durable. The abort-decision payload
-uses position -1 and remains available for cancellation reasons and old images.
+prepare/resolution receipts and decision stay durable.
+
+The abort-decision payload uses position -1 and remains available for
+cancellation reasons and old images.
 Repeated resolution returns the existing receipt outcome without another apply.
 
 BEGIN records whether each participant contains a Read operation. Committed
@@ -2427,8 +2649,10 @@ by a settled-root checkpoint. Later acknowledgement changes that exact root.
 This adds one durable consumption boundary rather than a second recovery service.
 It reduces retained logical read bytes for completed requests. It does not bound
 abandoned readers, terminal records, command receipts, abort-result payloads or
-object-store history, and is not proof of unlimited scaling. Coordinator expansion
-and safe retirement remain required for the 10,000-Cell/multi-TB target. The
+object-store history, and is not proof of unlimited scaling.
+
+Coordinator expansion and safe retirement remain required for the
+10,000-Cell/multi-TB target. The
 unreleased coordinator schema gains a counter; peer query codec versions change
 with the status and pending-participant shapes. No dependency pins change.
 
@@ -2444,8 +2668,10 @@ CI run. These local checks do not establish fleet-scale or full API compatibilit
 The earlier Linux run `36345812330` failed this fixture at its raw
 `BeginReadResultRelease` invocation with `target Cell is not locally owned`.
 The unchanged fixture also failed locally (2.56 s). Its four-slot runtime holds
-the account, base range and directory, leaving one coordinator slot. Recovery
-can therefore release the tested, fully resolved coordinator while visiting a
+the account, base range and directory, leaving one coordinator slot.
+
+Recovery can therefore release the tested, fully resolved coordinator while
+visiting a
 later registered shard. The pending-work boundary correctly excludes read images
 that the initiating reader has not yet acknowledged.
 
@@ -2454,14 +2680,17 @@ the caller to arrange residency. The serving `LocalResolver` restores published
 Idle roots before dispatch; `CoordinatorProvisioner::ensure` also separates
 registration from admission. The fixture now registers a later shard to force
 the release, asserts Idle authority without an owner, and calls
-`admit_coordinator` before the raw acknowledgement. All cleanup, restart,
-checkpoint invalidation and delayed-prepare assertions remain. The deterministic
+`admit_coordinator` before the raw acknowledgement.
+
+All cleanup, restart, checkpoint invalidation and delayed-prepare assertions
+remain. The deterministic
 case failed before that admission step and passed afterward (5.74 s).
 
 Is this the best fix? Preserve bounded recovery and its ownership contract;
 correct the raw caller rather than pinning every historical coordinator in
 memory. The sibling checkpoint fixture fits three coordinators plus its account
 in four slots, and the coordinator-residency tests already arrange admission.
+
 No production behavior, runtime limits or dependencies change. Evidence logs:
 `/tmp/beyonddb-read-cleanup-current.log`, `/tmp/beyonddb-read-cleanup-repro.log`
 and `/tmp/beyonddb-read-cleanup-fixed.log`. This local result does not resolve

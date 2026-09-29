@@ -40,6 +40,7 @@ for open work.
 continuation-contract review. The older
 `extenddb-stream-completion.proposed.patch` targeted
 `bdb7b3df4ace3b80a6e928f144036d056aec0327`; the PR superseded that patch.
+
 BeyondDB currently pins `7eaa89b437feed0af0f05883d3f1493f86c6fc6d`
 in `Cargo.toml`.
 
@@ -56,6 +57,7 @@ hard restart. Broader Streams qualification remains open.
 same command as a direct Put, Update, or Delete. Both account and routed data
 Cells install `src/stream_journal.sql`. The table's installed stream policy is
 read inside the command, so a stale caller hint cannot suppress capture.
+
 Committed same-Cell and participant transaction writes use the same append
 path; rejected and aborted transactions do not apply staged images. Each
 command sequence plus operation ordinal gives a stable record position.
@@ -75,6 +77,7 @@ The partition query also reads the Cell's durable split seal. The ExtendDB
 storage method maps the final sealed page to `End` and an empty open page to
 `More(None)`, with a 23-digit sequence width and account-scoped routing. The
 routed test exercises both states and rejects a different account's shard.
+
 Known shard IDs are validated against the canonical stream ARN, account table
 generation, and installed data Cell. `LATEST` reads the owner Cell's indexed
 journal tail without scanning pages. Native account and routed tests cover
@@ -87,6 +90,7 @@ This slice is exercised by the native account Cell test for insert, replay,
 equal-image Put, deletion, transaction commit, and rejection. The adapter now
 accepts `CreateTable(StreamSpecification)`, returns its stream ARN and view
 type in the table description, and passes streamed writes to the Cell command.
+
 ListStreams and DescribeStream use a generation catalog committed with table
 creation. DeleteTable marks that generation disabled before removing the table
 record.
@@ -106,6 +110,7 @@ The TTL worker submits a marked delete to the routed owner Cell. That Cell
 checks its current TTL policy and the item's expiry before committing the
 deletion and stream record together. Its REMOVE record carries the
 [DynamoDB TTL service identity](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/time-to-live-ttl-streams.html).
+
 The native range test rejects a TTL-marked delete before TTL is enabled; the
 signed SDK/CLI smoke verifies the service identity and hard-restart replay.
 The new SQL table changes the unreleased version-1 schema digest; no tagged
@@ -118,6 +123,7 @@ A stream shard belongs with the Cell that commits its item mutations. A split
 closes the source shard and starts child shards. Consumers need an unambiguous
 end to the parent before processing its children; AWS documents shard lineage
 and ordering in [DynamoDB Streams](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Streams.html).
+
 `GetRecords` must stop returning an iterator when a closed shard is exhausted;
 see the [NextShardIterator response contract](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html).
 
@@ -163,7 +169,9 @@ gates; compiling their adapters alone does not establish runtime behavior.
 at the owning contract. It preserves both valid empty-open polling and final
 nonempty pages, without sentinel sequence numbers, error matching, or a second
 HTTP implementation. All three sibling backend producers must change with the
-engine consumer. The closing writer must publish its final records before the
+engine consumer.
+
+The closing writer must publish its final records before the
 ending marker and never append afterward; BeyondDB must enforce that ordering
 in the source Cell's seal command.
 
