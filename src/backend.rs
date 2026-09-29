@@ -15,10 +15,16 @@ mod transaction_transport;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::{
+    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
+    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
+    PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
+    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
+};
 use cellule_runtime::client::{CellClient, InvocationError, ReadPolicy};
 use cellule_runtime::identity::{CellTarget, RequestId, TenantId};
 use cellule_runtime::{MutationIdentity, partition_for_shard};
@@ -31,14 +37,6 @@ use extenddb_core::types::{
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
-use tokio::sync::RwLock;
-
-use super::{
-    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
-    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
-    PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
-    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
-};
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -89,14 +87,18 @@ pub struct CellStorage {
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
-    account_placement_cache: Arc<RwLock<HashSet<String>>>,
-    route_cache: Arc<RwLock<HashMap<(String, String), CachedRoute>>>,
+    route_cache: Arc<RwLock<RouteCacheState>>,
     route_cache_enabled: bool,
 }
 
 #[derive(Clone)]
 struct CachedRoute {
     partitions: Vec<crate::RoutePagePartition>,
+}
+
+struct RouteCacheState {
+    account_placement: HashSet<String>,
+    routes: HashMap<(String, String), CachedRoute>,
 }
 
 impl CellStorage {
@@ -115,8 +117,10 @@ impl CellStorage {
             region: region.into(),
             initial_partitions: None,
             coordinators: None,
-            account_placement_cache: Arc::new(RwLock::new(HashSet::new())),
-            route_cache: Arc::new(RwLock::new(HashMap::new())),
+            route_cache: Arc::new(RwLock::new(RouteCacheState {
+                account_placement: HashSet::new(),
+                routes: HashMap::new(),
+            })),
             route_cache_enabled: false,
         }
     }
@@ -152,11 +156,77 @@ impl CellStorage {
         self
     }
 
-    pub(super) async fn invalidate_route_cache(&self, account_id: &str, table_id: &str) {
-        self.route_cache
-            .write()
-            .await
-            .remove(&(account_id.to_owned(), table_id.to_owned()));
+    pub(super) fn invalidate_route_cache(&self, account_id: &str, table_id: &str) {
+        let key = (account_id.to_owned(), table_id.to_owned());
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache.routes.remove(&key);
+                cache.account_placement.remove(table_id);
+            }
+            Err(poisoned) => {
+                let mut cache = poisoned.into_inner();
+                cache.routes.remove(&key);
+                cache.account_placement.remove(table_id);
+            }
+        }
+    }
+
+    pub(super) fn account_placement_cached(&self, table_id: &str) -> bool {
+        match self.route_cache.read() {
+            Ok(cache) => cache.account_placement.contains(table_id),
+            Err(poisoned) => poisoned.into_inner().account_placement.contains(table_id),
+        }
+    }
+
+    pub(super) fn cached_route(
+        &self,
+        key: &(String, String),
+        hash: [u8; 16],
+    ) -> Option<([u8; 16], u64)> {
+        let lookup = |cache: &RouteCacheState| {
+            cache.routes.get(key).and_then(|route| {
+                route
+                    .partitions
+                    .iter()
+                    .find(|partition| {
+                        hash >= partition.lower && partition.upper.is_none_or(|upper| hash < upper)
+                    })
+                    .map(|partition| (partition.partition_id, partition.epoch))
+            })
+        };
+        match self.route_cache.read() {
+            Ok(cache) => lookup(&cache),
+            Err(poisoned) => lookup(&poisoned.into_inner()),
+        }
+    }
+
+    pub(super) fn cache_account_placement(&self, table_id: String) {
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache.account_placement.insert(table_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().account_placement.insert(table_id);
+            }
+        }
+    }
+
+    pub(super) fn cache_route(
+        &self,
+        key: (String, String),
+        partitions: Vec<crate::RoutePagePartition>,
+    ) {
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache.routes.insert(key, CachedRoute { partitions });
+            }
+            Err(poisoned) => {
+                poisoned
+                    .into_inner()
+                    .routes
+                    .insert(key, CachedRoute { partitions });
+            }
+        }
     }
 }
 
@@ -357,14 +427,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            self.account_placement_cache
-                .write()
-                .await
-                .remove(&previous.id);
-            self.route_cache
-                .write()
-                .await
-                .remove(&(account_id.clone(), previous.id.clone()));
+            self.invalidate_route_cache(&account_id, &previous.id);
             // A concurrent delete/recreate can change the name's generation.
             // Never attach the previous table's sample to the newly deleted one.
             let same_generation = record.id == previous.id;

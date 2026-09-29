@@ -35,25 +35,16 @@ impl CellStorage {
         // Placement is immutable for a table generation. Once the account Cell
         // has confirmed an account-local table, there can never be a directory
         // for this table ID, so skip the route and placement reads on hot paths.
-        if !key_info.table_id.is_empty()
-            && self
-                .account_placement_cache
-                .read()
-                .await
-                .contains(&key_info.table_id)
-        {
+        if !key_info.table_id.is_empty() && self.account_placement_cached(&key_info.table_id) {
             return Ok(None);
         }
         let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let cache_key = (key_info.account_id.clone(), key_info.table_id.clone());
         if self.route_cache_enabled
-            && let Some(route) = self.route_cache.read().await.get(&cache_key)
-            && let Some(partition) = route.partitions.iter().find(|partition| {
-                hash >= partition.lower && partition.upper.is_none_or(|upper| hash < upper)
-            })
+            && let Some(partition) = self.cached_route(&cache_key, hash)
         {
-            return Ok(Some((partition.partition_id, partition.epoch)));
+            return Ok(Some(partition));
         }
         let account = target(&key_info.account_id)?;
         match crate::read_route_page(
@@ -71,16 +62,12 @@ impl CellStorage {
             RoutePageOutcome::Unrouted => {
                 self.require_account_placement(key_info).await?;
                 if !key_info.table_id.is_empty() {
-                    self.account_placement_cache
-                        .write()
-                        .await
-                        .insert(key_info.table_id.clone());
+                    self.cache_account_placement(key_info.table_id.clone());
                 }
                 Ok(None)
             }
             RoutePageOutcome::Changed => {
-                self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                    .await;
+                self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                 Err(stale_partition())
             }
             RoutePageOutcome::Page {
@@ -91,10 +78,7 @@ impl CellStorage {
                 let range = partitions.first().ok_or_else(stale_partition)?;
                 let selected = (range.partition_id, range.epoch);
                 if self.route_cache_enabled && !has_more {
-                    self.route_cache
-                        .write()
-                        .await
-                        .insert(cache_key, super::super::CachedRoute { partitions });
+                    self.cache_route(cache_key, partitions);
                 }
                 Ok(Some(selected))
             }

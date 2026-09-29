@@ -224,8 +224,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_put_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -245,8 +244,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_put_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -266,8 +264,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_put_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -378,8 +375,7 @@ impl DataEngine for CellStorage {
                     | PartitionGetOutcome::Sealed
                     | PartitionGetOutcome::NotReady
                     | PartitionGetOutcome::WrongPartition => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                            .await;
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                         Err(stale_partition())
                     }
                 };
@@ -450,8 +446,7 @@ impl DataEngine for CellStorage {
                         }
                     },
                     Err(InvocationError::Rejected(committed)) => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                            .await;
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                         return Err(partition_delete_rejection(committed.output.0));
                     }
                     Err(error) => return Err(cell_error(error)),
@@ -528,8 +523,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_update_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -553,8 +547,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_update_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -574,8 +567,7 @@ impl DataEngine for CellStorage {
                             }
                         },
                         Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                                .await;
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                             return Err(partition_update_rejection(committed.output.0));
                         }
                         Err(error) => return Err(cell_error(error)),
@@ -781,8 +773,7 @@ impl DataEngine for CellStorage {
                     | PartitionQueryOutcome::Sealed
                     | PartitionQueryOutcome::NotReady
                     | PartitionQueryOutcome::WrongPartition => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id)
-                            .await;
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                         Err(stale_partition())
                     }
                 };
