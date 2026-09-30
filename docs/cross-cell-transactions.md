@@ -81,8 +81,9 @@ partial/wrong receipts, one coordinator commit, replay, coordinator restoration,
 competing drivers, and lost replies.
 
 
-Two write keys in the same Cell share one prepare and one resolution. The public
-write adapter uses this protocol even when every key belongs to one Cell. A
+Two write keys in the same Cell share one prepare and one resolution. Without a
+client token, a write whose operations all route to one Cell uses one atomic
+local command. Requests with a client token retain the durable coordinator. A
 single-Cell `TransactGetItems` instead uses one atomic Cell query with a compact
 internal response; outputs that exceed its envelope use the durable saved-image
 fallback.
@@ -226,6 +227,29 @@ authority. Definitive condition, lock, or routing failures request an abort;
 an already-published terminal decision wins. Transport uncertainty leaves
 recoverable work and never becomes cancellation. Shard admission now registers a fixed shard number in the account Cell before it
 returns to a caller.
+
+Fresh coordinator Cells can bootstrap concurrently when residency has spare
+slots. A fixed set of 64 local gates serializes the same Cell; collisions can
+also delay independent Cells. Each bootstrap holds shared admission and a
+pending-slot reservation until Cellule accounts for activation or the caller
+finishes. Cellule's active-slot count includes in-flight activations, so a
+cancelled caller does not make a still-running activation disappear from
+capacity accounting. Published-owner restore, transfer, and reclamation retain
+exclusive admission. If no spare slot can be reserved, the caller takes that
+exclusive path before claiming authority.
+
+```text
+Coordinator A: reserve -> authority CAS -> bootstrap + publish -> register A -> BEGIN A
+Coordinator B: reserve -> authority CAS -> bootstrap + publish -> register B -> BEGIN B
+               shared bounded slot accounting; independent requests can overlap
+```
+
+Each request waits for its own published coordinator root and durable account
+registration before BEGIN. Concurrency does not change lease fences, authority
+CAS, initial publication, participant prepare, or coordinator decision rules.
+The [SDK regression](../tests/peer_network/residency/coordinator_admission.rs)
+checks overlapping distinct Cells, serialized token replay, last-slot admission,
+cancellation, durable registration, and restoration.
 
 On startup, the server pages that account-owned registry,
 recovers idle shards and shards whose owner lease expired, including when the

@@ -12,6 +12,14 @@ pub(super) struct CountedAuthority {
     pub(super) path: std::sync::Mutex<Option<object_store::path::Path>>,
     pub(super) reads: AtomicUsize,
     pub(super) all_reads: AtomicUsize,
+    pub(super) creation_gate: std::sync::Mutex<Option<CreationGate>>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CreationGate {
+    pub(super) paths: std::collections::HashSet<object_store::path::Path>,
+    pub(super) entered: Arc<tokio::sync::Semaphore>,
+    pub(super) release: Arc<tokio::sync::Semaphore>,
 }
 
 impl std::fmt::Display for CountedAuthority {
@@ -28,6 +36,13 @@ impl object_store::ObjectStore for CountedAuthority {
         payload: object_store::PutPayload,
         options: object_store::PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
+        let gate = self.creation_gate.lock().unwrap().clone().filter(|gate| {
+            matches!(options.mode, object_store::PutMode::Create) && gate.paths.contains(location)
+        });
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
         self.inner.put_opts(location, payload, options).await
     }
 

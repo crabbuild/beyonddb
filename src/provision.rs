@@ -1,6 +1,7 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod coordinator_bootstrap;
 mod directory;
 mod global_indexes;
 mod ranges;
@@ -62,7 +63,8 @@ pub struct CellInitialPartitionProvisioner {
     directory: PathBuf,
     initial_partition_count: u16,
     transaction_recovery: transactions::CoordinatorRecovery,
-    admission: tokio::sync::Mutex<()>,
+    admission: tokio::sync::RwLock<()>,
+    coordinator_bootstrap: coordinator_bootstrap::CoordinatorBootstrap,
     peers: Option<Arc<crate::BeyonddbPeers>>,
     recovery_transport: Option<Arc<dyn NodeLogTransport>>,
 }
@@ -92,6 +94,7 @@ impl CellInitialPartitionProvisioner {
             initial_partition_count: 1,
             transaction_recovery: Default::default(),
             admission: Default::default(),
+            coordinator_bootstrap: Default::default(),
             peers: None,
             recovery_transport: None,
         })
@@ -637,7 +640,7 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         self.reclaim_settled_capacity(target).await?;
         let authority = CellAuthority::new(self.layout.clone());
         let mut observed = authority
@@ -849,9 +852,15 @@ impl CellInitialPartitionProvisioner {
         proof: CatalogProof,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> cellule_runtime::Result<CellHandle> {
+        if let Some(handle) = self
+            .try_bootstrap_coordinator(target, proof.clone(), initialize)
+            .await?
+        {
+            return Ok(handle);
+        }
         // Serialize local activation/reclamation. Authority CAS still decides
         // ownership against other nodes; this guard never fences peers.
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority.load(target.cell_id()).await?;
         if let Some(observed) = &observed
@@ -900,6 +909,18 @@ impl CellInitialPartitionProvisioner {
         {
             return self.activate_published(target, proof, observed).await;
         }
+        self.bootstrap_unpublished(target, proof, observed, initialize)
+            .await
+    }
+
+    async fn bootstrap_unpublished(
+        &self,
+        target: &CellTarget,
+        proof: CatalogProof,
+        observed: cellule_runtime::control::authority::VersionedControl,
+        initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
+    ) -> cellule_runtime::Result<CellHandle> {
+        let authority = CellAuthority::new(self.layout.clone());
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
