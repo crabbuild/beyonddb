@@ -4,6 +4,37 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+Cellule `origin/main` was checked again and remains `30671d5`, already used
+by all direct dependencies and lockfile packages. The [fresh release rerun](../benchmarks/2026-09-30-follower-diagnostics/README.md)
+uses measured source `9cba5f1` (production code `d04176c`) and completed all
+24 cases per backend. BeyondDB had **three transaction read timeouts**:
+one in `TransactGetItems`, two in `TransactWriteItems` at eight clients.
+SQLite had zero errors.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 186.05 | 449.22 | 103.82 ms |
+| PutItem | 11.96 | 415.28 | 2,253.55 ms |
+| TransactGetItems | 0.80 | 470.92 | 9,089.13 ms* |
+| TransactWriteItems | 0.62 | 321.38 | 9,072.64 ms* |
+
+\* Percentiles exclude timeouts; only nine transaction reads and eight writes
+succeeded in those cases. Host load rose from 14.31 to 25.59 during BeyondDB
+and from 28.81 to 29.49 during SQLite on 12 logical CPUs. No local build or
+test overlapped the measurements. Placement, IAM, and durability contracts
+also differ, so this pair does not establish a controlled speed ratio or
+production capacity. The all-API SQLite objective remains unmet.
+
+The release build, 25 library tests, 11 transaction tests, formatting, and
+strict Clippy passed. Full SDK CI on the production code is still running;
+the preceding failed recovery/activation checks remain open. Four background
+operations were deferred by Cell mailbox-byte capacity during measurement.
+The follower closure was not reproduced; append errors occurred only after
+measurement during cleanup. The report retains all API rates, latencies,
+errors, fixture metadata, and raw logs.
+
+### Previous combined coordinator release pair
+
 The [combined coordinator-commit release pair](../benchmarks/2026-09-30-prepared-commit/README.md)
 uses source `3ccab15`, Cellule `30671d5`, three BeyondDB processes, four initial
 partitions, experimental follower durability, and signed boto3. Both backends
