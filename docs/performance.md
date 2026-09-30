@@ -2,24 +2,27 @@
 
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: an item write waits for Cellule to publish the committed Cell state to an object store.
 
-The latest full signed-API rerun pinned Cellule to `9e17746` and ExtendDB
-SQLite to `7eaa89b`. Both completed all 24 five-second cases without
-foreground SDK errors. At eight clients, BeyondDB/SQLite measured 235/507
-`GetItem`, 78/55 `PutItem`, and 1.50/131 `TransactWriteItems` requests/s.
-BeyondDB exceeded SQLite in BatchGetItem and metadata reads at both client
-counts, and in PutItem at eight clients, but did not meet the all-API target.
-It logged deferred background work. External host load changed materially
-between fixtures. See the [full table, p95 latencies, fixture, and raw
-JSON](../benchmarks/2026-09-29-cellule-main-rerun/README.md); the result does
-not establish production capacity or a controlled speed ratio.
+The latest signed-API rerun pinned Cellule to `30671d5` and ExtendDB SQLite
+to `7eaa89b`. Both harnesses completed all 24 five-second cases. At eight
+clients, BeyondDB/SQLite measured 327/721 `GetItem`, 13/481 `PutItem`, and
+2.11/277 `TransactWriteItems` successful requests/s. BeyondDB's eight-client
+`TransactGetItems` case also had **seven read timeouts**; the other 23 cases
+had zero foreground errors. The server logged five deferred background
+operations from Cell mailbox-byte exhaustion. One-minute load on the
+12-logical-CPU host changed from 30.2 to 48.1 during BeyondDB and ended at
+27.0 after SQLite. See the [full table, p95 latencies, fixture, and raw
+JSON](../benchmarks/2026-09-30-cellule-main-rerun/README.md). These sequential
+samples do not establish a controlled speed ratio or production capacity.
 
-An [earlier attempt with the same pin](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
+The [preceding complete Cellule `9e17746` rerun](../benchmarks/2026-09-29-cellule-main-rerun/README.md)
+finished all 24 cases for each backend with zero foreground errors; it is
+historical context rather than a matched baseline for the new pin. An
+[earlier attempt at that pin](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
 stopped after ten BeyondDB cases when eight-client TransactGetItems returned
-a throttling cancellation. SQLite completed all 24 cases while host load rose
-to 90.4 on 12 logical CPUs. A signed 1 KiB PutItem survived an unclean owner
-restart, while the larger SDK restart suite separately failed with HTTP 503
-during GSI setup under similar contention. That verification failure remains
-open pending a successful repeat.
+a throttling cancellation. On the `9e17746` pin, GitHub Actions later passed
+all seven server-binary restart tests and 47 of 48 peer-network tests. The
+remaining two-owner large-transaction recovery test failed; qualification
+for the `30671d5` pin is in progress.
 
 ## Refresh of the earlier high-throughput sample
 
