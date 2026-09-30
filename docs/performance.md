@@ -2,7 +2,26 @@
 
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: an item write waits for Cellule to publish the committed Cell state to an object store.
 
-The latest signed-API rerun pinned Cellule to `30671d5` and ExtendDB SQLite
+The latest [release repeat after the peer read fix](../benchmarks/2026-09-30-peer-read-fallback/README.md)
+uses BeyondDB `832da2a`, Cellule `30671d5`, and pinned ExtendDB SQLite. Both
+backends completed all 24 signed API/client cases with **zero foreground
+errors**. At eight clients, BeyondDB/SQLite measured 857/778 `GetItem`,
+16.9/746 `PutItem`, 1.33/576 `TransactGetItems`, and 1.20/371
+`TransactWriteItems` requests/s. BeyondDB logged three deferred background
+sweeps from mailbox capacity. RustFS used a fresh bind mount in Colima's
+shared home directory after the Docker VM ran out of space; the preceding
+[named-volume attempt](../benchmarks/2026-09-30-peer-read-fallback-attempt/README.md)
+became fenced and recorded 45 foreground errors. Host load and storage paths
+differ between runs, so these rates do not prove a code-driven improvement.
+
+The peer read fix passed a signed remote-owner regression and the large
+binary/escaped transaction checks after owner restart. The longer recovery
+test subsequently failed an index-owner assertion with `owner=None` after
+the signed index query and journal acknowledgement converged. Full SDK CI
+qualification remains in progress. Zero foreground errors in this benchmark
+does not mean recovery qualification or the all-API performance target is met.
+
+The initial signed-API rerun on this pin used Cellule `30671d5` and ExtendDB SQLite
 to `7eaa89b`. Both harnesses completed all 24 five-second cases. At eight
 clients, BeyondDB/SQLite measured 327/721 `GetItem`, 13/481 `PutItem`, and
 2.11/277 `TransactWriteItems` successful requests/s. BeyondDB's eight-client
