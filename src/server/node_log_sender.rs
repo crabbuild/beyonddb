@@ -59,7 +59,8 @@ struct CachedPeer {
 }
 
 impl PeerNodeLogTransport {
-    pub(super) const fn session(&self) -> SessionId {
+    /// Return the boot session whose lease and TLS identity bind this transport.
+    pub const fn session(&self) -> SessionId {
         self.session
     }
 

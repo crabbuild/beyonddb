@@ -1,0 +1,29 @@
+{
+  "server_commit": "1c38cca + uncommitted recovery wiring and index batching",
+  "binary_sha256": "1ff8d4525c055bf89b2ffd5e05315c373ca3346b03e41147f48f63b0f522c73f",
+  "rustfs_image": "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+  "host_load_start": [
+    27.0361328125,
+    26.0625,
+    22.32763671875
+  ],
+  "logical_cpus": 12,
+  "boto3_version": "1.43.105",
+  "fixture": {
+    "initial_partitions": 4,
+    "sql_workers": 12,
+    "max_active_cells": 128,
+    "follower_store_bytes": 1073741824,
+    "auth_cache_enabled": true,
+    "server_object_publication": true
+  },
+  "endpoint": "http://127.0.0.1:54679",
+  "started_at_unix": 1790743516.3009431,
+  "host_load_end": [
+    21.58349609375,
+    24.58544921875,
+    22.26171875
+  ],
+  "ended_at_unix": 1790743646.1916249,
+  "bench_exit_code": 0
+}

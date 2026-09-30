@@ -4,8 +4,8 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state_with_cache,
-    measured_node_capacity, shutdown_serving_node,
+    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeLogTransport,
+    build_http_state_with_cache, measured_node_capacity, shutdown_serving_node,
 };
 use cellule_app::CellApplication;
 use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT};
@@ -15,7 +15,10 @@ use cellule_runtime::{
     follower::FollowerStore,
     identity::{Digest, NodeId, SessionId},
     ltx::{CellStorageLayout, DiskBudget, Host, Limits},
-    node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain},
+    node::{
+        NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
+        NodeFailureDomain,
+    },
     registry::BuildDescriptor,
 };
 use cellule_store::{Store, provider_store::build_url_object_store};
@@ -246,13 +249,22 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let fleet = tls.fleet();
     let capacity_runtime = node.runtime();
     let capacity_dir = config.data_dir.clone();
+    let recovery_capable = config.follower_store_bytes.is_some();
     let modules = application.registry().module_digests();
     let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
         let (capacity, placement) = if capacity_runtime.is_shutting_down() {
             (NodeCapacity::default(), None)
         } else {
             match measured_node_capacity(&capacity_dir, capacity_runtime.stats()) {
-                Ok((capacity, placement)) => (capacity, Some(placement)),
+                Ok((mut capacity, placement)) => {
+                    // A persistent follower store permits fenced recovery claims.
+                    // Zero advertised follower bytes still prevents recruitment
+                    // until follower-backed serving has a tested recovery path.
+                    if recovery_capable {
+                        capacity.log_protocol = NODE_LOG_PROTOCOL_VERSION;
+                    }
+                    (capacity, Some(placement))
+                }
                 Err(error) => {
                     // Observation failure disables placement, not the serving lease.
                     // Never renew a stale sample with the next advertisement's time.
@@ -346,26 +358,36 @@ async fn serve_ready(
     bootstrap_secret: Option<Zeroizing<String>>,
 ) -> ServerResult<()> {
     let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
+    let mut recovery_transport = None;
     if let Some(store) = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT) {
-        peers = peers.with_follower_store(
-            NodeId::from_bytes(*config.node_id.as_bytes()),
-            store,
-            follower_guard,
-        );
+        let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
+        recovery_transport = Some(Arc::new(
+            PeerNodeLogTransport::new(
+                directory.clone(),
+                tls.client_identity(),
+                session,
+                node_id,
+                follower_guard.clone(),
+            )
+            .with_local_follower_store(store.clone()),
+        ));
+        peers = peers.with_follower_store(node_id, store, follower_guard);
     }
     let peers = Arc::new(peers);
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            node.runtime(),
-            application,
-            layout.clone(),
-            session,
-            config.peer_endpoint.clone(),
-            session_dir,
-        )?
-        .with_initial_partition_count(config.initial_partitions)?
-        .with_peers(peers.clone()),
-    );
+    let mut provisioner = CellInitialPartitionProvisioner::new(
+        node.runtime(),
+        application,
+        layout.clone(),
+        session,
+        config.peer_endpoint.clone(),
+        session_dir,
+    )?
+    .with_initial_partition_count(config.initial_partitions)?
+    .with_peers(peers.clone());
+    if let Some(transport) = recovery_transport {
+        provisioner = provisioner.with_node_log_recovery(transport)?;
+    }
+    let provisioner = Arc::new(provisioner);
     for account_id in &config.owned_accounts {
         provisioner
             .recover_configured_account(account_id, &directory)

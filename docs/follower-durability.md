@@ -69,9 +69,11 @@ through Cellule's bounded witness reader. A separate three-identity mTLS test
 lets another claimant fence the leader, seal a remote follower, and read its
 persisted tail through the bounded witness reader; sealing before the claim
 is rejected. The test also confirms that a recovery claimant must advertise
-Cellule's node-log protocol even when it offers no follower bytes. The serving
-binary does not yet advertise that capability or run the recovery coordinator.
-Retirement and successor Cell overlay attachment still need end-to-end tests.
+Cellule's node-log protocol even when it offers no follower bytes. With an
+opt-in persistent store, the serving binary now advertises that protocol but
+zero follower bytes, so it can claim recovery without being recruited for
+write acknowledgments. Retirement and successor Cell overlay attachment
+still need end-to-end tests.
 
 The lease-bound `PublishedNodeLogAuthority` adapter can enroll a follower set
 and apply the directory's activation, coverage, and close transitions. It
@@ -88,10 +90,14 @@ shortcut.
 tenant catalog inventory, overlay manifest pinning, and final directory seal
 for a caller that already holds a fenced recovery claim. It resolves every
 authenticated Cell scope through a durable tenant catalog and rejects missing,
-ambiguous, or over-limit inventory before attaching an overlay. The serving
-binary does not call this coordinator yet; the claimant advertisement,
-recovery scheduling, and crash-after-acknowledged-write test remain required
-before follower-backed acknowledgments can be enabled.
+ambiguous, or over-limit inventory before attaching an overlay. When normal
+Cell takeover encounters an active, untiered node log, the opt-in serving path
+claims fenced recovery, runs this coordinator, and only then passes its
+takeover proof to Cellule. A product test now captures a real account Cell
+frame, appends it to a persistent follower lane, and verifies that a
+successor restores the untiered commit before takeover. This path still
+lacks a multi-node crash-after-acknowledged-write SDK test; the provider
+remains uninstalled and follower-backed acknowledgments remain disabled.
 
 ## Verification before comparing throughput
 

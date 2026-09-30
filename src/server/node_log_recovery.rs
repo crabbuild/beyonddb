@@ -217,14 +217,34 @@ const fn nibble(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Bytes;
+    use cellule_app::CellApplication;
+    use cellule_host::CellNodeBuilder;
+    use cellule_ltx::{CellReplica, encode_node_frame};
     use cellule_runtime::{
+        SqlWorkerPool,
         cell::catalog::{CatalogEntry, CatalogRole},
-        identity::{CellTarget, Digest, TenantId},
+        control::Owner,
+        follower::FollowerReceipt,
+        identity::{CellTarget, Digest, IncarnationId, NodeId, SessionId, TenantId},
+        ltx::{DiskBudget, Host},
+        node::{
+            NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeFailureDomain,
+            log_transport::{
+                AppendRequest, LocalFollowerTransport, RetireRequest, SealRequest, TailRequest,
+            },
+        },
+        registry::BuildDescriptor,
     };
     use cellule_store::Store;
+    use ed25519_dalek::SigningKey;
+    use futures_util::future::BoxFuture;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
+    use std::time::Duration;
 
-    use crate::{APPLICATION, APPLICATION_ID, NAMESPACE};
+    use crate::{
+        APPLICATION, APPLICATION_ID, Beyonddb, NAMESPACE, account_target, initialize_account,
+    };
 
     fn scope(cell: CellId) -> NodeFrameScope {
         NodeFrameScope {
@@ -299,5 +319,418 @@ mod tests {
         );
         assert!(parse_catalog_head(prefix, &canonical.replace("/ab/", "/AB/")).is_err());
         assert!(parse_catalog_head(prefix, &canonical.replace("head.json", "tail.json")).is_err());
+    }
+
+    struct EmptySealedFollower;
+
+    impl NodeLogTransport for EmptySealedFollower {
+        fn append<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: AppendRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async { Err(Error::Node("test follower cannot append")) })
+        }
+
+        fn seal<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: SealRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async {
+                Ok(FollowerReceipt {
+                    base_sequence: 0,
+                    durable_through: 0,
+                })
+            })
+        }
+
+        fn retire<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: RetireRequest,
+        ) -> BoxFuture<'a, Result<FollowerReceipt>> {
+            Box::pin(async { Err(Error::Node("test follower cannot retire")) })
+        }
+
+        fn tail<'a>(
+            &'a self,
+            _member: NodeId,
+            _request: TailRequest,
+        ) -> BoxFuture<'a, Result<Vec<Bytes>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    fn node_advertisement(
+        node: NodeId,
+        session: SessionId,
+        key: u8,
+        follower_bytes: u64,
+        now: i64,
+        lease_ms: i64,
+    ) -> NodeAdvertisement {
+        NodeAdvertisement::sign(
+            node,
+            session,
+            format!("https://node-{key}.internal:8081"),
+            Digest::from_bytes([80; 32]),
+            Digest::from_bytes([key; 32]),
+            Digest::from_bytes([81; 32]),
+            Digest::from_bytes([82; 32]),
+            &SigningKey::from_bytes(&[key; 32]),
+            1,
+            now,
+            now + lease_ms,
+            vec![Digest::from_bytes([86; 32])],
+            vec![1],
+            NodeFailureDomain::default(),
+            NodeCapacity {
+                free_memory_bytes: 16 << 20,
+                free_disk_bytes: 1 << 30,
+                follower_free_bytes: follower_bytes,
+                job_credits: 8,
+                log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                ..NodeCapacity::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn empty_follower_tail_seals_claim_before_takeover() {
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("node-log-recovery-empty-tail"),
+            *APPLICATION_ID.as_bytes(),
+        );
+        let directory = NodeDirectory::new(
+            layout.clone(),
+            Digest::from_bytes([80; 32]),
+            Digest::from_bytes([81; 32]),
+            Digest::from_bytes([82; 32]),
+        );
+        let follower_node = NodeId::from_bytes([1; 16]);
+        let follower_session = SessionId::from_bytes([2; 16]);
+        let leader_node = NodeId::from_bytes([3; 16]);
+        let leader_session = SessionId::from_bytes([4; 16]);
+        let claimant_node = NodeId::from_bytes([5; 16]);
+        let claimant_session = SessionId::from_bytes([6; 16]);
+        let now = unix_time_ms().unwrap();
+        directory
+            .create(
+                node_advertisement(follower_node, follower_session, 1, 1 << 30, now, 15_000),
+                now,
+            )
+            .await
+            .unwrap();
+        let leader = directory
+            .create(
+                node_advertisement(leader_node, leader_session, 3, 0, now, 3_000),
+                now,
+            )
+            .await
+            .unwrap();
+        let enrolled = directory
+            .recruit_log(&leader, 1, 4_096, 16, now)
+            .await
+            .unwrap();
+        directory.activate_log(&enrolled, now).await.unwrap();
+        directory
+            .create(
+                node_advertisement(claimant_node, claimant_session, 5, 0, now, 15_000),
+                now,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        let fenced = directory
+            .claim_expired_for_recovery(leader_session, claimant_session, unix_time_ms().unwrap())
+            .await
+            .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let result = recover_fenced_node_log(
+            &directory,
+            &layout,
+            Arc::new(EmptySealedFollower),
+            fenced,
+            Limits::default(),
+            scratch.path().to_owned(),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(result.controls.is_empty());
+        assert_eq!(result.takeover.claimant(), claimant_session);
+        assert!(
+            directory
+                .takeover_proof(leader_session, claimant_session, unix_time_ms().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn untiered_account_frame_is_pinned_and_restored_before_takeover() {
+        let application = Arc::new(
+            Beyonddb::compile(BuildDescriptor {
+                source_revision: "node-log-recovery-test".into(),
+                cargo_lock_digest: Digest::from_bytes([7; 32]),
+            })
+            .unwrap(),
+        );
+        let target = account_target("123456789012").unwrap();
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("node-log-recovery-account-frame"),
+            *APPLICATION_ID.as_bytes(),
+        );
+        let files = tempfile::tempdir().unwrap();
+        let source = CellNodeBuilder::new(Arc::clone(&application))
+            .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 << 20)
+            .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
+            .with_session(SessionId::from_bytes([4; 16]))
+            .build_unleased_for_maintenance()
+            .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), target.tenant());
+        let proof = catalog
+            .provision(
+                CatalogEntry::new(
+                    &target,
+                    CatalogRole::Sql,
+                    application
+                        .registry()
+                        .module_code("beyonddb-account")
+                        .unwrap(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout.clone());
+        let leader_session = SessionId::from_bytes([4; 16]);
+        let incarnation = IncarnationId::from_bytes([8; 16]);
+        let initial = authority
+            .create_initial(
+                &proof,
+                incarnation,
+                Owner {
+                    session: leader_session,
+                    endpoint: "https://leader.internal:8081".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let replica = CellReplica::new(
+            layout.clone(),
+            *target.cell_id().as_bytes(),
+            *incarnation.as_bytes(),
+            Limits::default(),
+        )
+        .unwrap();
+        let handle = source
+            .runtime()
+            .bootstrap(
+                proof.clone(),
+                replica.clone(),
+                authority.clone(),
+                initial,
+                files.path().join("leader.sqlite"),
+                initialize_account,
+            )
+            .await
+            .unwrap();
+        drop(handle);
+        let observed = authority.load(target.cell_id()).await.unwrap().unwrap();
+        let predecessor = observed.value().ltx_root().unwrap();
+        let tail_path = files.path().join("tail.sqlite");
+        let writable = replica
+            .open_root(&predecessor)
+            .await
+            .unwrap()
+            .paged()
+            .prepare_writable(&tail_path)
+            .await
+            .unwrap();
+        let mut writer = writable.open_writable(&tail_path).unwrap();
+        writer
+            .transaction(|transaction| {
+                transaction.execute(
+                    "UPDATE sys_meta SET commit_sequence = commit_sequence + 1, logical_time_ms = logical_time_ms + 1 WHERE singleton = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let capture = writer.capture().unwrap();
+        let frames = capture
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| {
+                encode_node_frame(
+                    NodeFrameScope {
+                        leader_session: *leader_session.as_bytes(),
+                        log_epoch: 1,
+                        node_sequence: u64::try_from(index).unwrap() + 1,
+                        application: *APPLICATION_ID.as_bytes(),
+                        cell: *target.cell_id().as_bytes(),
+                        incarnation: *incarnation.as_bytes(),
+                        cell_epoch: observed.value().epoch,
+                        commit_sequence: predecessor.commit_sequence + 1,
+                    },
+                    segment.info().clone(),
+                    Bytes::from(std::fs::read(segment.path()).unwrap()),
+                    Limits::default(),
+                )
+                .unwrap()
+                .encoded()
+                .clone()
+            })
+            .collect::<Vec<_>>();
+        assert!(!frames.is_empty());
+        writer.close().unwrap();
+
+        let directory = NodeDirectory::new(
+            layout.clone(),
+            Digest::from_bytes([80; 32]),
+            Digest::from_bytes([81; 32]),
+            Digest::from_bytes([82; 32]),
+        );
+        let follower_node = NodeId::from_bytes([1; 16]);
+        let follower_session = SessionId::from_bytes([2; 16]);
+        let leader_node = NodeId::from_bytes([3; 16]);
+        let claimant_session = SessionId::from_bytes([6; 16]);
+        let now = unix_time_ms().unwrap();
+        directory
+            .create(
+                node_advertisement(follower_node, follower_session, 1, 1 << 30, now, 15_000),
+                now,
+            )
+            .await
+            .unwrap();
+        let leader = directory
+            .create(
+                node_advertisement(leader_node, leader_session, 3, 0, now, 3_000),
+                now,
+            )
+            .await
+            .unwrap();
+        let enrolled = directory
+            .recruit_log(&leader, 1, 4_096, 16, now)
+            .await
+            .unwrap();
+        directory.activate_log(&enrolled, now).await.unwrap();
+        directory
+            .create(
+                node_advertisement(
+                    NodeId::from_bytes([5; 16]),
+                    claimant_session,
+                    5,
+                    0,
+                    now,
+                    15_000,
+                ),
+                now,
+            )
+            .await
+            .unwrap();
+        let follower = cellule_runtime::FollowerStore::open(
+            files.path().join("follower"),
+            Limits::default(),
+            DiskBudget::new(1 << 30),
+        )
+        .unwrap();
+        let transport: Arc<dyn NodeLogTransport> =
+            Arc::new(LocalFollowerTransport::new(follower_node, follower));
+        transport
+            .append(
+                follower_node,
+                AppendRequest {
+                    leader_session,
+                    log_epoch: 1,
+                    frames,
+                    covered_through: 0,
+                },
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        let fenced = directory
+            .claim_expired_for_recovery(leader_session, claimant_session, unix_time_ms().unwrap())
+            .await
+            .unwrap();
+        let scratch = files.path().join("recovery");
+        let recovered = recover_fenced_node_log(
+            &directory,
+            &layout,
+            transport,
+            fenced,
+            Limits::default(),
+            scratch.clone(),
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.controls.len(), 1);
+        assert!(recovered.controls[0].value().recovery.is_some());
+
+        let successor = cellule_runtime::CellRuntime::new(
+            SqlWorkerPool::new(1, 8).unwrap(),
+            16 << 20,
+            claimant_session,
+        )
+        .unwrap();
+        let restored = successor
+            .takeover_restored(
+                proof,
+                replica,
+                authority.clone(),
+                recovered.controls[0].clone(),
+                recovered.takeover,
+                RecoveryManifestStore::new(layout.clone(), Limits::default())
+                    .with_recovery_scratch(scratch),
+                files.path().join("successor.sqlite"),
+                Owner {
+                    session: claimant_session,
+                    endpoint: "https://successor.internal:8081".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let replayed_sequence = restored
+            .query(64, 64, |connection| {
+                let sequence = connection.query_row(
+                    "SELECT commit_sequence FROM sys_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok(sequence.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed_sequence,
+            (predecessor.commit_sequence as i64 + 1).to_be_bytes()
+        );
+        assert_eq!(
+            authority
+                .load(target.cell_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .value()
+                .root
+                .as_ref()
+                .unwrap()
+                .commit_sequence,
+            predecessor.commit_sequence + 1
+        );
+        restored.drain().await.unwrap();
+        successor.shutdown().await.unwrap();
     }
 }

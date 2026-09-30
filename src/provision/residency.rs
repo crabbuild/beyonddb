@@ -229,11 +229,14 @@ impl CellInitialPartitionProvisioner {
             control.root.is_some()
                 && match control.state {
                     ControlState::Idle => control.owner.is_none(),
-                    ControlState::Recovering => control
+                    // A settled local actor can release residency while its
+                    // published control still says Serving. Reopen that exact
+                    // root under the same owner session on the next request.
+                    ControlState::Recovering | ControlState::Serving => control
                         .owner
                         .as_ref()
                         .is_some_and(|owner| owner.session == self.session),
-                    _ => false,
+                    ControlState::Tombstoned => false,
                 }
         };
         // A local owner can drain after the caller's authority read. Recheck
