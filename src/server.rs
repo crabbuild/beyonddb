@@ -3,6 +3,7 @@
 mod capacity;
 mod node_lease;
 mod node_log_authority;
+mod node_log_receiver;
 mod peer_receiver;
 mod placement;
 
@@ -16,7 +17,8 @@ use cellule_host::CellNode;
 use cellule_peer_http::{LoadedPeerTls, PeerHttpRoundTrip, PeerTargetScope};
 use cellule_runtime::client::CellClient;
 use cellule_runtime::control::authority::CellAuthority;
-use cellule_runtime::identity::{CellTarget, SessionId};
+use cellule_runtime::follower::FollowerStore;
+use cellule_runtime::identity::{CellTarget, NodeId, SessionId};
 use cellule_runtime::ltx::CellStorageLayout;
 use cellule_runtime::node::NodeDirectory;
 use cellule_runtime::peer::PeerSigner;
@@ -97,6 +99,7 @@ pub struct BeyonddbPeers {
     layout: CellStorageLayout,
     registry: Arc<cellule_runtime::registry::Registry>,
     placement: Arc<placement::RangePlacement>,
+    follower: Option<node_log_receiver::FollowerEndpoint>,
 }
 
 impl BeyonddbPeers {
@@ -137,7 +140,28 @@ impl BeyonddbPeers {
                 signer,
                 round_trip,
             }),
+            follower: None,
         })
+    }
+
+    /// Add a persistent follower lane to the private mTLS listener.
+    ///
+    /// This does not advertise follower capacity or enable fleet durability.
+    #[must_use]
+    pub fn with_follower_store(
+        mut self,
+        node: NodeId,
+        store: Arc<FollowerStore>,
+        guard: cellule_runtime::NodeLeaseGuard,
+    ) -> Self {
+        self.follower = Some(node_log_receiver::FollowerEndpoint::new(
+            self.placement.directory.clone(),
+            self.runtime.clone(),
+            node,
+            store,
+            guard,
+        ));
+        self
     }
 
     /// Build a client that places idle ranges/directories and recovers expired owners.
@@ -175,7 +199,11 @@ impl BeyonddbPeers {
 
     /// Build the authenticated peer route; mount only on this identity's mTLS listener.
     pub fn router(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> axum::Router {
-        peer_receiver::peer_router(self, provisioner)
+        let router = peer_receiver::peer_router(self, provisioner);
+        match &self.follower {
+            Some(follower) => router.merge(node_log_receiver::router(follower.clone())),
+            None => router,
+        }
     }
 
     pub(crate) fn directory(&self) -> &NodeDirectory {

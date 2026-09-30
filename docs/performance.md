@@ -10,6 +10,15 @@ On September 29, 2026, two fresh four-partition RustFS fixtures ran the `af8fab7
 
 This refresh does not reproduce the earlier rates and is not a clean matched regression test: the code revision and host load differ. The [raw results and fixture details](../benchmarks/2026-09-29-claim-refresh/README.md) provide the full API table, latencies, errors, and conditions. Repeat on an otherwise idle host with retained raw results and background-work checks before using either sample as a performance target.
 
+A later release check with an opt-in persistent follower store also left the
+serving path on RustFS publication. It measured GetItem at **272.61/768.80**
+requests/s and PutItem at **10.91/45.55** at one/eight clients. All 24 cases
+had zero SDK request errors, but the server logged six deferred background
+operations and the host was heavily loaded. The [complete API table and raw
+results](../benchmarks/2026-09-29-follower-receiver-check/README.md) show that
+the historical peaks still are not reproducible on this fixture. Enabling the
+receiver alone does not change write durability or imply a throughput gain.
+
 ## Contemporaneous comparison with pinned ExtendDB SQLite
 
 A later pair of fresh release fixtures exercised all 12 benchmark APIs with the same signed boto3 workload. The [full comparison and raw results](../benchmarks/2026-09-29-sqlite-comparison/README.md) show BeyondDB near SQLite on warm `GetItem` (583 versus 646 requests/s at one client), but far behind on `PutItem` (9 versus 811) and cross-partition `TransactGetItems` (1.5 versus 572). Eight-client `Scan` and one-client `BatchGetItem` were the only cases in which BeyondDB exceeded SQLite. Both backends had zero SDK request errors; BeyondDB also logged deferred background work.

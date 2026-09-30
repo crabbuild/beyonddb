@@ -8,12 +8,13 @@ use beyonddb::{
     measured_node_capacity, shutdown_serving_node,
 };
 use cellule_app::CellApplication;
-use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
+use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT};
 use cellule_peer_http::{LoadedPeerTls, PeerTlsIdentity};
 use cellule_runtime::{
-    SqlWorkerPool,
+    NodeLeaseGuard, SqlWorkerPool,
+    follower::FollowerStore,
     identity::{Digest, NodeId, SessionId},
-    ltx::{CellStorageLayout, DiskBudget, Host},
+    ltx::{CellStorageLayout, DiskBudget, Host, Limits},
     node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain},
     registry::BuildDescriptor,
 };
@@ -35,6 +36,9 @@ struct Config {
     node_id: Uuid,
     data_dir: PathBuf,
     disk_budget_bytes: u64,
+    /// Optional persistent follower-lane budget. Does not enable fleet proofs.
+    #[serde(default)]
+    follower_store_bytes: Option<u64>,
     #[serde(default = "default_node_retained_bytes")]
     node_retained_bytes: usize,
     #[serde(default = "default_max_active_cells")]
@@ -137,12 +141,13 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         || config.node_retained_bytes == 0
         || config.split_threshold_bytes == 0
         || config.max_active_cells == 0
+        || config.follower_store_bytes == Some(0)
         || config
             .sql_workers
             .is_some_and(|workers| !(1..=MAX_SQL_WORKERS).contains(&workers))
     {
         return Err(invalid(
-            "disk, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
+            "disk, optional follower-store, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
         )
         .into());
     }
@@ -218,13 +223,20 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         Some(workers) => SqlWorkerPool::new(workers, config.max_active_cells)?,
         None => SqlWorkerPool::for_system(config.max_active_cells)?,
     };
-    let node = CellNodeBuilder::new(Arc::clone(&application))
+    let mut builder = CellNodeBuilder::new(Arc::clone(&application))
         .with_runtime(sql_workers, config.node_retained_bytes)
         .with_replica_host(
             Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
         )
-        .with_session(session)
-        .build()?;
+        .with_session(session);
+    if let Some(bytes) = config.follower_store_bytes {
+        builder = builder.with_follower_store(
+            config.data_dir.join("follower-store"),
+            Limits::default(),
+            DiskBudget::new(bytes),
+        );
+    }
+    let node = builder.build()?;
     let node_shutdown = CancellationToken::new();
     let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
     let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
@@ -273,7 +285,8 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     })
     .publish()
     .await?;
-    node.install_node_lease_for_startup(published.guard())?;
+    let follower_guard = published.guard();
+    node.install_node_lease_for_startup(follower_guard.clone())?;
     // Publication during drain still needs the node lease. The host cancels
     // lease maintenance only after the runtime and its durable log close.
     tasks.spawn_lease_maintenance(async move { published.run(&node_shutdown).await })?;
@@ -288,6 +301,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         directory.clone(),
         application,
         session,
+        follower_guard,
         tls,
         peer_listener,
         public_listener,
@@ -323,6 +337,7 @@ async fn serve_ready(
     directory: NodeDirectory,
     application: Arc<cellule_app::CompiledApplication>,
     session: SessionId,
+    follower_guard: NodeLeaseGuard,
     tls: LoadedPeerTls,
     peer_listener: TcpListener,
     public_listener: TcpListener,
@@ -330,13 +345,15 @@ async fn serve_ready(
     encryption_key: [u8; 32],
     bootstrap_secret: Option<Zeroizing<String>>,
 ) -> ServerResult<()> {
-    let peers = Arc::new(BeyonddbPeers::new(
-        node,
-        layout.clone(),
-        directory.clone(),
-        session,
-        &tls,
-    )?);
+    let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
+    if let Some(store) = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT) {
+        peers = peers.with_follower_store(
+            NodeId::from_bytes(*config.node_id.as_bytes()),
+            store,
+            follower_guard,
+        );
+    }
+    let peers = Arc::new(peers);
     let provisioner = Arc::new(
         CellInitialPartitionProvisioner::new(
             node.runtime(),

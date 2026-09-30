@@ -12,9 +12,10 @@ short runs do not establish an idle-host throughput limit, but removing small
 amounts of item SQL cannot eliminate the object publication round trip.
 
 The pinned Cellule revision already exposes a node-log durability supervisor,
-follower stores, and a durability gate. BeyondDB has not yet provided the
-product-side enrollment, transport, authority, and recovery integration. No
-follower mode should be advertised or enabled until that integration is proven.
+follower stores, and a durability gate. BeyondDB has a lease-bound authority
+adapter and an opt-in inbound follower receiver, but it has not completed the
+outbound transport, enrollment provider, or owner recovery. No follower mode
+should be advertised or enabled until that integration is proven.
 
 ```text
 Current serving path                  Proposed multi-node path
@@ -51,16 +52,23 @@ fallback. These are durability conditions, not optional performance hints.
 | Recovery | Before public readiness after an owner loss, seal and fetch the failed owner's authorized follower tail, reconcile object coverage, and restore acknowledged Cell commits. Do not return success for a write whose proof cannot be recovered on a successor. |
 | Lifecycle | Rotate and retire only after the recorded coverage barrier. Drain the node, settle publications, and preserve follower files if withdrawal or recovery has not completed. |
 
-The current `BeyonddbPeers` router forwards Cell requests. It does not expose
-node-log operations. The lease-bound `PublishedNodeLogAuthority` adapter can
-enroll a follower set and apply the directory's activation, coverage, and
-close transitions. It serializes those mutations with heartbeat refreshes
-and reloads an exact session after an ambiguous CAS. An in-memory directory
-test covers those transitions and lease fencing. The serving binary does not yet
-install a durability provider or use that adapter, and it advertises no
-usable follower capacity. Adding a local in-process follower under a second
-logical node ID would not provide an independent failure domain and must not
-be used as a production durability shortcut.
+The private `BeyonddbPeers` router now has a bounded node-log receiver when
+`follower_store_bytes` is configured. It opens Cellule's persistent
+`FollowerStore` beneath `data_dir`, requires a live mTLS identity bound to the
+advertised session, and checks the directory's append, retirement, or fenced
+recovery authority before touching a lane. A focused test covers a durable
+append, duplicate append, restart of the follower store, wrong certificate,
+wrong epoch, and a seal attempt before owner fencing. The outbound transport
+and full seal/tail/retirement recovery tests remain open.
+
+The lease-bound `PublishedNodeLogAuthority` adapter can enroll a follower set
+and apply the directory's activation, coverage, and close transitions. It
+serializes those mutations with heartbeat refreshes and reloads the exact
+session after an ambiguous CAS. The serving binary does not yet install a
+durability provider or use that adapter, and it advertises no usable follower
+capacity. Adding a local in-process follower under a second logical node ID
+would not provide an independent failure domain and must not be used as a
+production durability shortcut.
 
 ## Verification before comparing throughput
 

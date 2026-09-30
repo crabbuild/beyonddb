@@ -168,6 +168,15 @@ while bounding visibility of an ownership change.
 
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
+`follower_store_bytes` is an optional positive disk budget for persistent
+follower lanes under `data_dir/follower-store`. Setting it opens a private,
+authenticated node-log receiver; it does **not** enable follower durability or
+improve write latency yet. BeyondDB still waits for object-store publication
+and advertises no follower capacity. Reserve this budget in addition to
+`disk_budget_bytes`, and retain the follower directory across process restart.
+The [follower durability guide](follower-durability.md) tracks the remaining
+outbound transport, enrollment, and recovery work.
+
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |
 | Object-store credentials | Server process to read and write Cell roots | Yes, or replace with equivalent authorized credentials |
