@@ -4,6 +4,46 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [parallel coordinator release pair](../benchmarks/2026-09-30-parallel-coordinator-release/README.md)
+measures source `388ae62`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
+Both backends completed all 24 cases with **zero SDK errors**.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 357.58 | 870.42 | 36.02 ms |
+| PutItem | 22.97 | 912.31 | 882.76 ms |
+| TransactGetItems | 1.06 | 893.41 | 7560.11 ms |
+| TransactWriteItems | 1.25 | 673.41 | 6953.71 ms |
+
+Only single-client DescribeTable and ListTables exceeded SQLite. Every
+eight-client case remained slower. Host load was 21.34→18.98 during BeyondDB
+and 18.82→19.52 during SQLite. Owner placement and provider latency also vary.
+Point reads slowed despite their unchanged path, so this sequential pair does
+not isolate the admission change's effect. The all-API SQLite objective remains unmet.
+
+The [concurrent signed SDK regression](../benchmarks/2026-09-30-parallel-coordinator-verification/README.md)
+proves that two independent cold coordinators can enter authority creation
+concurrently. It failed before the change and passes afterward, with durable
+registration and data-owner restoration checks retained. Bounded pending-slot
+accounting protects capacity; cancellation releases its reservation. Published
+roots and reclamation continue through exclusive admission.
+
+Seven coordinator cases and five reclamation cases pass with CI fixture
+scheduling, as do all 27 library tests, formatting and strict Clippy. A parallel
+fixture run failed replay after drain; its cause remains open. Earlier full SDK
+CI on `a18652a` passed native 47/47 but failed peers 55/56 and process 7/8.
+Full signed recovery qualification remains open.
+
+Across 1,918 samples per phase, peer lookup averaged 32.302 ms, HTTP round trip
+36.595 ms, fresh enrollment 21.180 ms, and durable append 14.768 ms. Provider
+GET/PUT means were 10.430/221.287 ms and publication total was 1099.160 ms,
+compared with SQL command execution of 0.430 ms. These overlapping populations
+include background work; they cannot be added into SDK latency. The complete
+record retains all cases, sample counts, host metrics, source and binary hashes,
+and verified cleanup.
+
+### Previous follower-phase release pair
+
 The [follower-phase release pair](../benchmarks/2026-09-30-follower-phases-release/README.md)
 measures source `22002dc`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
 Both backends completed all 24 cases with **zero SDK errors**.
