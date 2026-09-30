@@ -4,6 +4,33 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [provider-observation release pair](../benchmarks/2026-09-30-provider-observations-release/README.md)
+measures source `b2b6350`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. Both
+backends completed all 24 cases with **zero SDK errors**.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 655.57 | 1305.32 | 18.73 ms |
+| PutItem | 57.05 | 1178.69 | 325.14 ms |
+| TransactGetItems | 2.19 | 1213.74 | 5557.30 ms |
+| TransactWriteItems | 2.13 | 1019.84 | 3922.09 ms |
+
+Only single-client DescribeTable exceeded SQLite. Every eight-client case
+remained slower. Host load fell from 16.96 to 13.70 during BeyondDB and from
+13.70 to 11.66 during SQLite; fresh owner placement also varies. This sample
+does not establish a speedup from the discovery recovery fix or fleet capacity.
+
+The new provider metrics report GET mean 3.972 ms and PUT mean 84.768 ms across
+the snapshot interval, while SQL primitive command/query means were
+0.358/0.103 ms. These are overlapping events with different counts, including
+background work; do not sum them into SDK latency. The full report contains
+all 24 cases, raw results, metrics, host metadata, hashes, and verified cleanup.
+The [focused discovery regression](../benchmarks/2026-09-30-account-discovery-verification/README.md)
+passes, but the full signed peer/restart scenario still fails. Production
+recovery qualification and the all-API SQLite objective remain open.
+
+### Previous one-read follower append release pair
+
 The [one-read follower append release pair](../benchmarks/2026-09-30-one-read-append-release/README.md)
 measures source `9b62001` and reviewed Cellule `8ca658b`
 ([dependency PR](https://github.com/crabbuild/cellule/pull/31)). ExtendDB remains
