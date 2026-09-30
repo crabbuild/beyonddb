@@ -13,9 +13,11 @@ amounts of item SQL cannot eliminate the object publication round trip.
 
 The pinned Cellule revision already exposes a node-log durability supervisor,
 follower stores, and a durability gate. BeyondDB has a lease-bound authority
-adapter and an opt-in inbound follower receiver, but it has not completed the
-outbound transport, enrollment provider, or owner recovery. No follower mode
-should be advertised or enabled until that integration is proven.
+adapter, an opt-in inbound follower receiver, a pinned mTLS outbound
+transport, and a host-provider enrollment adapter. The provider is not
+installed in the serving binary, and owner recovery is incomplete. No
+follower mode should be advertised or enabled until that integration is
+proven.
 
 ```text
 Current serving path                  Proposed multi-node path
@@ -56,19 +58,23 @@ The private `BeyonddbPeers` router now has a bounded node-log receiver when
 `follower_store_bytes` is configured. It opens Cellule's persistent
 `FollowerStore` beneath `data_dir`, requires a live mTLS identity bound to the
 advertised session, and checks the directory's append, retirement, or fenced
-recovery authority before touching a lane. A focused test covers a durable
-append, duplicate append, restart of the follower store, wrong certificate,
-wrong epoch, and a seal attempt before owner fencing. The outbound transport
-and full seal/tail/retirement recovery tests remain open.
+recovery authority before touching a lane. The outbound
+`PeerNodeLogTransport` resolves a live advertised member, pins its certificate
+and key, and bounds requests, replies, and tail paging. Tests cover a durable
+append and duplicate append over real two-identity mTLS, follower-store
+reopen, wrong certificate, wrong epoch, and a seal attempt before owner
+fencing. Full seal/tail/retirement recovery tests remain open.
 
 The lease-bound `PublishedNodeLogAuthority` adapter can enroll a follower set
 and apply the directory's activation, coverage, and close transitions. It
 serializes those mutations with heartbeat refreshes and reloads the exact
-session after an ambiguous CAS. The serving binary does not yet install a
-durability provider or use that adapter, and it advertises no usable follower
-capacity. Adding a local in-process follower under a second logical node ID
-would not provide an independent failure domain and must not be used as a
-production durability shortcut.
+session after an ambiguous CAS. `PeerNodeDurabilityProvider` gives Cellule's
+host supervisor the enrolled members, authority, transport, and lease for
+each epoch, but the serving binary does not install it while successor
+recovery is unfinished. It advertises no usable follower capacity. Adding a
+local in-process follower under a second logical node ID would not provide
+an independent failure domain and must not be used as a production durability
+shortcut.
 
 ## Verification before comparing throughput
 

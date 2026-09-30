@@ -34,6 +34,10 @@ pub struct PublishedNodeLogAuthority {
 }
 
 impl PublishedNodeLogAuthority {
+    pub(super) const fn session(&self) -> SessionId {
+        self.session
+    }
+
     pub(super) fn new(
         directory: NodeDirectory,
         session: SessionId,

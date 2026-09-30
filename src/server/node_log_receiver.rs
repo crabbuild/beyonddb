@@ -23,12 +23,13 @@ use tokio::sync::Semaphore;
 
 use super::node_lease::unix_time_ms;
 
-const MEDIA_TYPE: &str = "application/vnd.beyonddb.node-log-v1";
+pub(super) const MEDIA_TYPE: &str = "application/vnd.beyonddb.node-log-v1";
 const MAGIC: &[u8; 4] = b"BNL1";
-const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024 + 64 * 1024;
+pub(super) const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024 + 64 * 1024;
 const MAX_APPEND_FRAMES: usize = 64;
 const MAX_TAIL_FRAMES: usize = 4096;
 const MAX_TAIL_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_RESPONSE_BYTES: usize = MAX_TAIL_BYTES + MAX_TAIL_FRAMES * 4 + 17;
 const MAX_CONCURRENT_REQUESTS: usize = 8;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -249,15 +250,15 @@ async fn receive_bounded(
         })
 }
 
-struct WireRequest {
-    caller: SessionId,
-    leader: SessionId,
-    epoch: u64,
-    argument: u64,
-    operation: Operation,
+pub(super) struct WireRequest {
+    pub(super) caller: SessionId,
+    pub(super) leader: SessionId,
+    pub(super) epoch: u64,
+    pub(super) argument: u64,
+    pub(super) operation: Operation,
 }
 
-enum Operation {
+pub(super) enum Operation {
     Append(Vec<Bytes>),
     Seal,
     Retire,
@@ -265,6 +266,43 @@ enum Operation {
 }
 
 impl WireRequest {
+    pub(super) fn encode(self) -> std::result::Result<Vec<u8>, ()> {
+        if self.epoch == 0 {
+            return Err(());
+        }
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(MAGIC);
+        let (tag, count) = match &self.operation {
+            Operation::Append(frames) if (1..=MAX_APPEND_FRAMES).contains(&frames.len()) => {
+                (1, frames.len())
+            }
+            Operation::Seal if self.argument == 0 => (2, 0),
+            Operation::Retire => (3, 0),
+            Operation::Tail if self.argument != 0 => (4, 0),
+            _ => return Err(()),
+        };
+        encoded.push(tag);
+        encoded.extend_from_slice(self.caller.as_bytes());
+        encoded.extend_from_slice(self.leader.as_bytes());
+        encoded.extend_from_slice(&self.epoch.to_be_bytes());
+        encoded.extend_from_slice(&self.argument.to_be_bytes());
+        encoded.extend_from_slice(&u32::try_from(count).map_err(|_| ())?.to_be_bytes());
+        if let Operation::Append(frames) = self.operation {
+            for frame in frames {
+                if frame.is_empty() {
+                    return Err(());
+                }
+                encoded
+                    .extend_from_slice(&u32::try_from(frame.len()).map_err(|_| ())?.to_be_bytes());
+                encoded.extend_from_slice(&frame);
+                if encoded.len() > MAX_REQUEST_BYTES {
+                    return Err(());
+                }
+            }
+        }
+        Ok(encoded)
+    }
+
     fn decode(body: Bytes) -> std::result::Result<Self, ()> {
         let wire_bytes = body.len();
         if wire_bytes > MAX_REQUEST_BYTES {
@@ -398,6 +436,53 @@ fn encode_page(page: FollowerTailPage) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
+pub(super) fn decode_receipt(body: Bytes) -> std::result::Result<FollowerReceipt, ()> {
+    let mut reader = Reader::new(body);
+    if reader.take(4)?.as_ref() != MAGIC || reader.u8()? != 1 {
+        return Err(());
+    }
+    let base_sequence = reader.u64()?;
+    let durable_through = reader.u64()?;
+    reader.finish()?;
+    if base_sequence == 0 || durable_through < base_sequence.saturating_sub(1) {
+        return Err(());
+    }
+    Ok(FollowerReceipt {
+        base_sequence,
+        durable_through,
+    })
+}
+
+pub(super) fn decode_page(body: Bytes) -> std::result::Result<FollowerTailPage, ()> {
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(());
+    }
+    let mut reader = Reader::new(body);
+    if reader.take(4)?.as_ref() != MAGIC || reader.u8()? != 2 {
+        return Err(());
+    }
+    let count = usize::try_from(reader.u32()?).map_err(|_| ())?;
+    if count > MAX_TAIL_FRAMES {
+        return Err(());
+    }
+    let next = reader.u64()?;
+    let mut bytes = 0_usize;
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = usize::try_from(reader.u32()?).map_err(|_| ())?;
+        bytes = bytes.checked_add(length).ok_or(())?;
+        if length == 0 || bytes > MAX_TAIL_BYTES {
+            return Err(());
+        }
+        frames.push(reader.take(length)?);
+    }
+    reader.finish()?;
+    Ok(FollowerTailPage {
+        frames,
+        next_sequence: (next != 0).then_some(next),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +522,52 @@ mod tests {
         let mut trailing = request(1, 1, &[b"frame"]).to_vec();
         trailing.push(0);
         assert!(WireRequest::decode(Bytes::from(trailing)).is_err());
+    }
+
+    #[test]
+    fn follower_wire_round_trips_transport_operations_and_responses() {
+        let caller = SessionId::from_bytes([1; 16]);
+        let leader = SessionId::from_bytes([2; 16]);
+        for operation in [
+            Operation::Append(vec![Bytes::from_static(b"frame")]),
+            Operation::Seal,
+            Operation::Retire,
+            Operation::Tail,
+        ] {
+            let argument = if matches!(operation, Operation::Tail) {
+                1
+            } else {
+                0
+            };
+            let request = WireRequest {
+                caller,
+                leader,
+                epoch: 3,
+                argument,
+                operation,
+            };
+            let decoded = WireRequest::decode(Bytes::from(request.encode().unwrap())).unwrap();
+            assert_eq!(decoded.caller, caller);
+            assert_eq!(decoded.leader, leader);
+            assert_eq!(decoded.epoch, 3);
+            assert_eq!(decoded.argument, argument);
+        }
+        let receipt = FollowerReceipt {
+            base_sequence: 2,
+            durable_through: 4,
+        };
+        let decoded = decode_receipt(Bytes::from(encode_receipt(receipt))).unwrap();
+        assert_eq!(decoded.base_sequence, 2);
+        assert_eq!(decoded.durable_through, 4);
+        let page = FollowerTailPage {
+            frames: vec![Bytes::from_static(b"frame")],
+            next_sequence: Some(5),
+        };
+        let decoded = decode_page(Bytes::from(encode_page(page).unwrap())).unwrap();
+        assert_eq!(decoded.frames, vec![Bytes::from_static(b"frame")]);
+        assert_eq!(decoded.next_sequence, Some(5));
+        assert!(decode_receipt(Bytes::from_static(b"invalid")).is_err());
+        assert!(decode_page(Bytes::from_static(b"invalid")).is_err());
     }
 
     fn advertisement(

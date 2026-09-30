@@ -175,7 +175,7 @@ improve write latency yet. BeyondDB still waits for object-store publication
 and advertises no follower capacity. Reserve this budget in addition to
 `disk_budget_bytes`, and retain the follower directory across process restart.
 The [follower durability guide](follower-durability.md) tracks the remaining
-outbound transport, enrollment, and recovery work.
+enrollment, lifecycle, and recovery work.
 
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |

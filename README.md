@@ -65,9 +65,10 @@ durable publication. [PNG version](diagram/beyonddb-architecture/durable-write@2
 [Detailed architecture and recovery design](docs/architecture.md)
 
 The serving binary currently waits for object-store publication on each
-durable write. Cellule's follower-log mode is not enabled in BeyondDB; its
-peer transport, persistent follower admission, and owner recovery still need
-to be integrated and verified. See the [follower durability design](docs/follower-durability.md).
+durable write. Cellule's follower-log mode is not enabled in BeyondDB. An
+opt-in persistent follower store and authenticated peer transport exist, but
+the durability provider is not installed in serving and successor recovery
+is unfinished. See the [follower durability design](docs/follower-durability.md).
 
 ## Current capability boundary
 
