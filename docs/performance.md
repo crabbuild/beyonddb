@@ -4,6 +4,45 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [instrumented release rerun](../benchmarks/2026-09-30-runtime-metrics/README.md)
+uses source `8e33705` and the already-current Cellule `30671d5` pin. Both backends
+completed all 24 cases: BeyondDB recorded **38 SDK errors**, SQLite zero. Each
+failing case's recorded first error was a read timeout.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 48.82 | 896.78 | 555.58 ms |
+| PutItem | 0.47 | 104.16 | 6,004.70 ms* |
+| TransactGetItems | 0.27 | 401.82 | 8,635.70 ms* |
+| TransactWriteItems | 0.10 | 222.09 | 8,877.42 ms* |
+
+\* Percentiles exclude errors. Only seven puts, three transaction reads, and
+one transaction write succeeded in these eight-client cases.
+
+The 12-CPU, 32 GiB workstation was heavily contended: one-minute load was
+84.28–84.45 during BeyondDB and 75.27–49.92 during SQLite, with about 20–21 GiB
+of swap in use. Local builds and tests finished before measurement; other work
+continued. These sequential samples do not establish a controlled speed ratio,
+a code regression, or production capacity. The all-API SQLite objective remains unmet.
+
+Runtime counters recorded 288 follower-backed command replies and two object-backed
+replies. Mean command worker time was 6.34 ms, queue time 188.94 ms, and object
+publication 2,790.98 ms. These observations include seeding/background work and
+different overlapping events; they cannot be summed into SDK latency. Product
+routing, peer metadata reads, and bootstrap provisioning are not covered by
+these runtime counters in this fixture. The report retains case-boundary snapshots,
+all API rates, sample counts, errors, and host memory observations.
+
+Fresh local checks passed all 46 native integration tests, 25 library tests,
+both signed durability controls, actual owner process-kill recovery, formatting,
+strict Clippy, and the locked release build. Rust CI passed; full SDK CI on the
+measured source is still running. Prior broad qualification failures remain
+open until the complete suite passes. The follower recovery fixture now waits
+for its warmup receipt to publish and requires activation on the first write
+whose object publication is blocked.
+
+### Previous follower diagnostic pair
+
 Cellule `origin/main` was checked again and remains `30671d5`, already used
 by all direct dependencies and lockfile packages. The [fresh release rerun](../benchmarks/2026-09-30-follower-diagnostics/README.md)
 uses measured source `9cba5f1` (production code `d04176c`) and completed all
@@ -289,7 +328,9 @@ Durations use microseconds. Counter snapshots are approximate because work can
 continue during sampling. They include background commands; runtime command
 reply counts are **not SDK request counts** and exclude queries, transport, and
 abandoned replies. Catalog/control counters do not cover all application or
-object-store reads. These counters cannot provide p95 latency.
+object-store reads. Application routing, peer metadata, and fresh bootstrap
+provisioning can bypass these hooks: zero activation/catalog/control counters
+do not imply zero work in those phases. These counters cannot provide p95 latency.
 
 Save snapshots before and after a run, check that
 `first_snapshot_at_unix_ms` is unchanged, and check the freshness of
