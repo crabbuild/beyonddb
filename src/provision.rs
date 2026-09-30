@@ -185,7 +185,7 @@ impl CellInitialPartitionProvisioner {
             .try_into()
             .map_err(|_| StorageError::Internal("invalid coordinator partition".into()))?;
         let client = CellClient::local(self.application.registry(), account_handle);
-        client
+        let registration = client
             .command::<RegisterCoordinatorShard>(
                 &account,
                 mutation_identity()?,
@@ -196,6 +196,8 @@ impl CellInitialPartitionProvisioner {
             )
             .await
             .map_err(cell_error)?;
+        self.remember_coordinator_registration(&account, &target, registration.receipt.incarnation)
+            .await?;
         Ok(handle)
     }
 

@@ -7,10 +7,11 @@ use cellule_runtime::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Default)]
-struct CountedAuthority {
+pub(super) struct CountedAuthority {
     inner: InMemory,
-    path: std::sync::Mutex<Option<object_store::path::Path>>,
-    reads: AtomicUsize,
+    pub(super) path: std::sync::Mutex<Option<object_store::path::Path>>,
+    pub(super) reads: AtomicUsize,
+    pub(super) all_reads: AtomicUsize,
 }
 
 impl std::fmt::Display for CountedAuthority {
@@ -43,6 +44,7 @@ impl object_store::ObjectStore for CountedAuthority {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        self.all_reads.fetch_add(1, Ordering::SeqCst);
         let counted = self.path.lock().unwrap().as_ref() == Some(location);
         if counted {
             self.reads.fetch_add(1, Ordering::SeqCst);

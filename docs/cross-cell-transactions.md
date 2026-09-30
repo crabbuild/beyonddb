@@ -946,6 +946,16 @@ after fenced recovery resolves every abort.
 SQL query plans use the token and transaction-ID indexes rather than scanning
 coordinator history.
 
+### Repeated admission of resident coordinators
+
+After durable registration, the provisioner retains a bounded in-memory receipt.
+It skips repeated registration and authority lookups only while the account and
+coordinator are both resident with the same incarnations and compiled code/schema.
+A registration learned through a query must be covered by the published account
+root before it can populate this cache. Drain, remote ownership, a missing receipt,
+or a new provisioner uses canonical admission. The shortcut does not change
+BEGIN, durable decisions, participant resolution, or dispatch fencing.
+
 ## Serving-time recovery
 
 `CellInitialPartitionProvisioner::install_transaction_recovery_loop` installs
