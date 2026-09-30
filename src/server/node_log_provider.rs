@@ -93,11 +93,20 @@ impl NodeDurabilityProvider for PeerNodeDurabilityProvider {
             let Some(members) = self
                 .authority
                 .recruit(epoch, required_follower_bytes, live_node_limit)
-                .await?
+                .await
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        log_epoch = epoch,
+                        error = %error,
+                        "node-log follower enrollment failed"
+                    );
+                })?
             else {
+                tracing::debug!(log_epoch = epoch, "node-log follower ensemble unavailable");
                 return Ok(None);
             };
             self.guard.check()?;
+            tracing::debug!(log_epoch = epoch, ?members, "node-log followers enrolled");
             let transport: Arc<dyn NodeLogTransport> = self.transport.clone();
             let authority: Arc<dyn NodeLogAuthority> = self.authority.clone();
             Ok(Some(NodeDurabilityConfig::new(
@@ -115,6 +124,10 @@ impl NodeDurabilityProvider for PeerNodeDurabilityProvider {
     }
 
     fn rotation_event(&self, event: NodeDurabilityRotation) {
+        tracing::debug!(?event, "node-log durability rotation");
+        if event == NodeDurabilityRotation::Failed {
+            tracing::warn!("node-log durability supervisor step failed");
+        }
         if event == NodeDurabilityRotation::Started {
             self.next_epoch.fetch_add(1, Ordering::AcqRel);
         }

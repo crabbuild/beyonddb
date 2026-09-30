@@ -314,6 +314,14 @@ impl NodeLogTransport for PeerNodeLogTransport {
                 },
             )
             .await
+            .inspect_err(|error| {
+                tracing::warn!(
+                    ?member,
+                    log_epoch = request.log_epoch,
+                    error = %error,
+                    "node-log follower append failed"
+                );
+            })
         })
     }
 

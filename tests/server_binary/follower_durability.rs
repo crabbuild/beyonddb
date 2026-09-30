@@ -240,10 +240,22 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         if node.advertisement().log().is_some_and(|log| log.active()) {
             break owner;
         }
-        assert!(
-            Instant::now() < deadline,
-            "owner never activated a follower log"
-        );
+        if Instant::now() >= deadline {
+            match directory.live(now_ms(), 16).await {
+                Ok(live) => {
+                    let capacity = live
+                        .iter()
+                        .map(|node| (node.node(), node.session(), node.capacity(), node.log()))
+                        .collect::<Vec<_>>();
+                    panic!(
+                        "owner never activated a follower log; live node capacity: {capacity:?}"
+                    );
+                }
+                Err(error) => {
+                    panic!("owner never activated a follower log; directory read failed: {error}");
+                }
+            }
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
     let before = authority.load(target.cell_id()).await.unwrap().unwrap();
