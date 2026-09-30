@@ -178,6 +178,78 @@ pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_transaction_read_from_remote_owner_uses_saved_images() {
+    use aws_sdk_dynamodb::types::{Get, TransactGetItem};
+
+    let fixture = Fixture::with_partition_count(1).await;
+    let sdk = sdk_without_retries(&fixture);
+    let mut reads = Vec::new();
+    let mut expected = Vec::new();
+    // The DynamoDB aggregate is below 4 MiB, but base64 exceeds the Cell wire limit.
+    for index in 0..10 {
+        let key = std::collections::HashMap::from([(
+            "id".into(),
+            AwsAttributeValue::S(format!("large-{index}")),
+        )]);
+        let mut item = key.clone();
+        item.insert(
+            "payload".into(),
+            AwsAttributeValue::B(vec![0xa5; 380 * 1024].into()),
+        );
+        sdk.put_item()
+            .table_name("Residency")
+            .set_item(Some(item.clone()))
+            .send()
+            .await
+            .unwrap();
+        reads.push(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .set_key(Some(key))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+        expected.push(item);
+    }
+    let remote = Remote::new(&fixture).await;
+    let table_id = table_id(&fixture, "Residency").await;
+    fixture.data[0].0.drain().await.unwrap();
+    remote
+        .provisioner
+        .admit_existing_partition("123456789012", &table_id, &[0; 16])
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let owner = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.value().owner.as_ref().unwrap().session,
+        remote.session
+    );
+    reads.reverse();
+    expected.reverse();
+    let result = sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.responses().len(), expected.len());
+    for (response, item) in result.responses().iter().zip(expected) {
+        assert_eq!(response.item(), Some(&item));
+    }
+    remote.shutdown().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_read_recovers_expired_directory_and_data_owners() {
     let fixture = Fixture::with_partition_count(1).await;
     let remote = Remote::new(&fixture).await;

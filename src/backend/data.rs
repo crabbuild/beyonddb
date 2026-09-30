@@ -101,6 +101,7 @@ impl CellStorage {
                 match result {
                     Ok(committed) => match committed.output.0 {
                         TransactionReadOutcome::Applied(items) => Ok(Some(items)),
+                        TransactionReadOutcome::SavedImagesRequired => Ok(None),
                         TransactionReadOutcome::Rejected { index, reason } => {
                             Err(transaction_canceled(index, reason, count, &[]))
                         }
@@ -1275,6 +1276,7 @@ fn local_partition_transaction_read_result(
 ) -> Result<Option<Vec<Option<Item>>>, StorageError> {
     match outcome {
         PartitionTransactReadOutcome::Applied(items) => Ok(Some(items)),
+        PartitionTransactReadOutcome::SavedImagesRequired => Ok(None),
         PartitionTransactReadOutcome::Rejected { index, reason } => {
             Err(transaction_canceled(index, reason, count, &[]))
         }

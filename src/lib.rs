@@ -276,7 +276,10 @@ static QUERIES: [OperationDescriptor; 32] = [
     operation(47),
     operation(48),
     operation(49),
-    operation(54),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(54)
+    },
 ];
 
 /// Statically linked account application.
@@ -510,6 +513,23 @@ impl cellule_runtime::registry::CellModule for AccountModule {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Json<T>(pub T);
 
+// An oversized read result must remain an application outcome across peer hops.
+// Peer codec failures do not preserve the typed limit error needed by the caller.
+fn encode_read_query<T: Serialize>(
+    value: &T,
+    fallback: &T,
+    encoder: &mut BoundedEncoder,
+) -> std::result::Result<(), CodecError> {
+    let mut bytes = serde_json::to_vec(value)
+        .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
+    // write_bytes includes a four-byte length prefix in the operation budget.
+    if bytes.len() > OPERATION_BYTES as usize - 4 {
+        bytes = serde_json::to_vec(fallback)
+            .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
+    }
+    encoder.write_bytes(&bytes)
+}
+
 impl<T> WireValue for Json<T>
 where
     T: Serialize + DeserializeOwned + Send + 'static,
@@ -530,5 +550,48 @@ where
             return Err(CodecError::Invalid("noncanonical DynamoDB JSON value"));
         }
         Ok(Self(value))
+    }
+}
+
+#[cfg(test)]
+mod transaction_read_codec_tests {
+    use super::*;
+    use extenddb_core::types::AttributeValue;
+
+    fn roundtrip<T: WireValue>(value: T) -> T {
+        let mut encoder = BoundedEncoder::new(OPERATION_BYTES).unwrap();
+        value.encode(&mut encoder).unwrap();
+        let bytes = encoder.finish();
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        let result = T::decode(&mut decoder).unwrap();
+        decoder.finish().unwrap();
+        result
+    }
+
+    #[test]
+    fn transaction_read_codecs_preserve_small_results_and_signal_large_aggregates() {
+        for (count, size, oversized) in [(1, 100, false), (10, 380 * 1024, true)] {
+            let images = vec![
+                Some(Item::from([(
+                    "payload".into(),
+                    AttributeValue::B(vec![0xa5; size]),
+                )]));
+                count
+            ];
+            let account = TransactionReadOutcome::Applied(images.clone());
+            let partition = PartitionTransactReadOutcome::Applied(images);
+            let account_result = roundtrip(TransactionReadQueryOutput(account.clone())).0;
+            let partition_result = roundtrip(PartitionTransactReadQueryOutput(partition.clone())).0;
+            if oversized {
+                assert_eq!(account_result, TransactionReadOutcome::SavedImagesRequired);
+                assert_eq!(
+                    partition_result,
+                    PartitionTransactReadOutcome::SavedImagesRequired
+                );
+            } else {
+                assert_eq!(account_result, account);
+                assert_eq!(partition_result, partition);
+            }
+        }
     }
 }

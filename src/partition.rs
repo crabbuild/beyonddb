@@ -107,7 +107,10 @@ static QUERIES: [OperationDescriptor; 18] = [
     operation(16),
     operation(17),
     operation(18),
-    operation(19),
+    OperationDescriptor {
+        codec_version: 2,
+        ..operation(19)
+    },
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {

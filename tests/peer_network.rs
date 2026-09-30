@@ -57,24 +57,6 @@ fn run(command: &mut Command) {
     assert!(command.output().unwrap().status.success());
 }
 
-fn diagnostic_peer_router(router: axum::Router, label: &'static str) -> axum::Router {
-    router
-        .fallback(move |request: axum::extract::Request| async move {
-            eprintln!("peer {label} has no route for {}", request.uri());
-            axum::http::StatusCode::NOT_FOUND
-        })
-        .layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
-                let path = request.uri().path().to_owned();
-                let response = next.run(request).await;
-                if !response.status().is_success() {
-                    eprintln!("peer {label} rejected {path} with {}", response.status());
-                }
-                response
-            },
-        ))
-}
-
 async fn sdk_with_session(
     endpoint: &str,
     access_key: &str,
@@ -336,7 +318,7 @@ async fn run_signed_sdk_network_recovery() {
         &tls,
     )
     .unwrap();
-    let router = diagnostic_peer_router(peers.router(provisioner.clone()), "owner");
+    let router = peers.router(provisioner.clone());
     let server = tokio::spawn(async move {
         axum::serve(
             tls.listener(listener),
@@ -384,8 +366,7 @@ async fn run_signed_sdk_network_recovery() {
         &client_tls,
     )
     .unwrap();
-    let remote_router =
-        diagnostic_peer_router(remote_peers.router(remote_provisioner.clone()), "remote");
+    let remote_router = remote_peers.router(remote_provisioner.clone());
     let remote_server = tokio::spawn(async move {
         axum::serve(
             remote_listener_tls.listener(remote_listener),
@@ -1121,10 +1102,7 @@ async fn run_signed_sdk_network_recovery() {
     }
     assert!(recovered_credentials > 0);
     let (replacement_shutdown, replacement_cancel) = tokio::sync::oneshot::channel();
-    let replacement_router = diagnostic_peer_router(
-        replacement_peers.router(replacement_provisioner.clone()),
-        "replacement",
-    );
+    let replacement_router = replacement_peers.router(replacement_provisioner.clone());
     let replacement_server = tokio::spawn(async move {
         axum::serve(
             replacement_tls.listener(replacement_listener),

@@ -210,6 +210,8 @@ pub(super) fn without_old_image(reason: TransactionFailure) -> TransactionFailur
 pub enum TransactionReadOutcome {
     /// Every requested image was read from one Cell snapshot.
     Applied(Vec<Option<Item>>),
+    /// The encoded aggregate requires reading durable participant images individually.
+    SavedImagesRequired,
     /// No image was returned because one operation failed validation or locking.
     Rejected {
         /// Position of the failing read.
@@ -254,21 +256,43 @@ impl Command for TransactRead {
 /// serialized with commands while avoiding a durable mutation publication.
 pub struct TransactReadQuery;
 
+/// Bounded JSON read result with an explicit fallback for oversized aggregates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransactionReadQueryOutput(pub TransactionReadOutcome);
+
+impl WireValue for TransactionReadQueryOutput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
+        encode_read_query(
+            &self.0,
+            &TransactionReadOutcome::SavedImagesRequired,
+            encoder,
+        )
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
+        Ok(Self(Json::<TransactionReadOutcome>::decode(decoder)?.0))
+    }
+}
+
 impl Query for TransactReadQuery {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 54;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 2;
     type Input = Json<TransactWriteInput>;
-    type Output = Json<TransactionReadOutcome>;
+    type Output = TransactionReadQueryOutput;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         let images = match query_stage(context, input.operations)? {
             Ok(images) => images,
             Err((index, reason)) => {
-                return Ok(Json(TransactionReadOutcome::Rejected { index, reason }));
+                return Ok(TransactionReadQueryOutput(
+                    TransactionReadOutcome::Rejected { index, reason },
+                ));
             }
         };
-        Ok(Json(TransactionReadOutcome::Applied(images)))
+        Ok(TransactionReadQueryOutput(TransactionReadOutcome::Applied(
+            images,
+        )))
     }
 }
 
