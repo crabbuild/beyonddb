@@ -12,10 +12,10 @@ use cellule_runtime::{
 pub(super) struct Remote {
     pub(super) node: CellNode,
     _tasks: Arc<CellNodeTaskGroup>,
-    provisioner: Arc<CellInitialPartitionProvisioner>,
+    pub(super) provisioner: Arc<CellInitialPartitionProvisioner>,
     pub(super) session: SessionId,
     endpoint: String,
-    lease: CancellationToken,
+    pub(super) lease: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
 

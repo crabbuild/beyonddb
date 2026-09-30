@@ -208,6 +208,11 @@ impl CellInitialPartitionProvisioner {
         after: &mut Option<u32>,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
+        // The index can be owned by the same failed node as the unknown shard.
+        // Restore Idle/expired account authority before routing its discovery
+        // query; a live remote owner remains in place under the normal fence.
+        self.recover_discovered_owner(&account, crate::MODULE, initialize_account, nodes)
+            .await?;
         let page = client
             .query::<ListCoordinatorShards>(
                 &account,

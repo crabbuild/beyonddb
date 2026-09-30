@@ -11,6 +11,7 @@ use cellule_runtime::fleet::telemetry::{
     PublicationTiming,
 };
 use cellule_runtime::identity::CellId;
+use cellule_store::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -42,6 +43,40 @@ impl Timing {
     }
 }
 
+#[derive(Default)]
+struct StoreOperationMetrics {
+    timing: Timing,
+    started: AtomicU64,
+    bytes_read: AtomicU64,
+    bytes_written: AtomicU64,
+    outcomes: [AtomicU64; StorageOutcome::ALL.len()],
+}
+
+impl StoreOperationMetrics {
+    fn snapshot(&self) -> Value {
+        let mut value = self.timing.snapshot();
+        let started = self.started.load(Ordering::Relaxed);
+        let finished = self.timing.count.load(Ordering::Relaxed);
+        value["count"] = json!(finished);
+        value["started"] = json!(started);
+        value["in_flight"] = json!(started.saturating_sub(finished));
+        value["bytes_read"] = json!(self.bytes_read.load(Ordering::Relaxed));
+        value["bytes_written"] = json!(self.bytes_written.load(Ordering::Relaxed));
+        value["outcomes"] = Value::Object(
+            StorageOutcome::ALL
+                .into_iter()
+                .map(|outcome| {
+                    (
+                        outcome.label().to_owned(),
+                        json!(self.outcomes[outcome.index()].load(Ordering::Relaxed)),
+                    )
+                })
+                .collect(),
+        );
+        value
+    }
+}
+
 /// Fixed counters and timing sums; event callbacks perform no I/O or allocation.
 ///
 /// Snapshots observe concurrent atomics and are approximate, not a transactional
@@ -64,6 +99,7 @@ pub struct RuntimeMetrics {
     catalog: [Timing; 2],
     control: Timing,
     activation: [Timing; 5],
+    store: [StoreOperationMetrics; StorageOperation::ALL.len()],
 }
 
 impl RuntimeMetrics {
@@ -110,6 +146,9 @@ impl RuntimeMetrics {
             },
             "catalog_reads": {"head": self.catalog[0].snapshot(), "page": self.catalog[1].snapshot()},
             "control_reads": self.control.snapshot(),
+            "object_store": StorageOperation::ALL.into_iter().map(|operation| {
+                (operation.label().to_owned(), self.store[operation.index()].snapshot())
+            }).collect::<serde_json::Map<_, _>>(),
             "activation": {
                 "ownership": self.activation[0].snapshot(),
                 "resume": self.activation[1].snapshot(),
@@ -208,5 +247,85 @@ impl CellTelemetry for RuntimeMetrics {
             ActivationPhase::Activate => 4,
         };
         self.activation[index].record(elapsed, true);
+    }
+}
+
+impl StorageObserver for RuntimeMetrics {
+    fn started(&self, operation: StorageOperation) {
+        self.store[operation.index()]
+            .started
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn finished(&self, observation: StorageObservation) {
+        let metric = &self.store[observation.operation.index()];
+        metric
+            .bytes_read
+            .fetch_add(observation.bytes_read, Ordering::Relaxed);
+        metric
+            .bytes_written
+            .fetch_add(observation.bytes_written, Ordering::Relaxed);
+        metric.outcomes[observation.outcome.index()].fetch_add(1, Ordering::Relaxed);
+        metric.timing.record(
+            observation.duration,
+            observation.outcome == StorageOutcome::Success,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cellule_store::Store;
+    use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
+    use std::sync::Arc;
+    use tokio_util::bytes::Bytes;
+
+    #[tokio::test]
+    async fn store_metrics_observe_consumption_cancellation_and_missing_objects_without_labels() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        let store = Store::new(Arc::new(InMemory::new())).with_storage_observer(metrics.clone());
+        let path = Path::from("private-account/never-a-metric-label");
+        store
+            .inner()
+            .put(&path, Bytes::from_static(b"abc").into())
+            .await
+            .unwrap();
+        let body = store
+            .inner()
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"abc");
+        // A returned body is still an active operation until consumed or dropped.
+        let unconsumed = store.inner().get(&path).await.unwrap();
+        assert_eq!(metrics.snapshot()["object_store"]["get"]["in_flight"], 1);
+        drop(unconsumed);
+        assert!(
+            store
+                .inner()
+                .head(&Path::from("missing-private-object"))
+                .await
+                .is_err()
+        );
+        let snapshot = metrics.snapshot();
+        let get = &snapshot["object_store"]["get"];
+        assert_eq!(get["count"], 2);
+        assert_eq!(get["failed"], 1);
+        assert_eq!(get["bytes_read"], 3);
+        assert_eq!(get["in_flight"], 0);
+        assert_eq!(get["outcomes"]["success"], 1);
+        assert_eq!(get["outcomes"]["cancelled"], 1);
+        let put = &snapshot["object_store"]["put"];
+        assert_eq!(put["count"], 1);
+        assert_eq!(put["bytes_written"], 3);
+        assert_eq!(snapshot["object_store"]["head"]["outcomes"]["not_found"], 1);
+        let serialized = snapshot.to_string();
+        assert!(!serialized.contains("private-account"));
+        assert!(!serialized.contains("never-a-metric-label"));
+        assert!(!serialized.contains("missing-private-object"));
     }
 }

@@ -960,6 +960,11 @@ account's cursor advances before owner activation and wraps to find later
 registrations. Live remote owners stay in place. Idle or expired owners use the
 same catalog validation, node fencing, and Cell authority CAS as startup.
 
+Discovery first restores the account Cell that stores the shard registry if its
+owner is Idle or expired. Otherwise, losing that owner would prevent the worker
+from learning which new coordinator shards need recovery. A live account owner
+continues to serve the registry query; takeover still requires the normal fence.
+
 A cached empty-work receipt skips an Idle shard only when its incarnation and
 published commit sequence match. Unknown or changed roots must be inspected;
 completed history must not continuously churn the active-Cell pool. This cache

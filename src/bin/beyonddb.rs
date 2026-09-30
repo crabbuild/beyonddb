@@ -263,6 +263,14 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
             url_store.prefix().clone(),
         )
     };
+    let metrics = config
+        .runtime_metrics_file
+        .as_ref()
+        .map(|_| Arc::new(RuntimeMetrics::default()));
+    let store = match &metrics {
+        Some(metrics) => store.with_storage_observer(metrics.clone()),
+        None => store,
+    };
     let layout = CellStorageLayout::new(store, prefix, *APPLICATION_ID.as_bytes());
     let directory = NodeDirectory::new(layout.clone(), tls.fleet(), image, release);
     let peer_listener = TcpListener::bind(config.peer_bind).await?;
@@ -291,8 +299,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let node = builder.build()?;
     let node_shutdown = CancellationToken::new();
     let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
-    if let Some(path) = config.runtime_metrics_file.clone() {
-        let metrics = Arc::new(RuntimeMetrics::default());
+    if let Some((path, metrics)) = config.runtime_metrics_file.clone().zip(metrics) {
         node.install_telemetry(metrics.clone())?;
         let metrics_runtime = node.runtime();
         let cancellation = tasks.cancellation_token();

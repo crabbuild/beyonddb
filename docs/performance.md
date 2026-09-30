@@ -28,8 +28,10 @@ follower append while retaining identity, scope, lease, log authority, and fsync
 checks. Its counted-store and signed SDK process-kill tests pass. Host load was
 19.02→19.03 during BeyondDB and 19.03→20.34 during SQLite; fresh owner placement
 also varies between fixtures. This local sample does not establish a service
-speedup. Cellule's four CI workflows and BeyondDB Rust CI passed; full SDK CI
-remains in progress and previous peer recovery failures remain open.
+speedup. Cellule's four CI workflows and BeyondDB Rust CI passed. Full SDK CI
+failed one long peer recovery test; native SDK and process suites passed. The
+[recovery follow-up](../benchmarks/2026-09-30-account-discovery-verification/README.md)
+records the focused fix and the remaining full-scenario failure.
 
 ### Previous resident-routing release pair
 
@@ -427,6 +429,7 @@ a periodic snapshot task. A write failure logs a warning and sampling continues.
 | `durability_submissions`, `follower_appends` | Follower submission outcomes and append acknowledgement/failure counts |
 | `catalog_reads`, `control_reads` | Reads observed by the runtime telemetry hooks |
 | `node_resources` | Sampled active Cells, retained bytes, worker jobs, and unpublished log bytes |
+| `object_store` | Logical storage operations across the configured provider, including routing and enrollment I/O |
 
 Timing objects contain cumulative `count`, `failed`, `total_us`, and `max_us`.
 Durations use microseconds. Counter snapshots are approximate because work can
@@ -436,6 +439,14 @@ abandoned replies. Catalog/control counters do not cover all application or
 object-store reads. Application routing, peer metadata, and fresh bootstrap
 provisioning can bypass these hooks: zero activation/catalog/control counters
 do not imply zero work in those phases. These counters cannot provide p95 latency.
+
+`object_store` adds fixed operation and outcome labels, byte totals, `started`,
+and `in_flight` counts. It observes the shared provider used by the server, peer
+directory, and provisioner. A read finishes when its body is consumed or dropped;
+duration includes that lifetime, rather than measuring network time alone.
+`failed` includes normal `not_found`, `conflict`, and `cancelled` outcomes, so it
+is **not an SDK error count**. No object paths, tenant IDs, or credentials are
+recorded. These counters also include startup and background work.
 
 Save snapshots before and after a run, check that
 `first_snapshot_at_unix_ms` is unchanged, and check the freshness of
