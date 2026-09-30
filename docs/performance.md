@@ -4,6 +4,35 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [one-read follower append release pair](../benchmarks/2026-09-30-one-read-append-release/README.md)
+measures source `9b62001` and reviewed Cellule `8ca658b`
+([dependency PR](https://github.com/crabbuild/cellule/pull/31)). ExtendDB remains
+`7eaa89b`. All 24 cases completed per backend; BeyondDB recorded **four SDK
+errors** in eight-client TransactGetItems, while SQLite recorded zero.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 302.92 | 889.90 | 61.61 ms |
+| PutItem | 27.24 | 541.20 | 788.70 ms |
+| TransactGetItems | 0.62 | 685.53 | 7,935.19 ms* |
+| TransactWriteItems | 1.18 | 691.08 | 7,293.37 ms |
+
+\* Successful calls only; four failed requests are excluded. The report contains
+all APIs, both client counts, completed/error counts, runtime metrics, host
+snapshots, artifact hashes, and cleanup evidence. Only single-client
+DescribeTable and ListTables exceed SQLite in this sample. All eight-client
+rates remain below SQLite. The all-API performance objective is unmet.
+
+The approved change removes one consecutive canonical enrollment read per
+follower append while retaining identity, scope, lease, log authority, and fsync
+checks. Its counted-store and signed SDK process-kill tests pass. Host load was
+19.02→19.03 during BeyondDB and 19.03→20.34 during SQLite; fresh owner placement
+also varies between fixtures. This local sample does not establish a service
+speedup. Cellule's four CI workflows and BeyondDB Rust CI passed; full SDK CI
+remains in progress and previous peer recovery failures remain open.
+
+### Previous resident-routing release pair
+
 The [resident-routing release pair](../benchmarks/2026-09-30-resident-routing-release/README.md)
 measures source `c6fb584`, still pinned to Cellule `70bd25f` and ExtendDB `7eaa89b`.
 All 24 cases completed per backend. BeyondDB recorded two SDK errors in the
