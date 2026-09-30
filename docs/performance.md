@@ -4,6 +4,38 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [follower-phase release pair](../benchmarks/2026-09-30-follower-phases-release/README.md)
+measures source `22002dc`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
+Both backends completed all 24 cases with **zero SDK errors**.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 616.61 | 1307.63 | 20.03 ms |
+| PutItem | 61.24 | 1565.61 | 280.96 ms |
+| TransactGetItems | 2.46 | 1128.43 | 4472.35 ms |
+| TransactWriteItems | 1.83 | 1131.71 | 4676.52 ms |
+
+Only single-client ListTables exceeded SQLite. BeyondDB host load fell from
+16.94 to 13.58; SQLite ran afterward at
+13.58→11.78. Fresh owner placement also differs between fixtures.
+This instrumentation revision does not establish a speedup or fleet capacity.
+
+The new append observations recorded 2,948 samples per phase across all nodes:
+peer lookup mean 8.463 ms, HTTP round trip 26.766 ms, fresh enrollment
+12.071 ms, and durable append 14.247 ms. Receiver phases overlap the round trip;
+these event populations include background work and cannot be summed into SDK
+latency. SQL command execution mean was 0.386 ms, provider PUT mean 86.542 ms,
+and publication total mean 416.128 ms. The evidence supports examining cold
+transaction admission and object publication next, while retaining exact fences
+and fresh authorization. It does not isolate a network-only duration.
+
+[Phase verification](../benchmarks/2026-09-30-follower-phases-verification/README.md)
+passed all 27 library tests, formatting and strict Clippy, including actual mTLS
+append/reopen phase counts and cancellation accounting. Full signed peer/restart
+qualification and the all-API SQLite objective remain open.
+
+### Previous resident-admission release pair
+
 The [resident-admission release pair](../benchmarks/2026-09-30-resident-admission-release/README.md)
 measures source `6e92b5d`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. All 24
 cases completed per backend: BeyondDB recorded **four SDK errors** in
