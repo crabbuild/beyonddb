@@ -1,8 +1,31 @@
 # Measure BeyondDB performance
 
-BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: an item write waits for Cellule to publish the committed Cell state to an object store.
+BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: by default an item write waits for Cellule to publish committed state to object storage. Experimental follower durability can acknowledge a durable follower receipt while object tiering continues.
 
-The latest [release repeat after the peer read fix](../benchmarks/2026-09-30-peer-read-fallback/README.md)
+## Latest release verification
+
+The [peer owner-cache release pair](../benchmarks/2026-09-30-peer-owner-cache/README.md)
+uses source `138a128`, Cellule `30671d5`, three BeyondDB processes, four initial
+partitions, experimental follower durability, and signed boto3. Both backends
+completed all 24 cases. BeyondDB recorded **19 timeouts across five cases**;
+SQLite recorded zero errors. At eight clients BeyondDB measured 176.25
+`GetItem`, 2.27 `PutItem`, and 0.10 `TransactWriteItems` successful requests/s.
+One-minute host load reached 51.73 on 12 logical CPUs. This run does not prove
+a controlled speed improvement or production capacity, and the all-API
+SQLite objective remains unmet.
+
+A signed mTLS SQL regression proves that the opt-in private receiver cache
+removes repeated authority reads for a warm resident Cell, reloads after
+500 ms, and rejects unauthorized requests and reads after owner drain.
+Local ownership-race, placement, and process-kill durability tests passed;
+release and strict Clippy also passed. The preceding source's full SDK CI
+failed cross-owner transaction recovery, follower-log activation, and a large
+transaction capacity check. Full qualification on `138a128` remains pending.
+See the report for raw measurements, errors, sample counts, and test logs.
+
+## Earlier object-publication fixture
+
+The [release repeat after the peer read fix](../benchmarks/2026-09-30-peer-read-fallback/README.md)
 uses BeyondDB `832da2a`, Cellule `30671d5`, and pinned ExtendDB SQLite. Both
 backends completed all 24 signed API/client cases with **zero foreground
 errors**. At eight clients, BeyondDB/SQLite measured 857/778 `GetItem`,
@@ -17,8 +40,7 @@ differ between runs, so these rates do not prove a code-driven improvement.
 The peer read fix passed a signed remote-owner regression and the large
 binary/escaped transaction checks after owner restart. The longer recovery
 test subsequently failed an index-owner assertion with `owner=None` after
-the signed index query and journal acknowledgement converged. Full SDK CI
-qualification remains in progress. Zero foreground errors in this benchmark
+the signed index query and journal acknowledgement converged. That full SDK CI run did not pass. Zero foreground errors in this benchmark
 does not mean recovery qualification or the all-API performance target is met.
 
 The initial signed-API rerun on this pin used Cellule `30671d5` and ExtendDB SQLite

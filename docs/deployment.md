@@ -161,10 +161,11 @@ metadata immediately; changes made through another node become visible after
 the cache TTL. Enabling the flag also caches complete routed directory pages
 for point operations. The owning data Cell rejects a stale epoch and the
 server drops that route entry, so a split is refreshed on the next request. It
-also keeps immutable catalog proofs and resident Cell handles for 500 ms on
-both public request resolution and private peer invocation;
-the authority check resumes after that window, and a drained Cell handle still
-rejects work immediately. This short owner cache improves warm local latency
+also caches immutable catalog proofs. Resident Cell handles are cached for
+500 ms on both public request resolution and private peer invocation. Authority
+is checked again after that window, and a drained Cell handle still rejects
+work immediately. Peer enrollment and authorization are checked for every
+private request. This short owner cache avoids repeated authority lookups
 while bounding visibility of an ownership change.
 
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
