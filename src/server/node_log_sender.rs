@@ -564,6 +564,7 @@ mod tests {
         endpoint: String,
         tls: &LoadedPeerTls,
         follower: bool,
+        log_capable: bool,
         now_ms: i64,
         lease_ms: i64,
     ) -> NodeAdvertisement {
@@ -587,7 +588,7 @@ mod tests {
                 free_disk_bytes: 1 << 30,
                 follower_free_bytes: if follower { 1 << 30 } else { 0 },
                 job_credits: 8,
-                log_protocol: if follower {
+                log_protocol: if log_capable {
                     NODE_LOG_PROTOCOL_VERSION
                 } else {
                     0
@@ -653,6 +654,7 @@ mod tests {
                     follower_endpoint,
                     &follower_tls,
                     true,
+                    true,
                     now_ms,
                     15_000,
                 ),
@@ -667,6 +669,7 @@ mod tests {
                     leader_session,
                     "https://leader.internal:8081".into(),
                     &leader_tls,
+                    false,
                     false,
                     now_ms,
                     3_000,
@@ -814,5 +817,219 @@ mod tests {
             reopened.read_tail(leader_session, 2, 1).await.unwrap(),
             vec![saved]
         );
+    }
+
+    #[tokio::test]
+    async fn remote_claimant_recovers_persisted_follower_tail() {
+        let root = tempfile::TempDir::new().unwrap();
+        let ca_key = root.path().join("ca.key");
+        let ca = root.path().join("ca.crt");
+        run(Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&ca_key));
+        run(Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-new",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=BeyondDB Test CA",
+                "-addext",
+                "basicConstraints=critical,CA:TRUE",
+                "-key",
+            ])
+            .arg(&ca_key)
+            .arg("-out")
+            .arg(&ca));
+        let (leader_cert, leader_key) = certificate(root.path(), "leader", &ca, &ca_key);
+        let (follower_cert, follower_key) = certificate(root.path(), "follower", &ca, &ca_key);
+        let (claimant_cert, claimant_key) = certificate(root.path(), "claimant", &ca, &ca_key);
+        let leader_tls = LoadedPeerTls::load(&leader_cert, &leader_key, &ca, "localhost").unwrap();
+        let follower_tls =
+            LoadedPeerTls::load(&follower_cert, &follower_key, &ca, "localhost").unwrap();
+        let claimant_tls =
+            LoadedPeerTls::load(&claimant_cert, &claimant_key, &ca, "localhost").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let follower_endpoint = format!("https://{}", listener.local_addr().unwrap());
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("remote-follower-recovery-test"),
+            [42; 16],
+        );
+        let directory = NodeDirectory::new(
+            layout,
+            leader_tls.fleet(),
+            Digest::from_bytes([81; 32]),
+            Digest::from_bytes([82; 32]),
+        );
+        let leader_session = SessionId::from_bytes([1; 16]);
+        let follower_session = SessionId::from_bytes([2; 16]);
+        let claimant_session = SessionId::from_bytes([3; 16]);
+        let leader_node = NodeId::from_bytes([4; 16]);
+        let follower_node = NodeId::from_bytes([5; 16]);
+        let claimant_node = NodeId::from_bytes([6; 16]);
+        let now_ms = unix_time_ms().unwrap();
+        directory
+            .create(
+                advertisement(
+                    follower_node,
+                    follower_session,
+                    follower_endpoint,
+                    &follower_tls,
+                    true,
+                    true,
+                    now_ms,
+                    15_000,
+                ),
+                now_ms,
+            )
+            .await
+            .unwrap();
+        let leader = directory
+            .create(
+                advertisement(
+                    leader_node,
+                    leader_session,
+                    "https://leader.internal:8081".into(),
+                    &leader_tls,
+                    false,
+                    false,
+                    now_ms,
+                    3_000,
+                ),
+                now_ms,
+            )
+            .await
+            .unwrap();
+        let enrolled = directory
+            .try_recruit_log(&leader, 2, 4096, 16, now_ms)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            enrolled.advertisement().log().unwrap().members(),
+            &[follower_node]
+        );
+        directory
+            .create(
+                advertisement(
+                    claimant_node,
+                    claimant_session,
+                    "https://claimant.internal:8081".into(),
+                    &claimant_tls,
+                    false,
+                    true,
+                    now_ms,
+                    15_000,
+                ),
+                now_ms,
+            )
+            .await
+            .unwrap();
+
+        let limits = Limits::default();
+        let store = Arc::new(
+            FollowerStore::open(
+                root.path().join("follower-store"),
+                limits,
+                DiskBudget::new(1 << 30),
+            )
+            .unwrap(),
+        );
+        let runtime = CellRuntime::new_with_replica_host(
+            SqlWorkerPool::new(1, 8).unwrap(),
+            64 << 20,
+            follower_session,
+            Host::default(),
+        )
+        .unwrap();
+        let follower_guard = NodeLeaseGuard::new(now_ms, now_ms + 15_000).unwrap();
+        let receiver = node_log_receiver::FollowerEndpoint::new(
+            directory.clone(),
+            runtime,
+            follower_node,
+            store,
+            follower_guard,
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                follower_tls.listener(listener),
+                node_log_receiver::router(receiver)
+                    .into_make_service_with_connect_info::<PeerTlsIdentity>(),
+            )
+            .await
+        });
+        let leader_transport = PeerNodeLogTransport::new(
+            directory.clone(),
+            leader_tls.client_identity(),
+            leader_session,
+            leader_node,
+            NodeLeaseGuard::new(now_ms, now_ms + 15_000).unwrap(),
+        );
+        let saved = frame(limits, leader_session);
+        assert_eq!(
+            leader_transport
+                .append(
+                    follower_node,
+                    AppendRequest {
+                        leader_session,
+                        log_epoch: 2,
+                        frames: vec![saved.clone()],
+                        covered_through: 0,
+                    },
+                )
+                .await
+                .unwrap()
+                .durable_through,
+            1
+        );
+        let claimant_transport = PeerNodeLogTransport::new(
+            directory.clone(),
+            claimant_tls.client_identity(),
+            claimant_session,
+            claimant_node,
+            NodeLeaseGuard::new(now_ms, now_ms + 15_000).unwrap(),
+        );
+        assert!(
+            claimant_transport
+                .seal(
+                    follower_node,
+                    SealRequest {
+                        leader_session,
+                        log_epoch: 2,
+                    },
+                )
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        let fenced = directory
+            .claim_expired_for_recovery(leader_session, claimant_session, unix_time_ms().unwrap())
+            .await
+            .unwrap();
+        let recovery_transport: Arc<dyn NodeLogTransport> = Arc::new(claimant_transport.clone());
+        let recovery = NodeLogRecovery::from_fenced(recovery_transport, &fenced, limits)
+            .unwrap()
+            .with_recovery_scratch(root.path().to_owned());
+        let sealed = recovery.ensure_sealed_bounded().await.unwrap();
+        assert_eq!(sealed.frame_count(), 1);
+        assert_eq!(sealed.scopes(limits).unwrap()[0].cell, [4; 32]);
+        let page = claimant_transport
+            .tail_page(
+                follower_node,
+                TailRequest {
+                    leader_session,
+                    log_epoch: 2,
+                    first_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.frames, vec![saved]);
+        assert_eq!(page.next_sequence, None);
+        server.abort();
+        let _ = server.await;
     }
 }
