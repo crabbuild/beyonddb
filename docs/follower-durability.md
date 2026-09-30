@@ -50,7 +50,7 @@ fallback. These are durability conditions, not optional performance hints.
 | --- | --- |
 | Follower store | Open `FollowerStore` in each node's durable data directory, reserve disk, and retain lanes across process restart. Advertise follower capacity only after the store and authenticated listener are ready. |
 | Peer transport | Implement Cellule's `NodeLogTransport` append, seal, retire, and bounded tail operations over the private mTLS listener. Pin each remote certificate to its live node advertisement. Bound request bytes, time, and concurrent work. |
-| Follower authorization | Match the mTLS identity to the advertised session. Use `NodeDirectory::authorize_log_append`, `authorize_log_retire`, and `authorize_log_recovery` before touching a lane. Reject wrong members, epochs, coverage watermarks, and unfenced recovery attempts. |
+| Follower authorization | Match the mTLS identity to the advertised session. For each append, load one fresh `NodeDirectory::peer_verifier`, match caller to leader, and consume `EnrolledPeerVerifier::authorize_log_append`. Retirement and recovery use `NodeDirectory::authorize_log_retire` and `authorize_log_recovery` before touching a lane. Reject wrong members, epochs, coverage watermarks, and unfenced recovery attempts. |
 | Enrollment and authority | Implement `NodeDurabilityProvider` using `NodeDirectory::try_recruit_log`. Implement `NodeLogAuthority` with the directory's activate, coverage, and close CAS operations; reconcile CAS races with lease heartbeats without losing the enrolled log. Supply the exact session, node ID, members, lease guard, transport, and limits to `NodeDurabilityConfig`. |
 | Recovery | Before public readiness after an owner loss, seal and fetch the failed owner's authorized follower tail, reconcile object coverage, and restore acknowledged Cell commits. Do not return success for a write whose proof cannot be recovered on a successor. |
 | Lifecycle | Rotate and retire only after the recorded coverage barrier. Drain the node, settle publications, and preserve follower files if withdrawal or recovery has not completed. |
@@ -59,7 +59,13 @@ The private `BeyonddbPeers` router now has a bounded node-log receiver when
 `follower_store_bytes` is configured. It opens Cellule's persistent
 `FollowerStore` beneath `data_dir`, requires a live mTLS identity bound to the
 advertised session, and checks the directory's append, retirement, or fenced
-recovery authority before touching a lane. The outbound
+recovery authority before touching a lane. Append identity and authority use the same fresh canonical signed record:
+certificate/key/fleet/image/release are validated during enrollment, then lease
+expiry is rechecked after I/O along with ensemble, epoch, open phase, and covered
+watermark. The canonical read is the authorization observation for this request;
+concurrent record changes after it do not cause a second read. A new proof is
+loaded for every request. Local lease fencing, durable append and the final
+response fence still apply. The outbound
 `PeerNodeLogTransport` resolves a live advertised member, pins its certificate
 and key, and bounds requests, replies, and tail paging. Tests cover a durable
 append and duplicate append over real two-identity mTLS, follower-store

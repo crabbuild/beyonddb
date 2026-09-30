@@ -75,7 +75,8 @@ impl FollowerEndpoint {
     ) -> Result<Vec<u8>> {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
-        self.directory
+        let enrollment = self
+            .directory
             .peer_verifier(request.caller, certificate, public_key, now_ms)
             .await?;
         self.guard.check()?;
@@ -87,15 +88,14 @@ impl FollowerEndpoint {
                         "follower append caller is not leader",
                     ));
                 }
-                self.directory
-                    .authorize_log_append(
-                        request.leader,
-                        self.member,
-                        request.epoch,
-                        request.argument,
-                        now_ms,
-                    )
-                    .await?;
+                // Use this request's fresh mTLS-bound canonical observation;
+                // recheck expiry after provider I/O before any durable append.
+                enrollment.authorize_log_append(
+                    self.member,
+                    request.epoch,
+                    request.argument,
+                    now_ms,
+                )?;
                 self.guard.check()?;
                 encode_receipt(
                     self.store
@@ -492,9 +492,13 @@ mod tests {
         ltx::{CellStorageLayout, DiskBudget, Host, Limits},
         node::{NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeFailureDomain},
     };
-    use cellule_store::Store;
+    use cellule_store::{Store, test_support::CountingObjectStore};
     use ed25519_dalek::SigningKey;
-    use object_store::{memory::InMemory, path::Path};
+    use object_store::{
+        memory::InMemory,
+        path::Path,
+        throttle::{ThrottleConfig, ThrottledStore},
+    };
 
     fn request(tag: u8, count: u32, frames: &[&[u8]]) -> Bytes {
         let mut encoded = Vec::new();
@@ -611,13 +615,20 @@ mod tests {
     #[tokio::test]
     async fn authenticated_append_survives_reopen_and_rejects_wrong_peer() {
         let limits = Limits::default();
+        let counted = Arc::new(CountingObjectStore::new(Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig {
+                wait_get_per_call: std::time::Duration::from_millis(5),
+                ..ThrottleConfig::default()
+            },
+        ))));
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(counted.clone()),
             Path::from("follower-receiver-test"),
             [42; 16],
         );
         let directory = NodeDirectory::new(
-            layout,
+            layout.clone(),
             Digest::from_bytes([80; 32]),
             Digest::from_bytes([81; 32]),
             Digest::from_bytes([82; 32]),
@@ -702,13 +713,56 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(
+            endpoint
+                .dispatch_with_identity(append(), Digest::from_bytes([21; 32]), [99; 32])
+                .await
+                .is_err()
+        );
+        assert!(
+            endpoint
+                .dispatch_with_identity(
+                    WireRequest {
+                        caller: follower,
+                        ..append()
+                    },
+                    Digest::from_bytes([22; 32]),
+                    SigningKey::from_bytes(&[22; 32]).verifying_key().to_bytes(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            endpoint
+                .dispatch_with_identity(
+                    WireRequest {
+                        argument: 1,
+                        ..append()
+                    },
+                    Digest::from_bytes([21; 32]),
+                    leader_key,
+                )
+                .await
+                .is_err()
+        );
         assert_eq!(store.retained_bytes(), 0);
         for _ in 0..2 {
+            counted.reset();
             let result = endpoint
                 .dispatch_with_identity(append(), Digest::from_bytes([21; 32]), leader_key)
                 .await
                 .unwrap();
             assert_eq!(&result[result.len() - 8..], &1_u64.to_be_bytes());
+            let requests = counted.requests();
+            assert_eq!(
+                requests.len(),
+                1,
+                "each append needs one canonical enrollment read"
+            );
+            assert_eq!(
+                requests[0].location,
+                layout.node_path(leader.as_bytes()).to_string()
+            );
         }
         assert!(
             endpoint

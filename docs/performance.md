@@ -4,6 +4,32 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [resident-routing release pair](../benchmarks/2026-09-30-resident-routing-release/README.md)
+measures source `c6fb584`, still pinned to Cellule `70bd25f` and ExtendDB `7eaa89b`.
+All 24 cases completed per backend. BeyondDB recorded two SDK errors in the
+eight-client TransactGetItems case; SQLite recorded none.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 359.56 | 975.69 | 58.69 ms |
+| PutItem | 42.26 | 523.24 | 421.49 ms |
+| TransactGetItems | 0.78 | 595.03 | 9,243.71 ms* |
+| TransactWriteItems | 1.47 | 528.34 | 5,746.33 ms |
+
+\* Successful requests only; two failed requests are excluded. See the report
+for all APIs, both client counts, sample sizes, first-error details and raw logs.
+DescribeTable and ListTables exceed this SQLite sample at both client counts;
+item operations and transactions remain slower. The all-API objective is unmet.
+
+Host load was 17.02→21.29 during BeyondDB and 21.19→18.06 during SQLite, with
+roughly 19.6 GiB of allocated swap on the 12-CPU workstation. These sequential
+samples do not isolate a code improvement from host conditions. Native SDK and
+process CI passed, but one long peer recovery test failed; full qualification
+remains open. The approved one-read follower append change is not included in
+this measured release.
+
+### Previous Cellule upgrade release pair
+
 The [Cellule `70bd25f` release rerun](../benchmarks/2026-09-30-cellule-70bd25f/README.md)
 uses source `37b25ff`, upgraded from Cellule `30671d5` to the latest `origin/main`
 checked on September 30. All six direct dependencies and seven lockfile packages
@@ -45,8 +71,8 @@ pressure regression now passes after one bounded retry of a proven not-started
 query. The original long test passed that step, then failed coordinator recovery.
 The opt-in resident resolver also avoids authority reads after handle-cache expiry
 and checks the current actor before reusing a cached handle. Signed owner-expiry
-recovery passes with caches off and on. These source changes have no new API
-throughput measurement yet; see the [follow-up verification record](../benchmarks/2026-09-30-cellule-resident-verification/README.md).
+recovery passes with caches off and on. These source changes are now measured in the resident-routing pair above;
+see the [follow-up verification record](../benchmarks/2026-09-30-cellule-resident-verification/README.md).
 Two local process-suite attempts failed owner recovery and subsequent fixture
 creation; Docker’s filesystem had almost no free inodes. All eight process tests
 passed in CI. Full recovery qualification remains open.
