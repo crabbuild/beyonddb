@@ -20,9 +20,12 @@ historical context rather than a matched baseline for the new pin. An
 [earlier attempt at that pin](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
 stopped after ten BeyondDB cases when eight-client TransactGetItems returned
 a throttling cancellation. On the `9e17746` pin, GitHub Actions later passed
-all seven server-binary restart tests and 47 of 48 peer-network tests. The
-remaining two-owner large-transaction recovery test failed; qualification
-for the `30671d5` pin is in progress.
+all seven server-binary restart tests and 47 of 48 peer-network tests. On the
+new `30671d5` pin, the first GitHub qualification run passed all 46 elastic
+tests, 46 of 48 peer-network tests, and six of seven server-binary tests.
+Concurrent-delete placement, a two-owner large binary transaction read, and
+an oversized same-Cell read failed. A repeat full run is in progress; the
+new pin is not yet fully qualified.
 
 ## Refresh of the earlier high-throughput sample
 
