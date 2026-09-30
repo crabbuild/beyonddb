@@ -130,6 +130,23 @@ installed during node startup, before `CellNode::start`. Cellule selects a
 complete follower ensemble from the live fleet, so this fixture's additional
 frontend means two eligible followers are required for recruitment.
 
+## Enable the experimental path
+
+Add these fields to each node's existing server configuration:
+
+```json
+{
+  "follower_store_bytes": 1073741824,
+  "follower_durability_enabled": true
+}
+```
+
+Use distinct node IDs, certificates, and persistent directories. A three-node
+fixture provides two enrolled followers for each leader. When an eligible
+ensemble is unavailable, SDK writes retain the object-publication path. The
+[server verification and release comparison](../benchmarks/2026-09-30-follower-server/README.md)
+records the tested scope, request errors, and remaining performance gaps.
+
 ## Verification before comparing throughput
 
 1. Prove append, duplicate append, lost acknowledgement, seal, tail paging,
