@@ -52,10 +52,15 @@ fallback. These are durability conditions, not optional performance hints.
 | Lifecycle | Rotate and retire only after the recorded coverage barrier. Drain the node, settle publications, and preserve follower files if withdrawal or recovery has not completed. |
 
 The current `BeyonddbPeers` router forwards Cell requests. It does not expose
-node-log operations. The current server advertises no usable follower
-capacity. Adding a local in-process follower under a second logical node ID
-would not provide an independent failure domain and must not be used as a
-production durability shortcut.
+node-log operations. The lease-bound `PublishedNodeLogAuthority` adapter can
+enroll a follower set and apply the directory's activation, coverage, and
+close transitions. It serializes those mutations with heartbeat refreshes
+and reloads an exact session after an ambiguous CAS. An in-memory directory
+test covers those transitions and lease fencing. The serving binary does not yet
+install a durability provider or use that adapter, and it advertises no
+usable follower capacity. Adding a local in-process follower under a second
+logical node ID would not provide an independent failure domain and must not
+be used as a production durability shortcut.
 
 ## Verification before comparing throughput
 

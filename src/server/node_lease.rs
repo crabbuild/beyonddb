@@ -7,6 +7,7 @@ use std::{
 
 use cellule_runtime::node::{NodeAdvertisement, NodeDirectory, VersionedNodeAdvertisement};
 use cellule_runtime::{Error, NodeLeaseGuard, Result};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 // Use the runtime's maximum advertisement lifetime for storage refresh headroom.
@@ -50,7 +51,8 @@ impl NodeLeasePublisher {
         let guard = NodeLeaseGuard::new(unix_time_ms()?, observed.advertisement().expires_at_ms())?;
         Ok(PublishedNodeLease {
             publisher: self,
-            observed,
+            session: observed.advertisement().session(),
+            observed: Arc::new(Mutex::new(observed)),
             guard,
             fence_on_drop: true,
         })
@@ -73,7 +75,8 @@ impl NodeLeasePublisher {
 /// Retained lease task for a serving Cell node.
 pub struct PublishedNodeLease {
     publisher: NodeLeasePublisher,
-    observed: VersionedNodeAdvertisement,
+    session: cellule_runtime::identity::SessionId,
+    observed: Arc<Mutex<VersionedNodeAdvertisement>>,
     guard: NodeLeaseGuard,
     fence_on_drop: bool,
 }
@@ -83,6 +86,20 @@ impl PublishedNodeLease {
     #[must_use]
     pub fn guard(&self) -> NodeLeaseGuard {
         self.guard.clone()
+    }
+
+    /// Bind node-log CAS operations to this exact published boot session.
+    ///
+    /// The adapter reloads the authoritative record after heartbeat races;
+    /// it cannot publish once this lease guard is fenced.
+    #[must_use]
+    pub fn log_authority(&self) -> super::PublishedNodeLogAuthority {
+        super::PublishedNodeLogAuthority::new(
+            self.publisher.directory.clone(),
+            self.session,
+            self.guard.clone(),
+            Arc::clone(&self.observed),
+        )
     }
 
     /// Refresh the authoritative lease until cancellation or terminal failure.
@@ -134,15 +151,16 @@ impl PublishedNodeLease {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
         let next = self.publisher.advertisement(now_ms).await?;
+        let mut observed = self.observed.lock().await;
         self.guard.check()?;
-        let observed = self
+        let renewed = self
             .publisher
             .directory
-            .refresh(&self.observed, next, now_ms)
+            .refresh(&observed, next, now_ms)
             .await?;
         self.guard
-            .renew(unix_time_ms()?, observed.advertisement().expires_at_ms())?;
-        self.observed = observed;
+            .renew(unix_time_ms()?, renewed.advertisement().expires_at_ms())?;
+        *observed = renewed;
         Ok(())
     }
 }

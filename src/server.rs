@@ -2,11 +2,13 @@
 
 mod capacity;
 mod node_lease;
+mod node_log_authority;
 mod peer_receiver;
 mod placement;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
+pub use node_log_authority::PublishedNodeLogAuthority;
 
 use std::sync::Arc;
 
