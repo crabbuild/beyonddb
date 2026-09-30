@@ -108,7 +108,12 @@ impl NoReturnBatcher {
 
     async fn flush_slot(self: Arc<Self>, slot: Arc<Slot>) {
         loop {
-            tokio::time::sleep(BATCH_WINDOW).await;
+            // A full queue has already had its chance to coalesce. In
+            // particular, avoid adding a fresh window after the preceding
+            // durable command completed while more writers were waiting.
+            if slot.queued.lock().await.len() < MAX_BATCH_OPERATIONS {
+                tokio::time::sleep(BATCH_WINDOW).await;
+            }
             let batch = {
                 let mut queued = slot.queued.lock().await;
                 let Some(first) = queued.front() else {
@@ -158,10 +163,10 @@ impl NoReturnBatcher {
             if pending.is_empty() {
                 continue;
             }
-            let operations = pending
-                .iter()
-                .map(|pending| pending.mutation.operation.clone())
-                .collect();
+            let (operations, replies): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .map(|pending| (pending.mutation.operation, pending.reply))
+                .unzip();
             let result = self
                 .client
                 .command::<PartitionTransactWriteNoReturn>(
@@ -169,8 +174,8 @@ impl NoReturnBatcher {
                     match mutation_identity() {
                         Ok(identity) => identity,
                         Err(error) => {
-                            for pending in pending {
-                                let _ = pending.reply.send(Err(error.clone()));
+                            for reply in replies {
+                                let _ = reply.send(Err(error.clone()));
                             }
                             continue;
                         }
@@ -187,8 +192,8 @@ impl NoReturnBatcher {
                 Err(InvocationError::Rejected(committed)) => partition_outcome(committed.output.0),
                 Err(error) => Err(cell_error(error)),
             };
-            for pending in pending {
-                let _ = pending.reply.send(outcome.clone());
+            for reply in replies {
+                let _ = reply.send(outcome.clone());
             }
         }
     }
