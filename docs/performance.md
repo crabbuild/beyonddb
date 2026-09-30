@@ -16,6 +16,12 @@ A later pair of fresh release fixtures exercised all 12 benchmark APIs with the 
 
 These sequential cases ran while other virtual machines consumed CPU, and host load changed between fixtures. ExtendDB's SQLite development mode uses open authorization and local-file durability, while BeyondDB verified IAM and waited for RustFS publication. The result identifies the remaining work; it does not establish a controlled throughput ratio or a production capacity target.
 
+A separate [direct RustFS PUT probe](../benchmarks/2026-09-29-rustfs-put-probe/README.md)
+measured object-store calls without the DynamoDB or Cell request path. It ran
+under even higher host load, so its rates are diagnostic. It reinforces the
+need to measure publication I/O and evaluate Cellule's follower durability
+path before expecting local SQLite write latency from this RustFS fixture.
+
 ## What a request waits for
 
 ```text
