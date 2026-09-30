@@ -256,7 +256,7 @@ impl Command for TransactRead {
 /// serialized with commands while avoiding a durable mutation publication.
 pub struct TransactReadQuery;
 
-/// Bounded JSON read result with an explicit fallback for oversized aggregates.
+/// Compact read images with an explicit fallback for oversized aggregates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TransactionReadQueryOutput(pub TransactionReadOutcome);
 
@@ -264,20 +264,34 @@ impl WireValue for TransactionReadQueryOutput {
     fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
         encode_read_query(
             &self.0,
+            match &self.0 {
+                TransactionReadOutcome::Applied(images) => Some(images),
+                _ => None,
+            },
             &TransactionReadOutcome::SavedImagesRequired,
             encoder,
         )
     }
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
-        Ok(Self(Json::<TransactionReadOutcome>::decode(decoder)?.0))
+        Ok(Self(
+            if let Some(images) = crate::decode_read_query_images(decoder)? {
+                TransactionReadOutcome::Applied(images)
+            } else {
+                let outcome = Json::<TransactionReadOutcome>::decode(decoder)?.0;
+                if matches!(outcome, TransactionReadOutcome::Applied(_)) {
+                    return Err(CodecError::Invalid("read images require compact envelope"));
+                }
+                outcome
+            },
+        ))
     }
 }
 
 impl Query for TransactReadQuery {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 54;
-    const CODEC_VERSION: u32 = 2;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<TransactWriteInput>;
     type Output = TransactionReadQueryOutput;
 

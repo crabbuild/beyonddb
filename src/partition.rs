@@ -108,7 +108,7 @@ static QUERIES: [OperationDescriptor; 18] = [
     operation(17),
     operation(18),
     OperationDescriptor {
-        codec_version: 2,
+        codec_version: 3,
         ..operation(19)
     },
 ];

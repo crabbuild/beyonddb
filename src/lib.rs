@@ -8,6 +8,7 @@ mod directory;
 mod expression_wire;
 mod global_index;
 mod item_storage;
+mod item_wire;
 mod items;
 mod participant;
 mod partition;
@@ -277,7 +278,7 @@ static QUERIES: [OperationDescriptor; 32] = [
     operation(48),
     operation(49),
     OperationDescriptor {
-        codec_version: 2,
+        codec_version: 3,
         ..operation(54)
     },
 ];
@@ -513,21 +514,46 @@ impl cellule_runtime::registry::CellModule for AccountModule {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Json<T>(pub T);
 
-// An oversized read result must remain an application outcome across peer hops.
-// Peer codec failures do not preserve the typed limit error needed by the caller.
+// Compact images avoid JSON binary/escape expansion across peer hops. Keep an
+// explicit saved-image fallback when even the compact aggregate exceeds the
+// operation envelope; non-item outcomes retain canonical JSON.
 fn encode_read_query<T: Serialize>(
     value: &T,
+    images: Option<&[Option<Item>]>,
     fallback: &T,
     encoder: &mut BoundedEncoder,
 ) -> std::result::Result<(), CodecError> {
-    let mut bytes = serde_json::to_vec(value)
+    let json = if let Some(images) = images {
+        match item_wire::images_size(images) {
+            Ok(size) if size < OPERATION_BYTES as usize => {
+                encoder.write_u8(1)?;
+                return item_wire::encode_images(images, encoder);
+            }
+            Ok(_) | Err(CodecError::Limit) => fallback,
+            Err(error) => return Err(error),
+        }
+    } else {
+        value
+    };
+    let mut bytes = serde_json::to_vec(json)
         .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
-    // write_bytes includes a four-byte length prefix in the operation budget.
-    if bytes.len() > OPERATION_BYTES as usize - 4 {
+    // The JSON envelope has a tag and a four-byte length prefix.
+    if bytes.len() > OPERATION_BYTES as usize - 5 {
         bytes = serde_json::to_vec(fallback)
             .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
     }
+    encoder.write_u8(0)?;
     encoder.write_bytes(&bytes)
+}
+
+fn decode_read_query_images(
+    decoder: &mut BoundedDecoder<'_>,
+) -> std::result::Result<Option<Vec<Option<Item>>>, CodecError> {
+    match decoder.read_u8()? {
+        0 => Ok(None),
+        1 => item_wire::decode_images(decoder).map(Some),
+        _ => Err(CodecError::Invalid("unknown transaction read envelope")),
+    }
 }
 
 impl<T> WireValue for Json<T>
@@ -569,8 +595,116 @@ mod transaction_read_codec_tests {
     }
 
     #[test]
-    fn transaction_read_codecs_preserve_small_results_and_signal_large_aggregates() {
-        for (count, size, oversized) in [(1, 100, false), (10, 380 * 1024, true)] {
+    fn compact_read_preserves_nested_attributes_and_all_outcomes() {
+        use std::collections::BTreeSet;
+        let attributes = Item::from([
+            (
+                "string".into(),
+                AttributeValue::S(['\0', '\n', '\\', '"', '界'].into_iter().collect()),
+            ),
+            ("number".into(), AttributeValue::N("-123.456".into())),
+            ("binary".into(), AttributeValue::B(vec![0, 128, 255])),
+            (
+                "strings".into(),
+                AttributeValue::SS(BTreeSet::from(["a".into(), "界".into()])),
+            ),
+            (
+                "numbers".into(),
+                AttributeValue::NS(BTreeSet::from([
+                    "-2".into(),
+                    "10000000000000000000000000000000000000".into(),
+                ])),
+            ),
+            (
+                "binaries".into(),
+                AttributeValue::BS(BTreeSet::from([vec![0], vec![255]])),
+            ),
+            ("boolean".into(), AttributeValue::Bool(true)),
+            ("null".into(), AttributeValue::Null),
+            (
+                "list".into(),
+                AttributeValue::L(vec![
+                    AttributeValue::Bool(false),
+                    AttributeValue::M(Item::from([("nested".into(), AttributeValue::B(vec![]))])),
+                ]),
+            ),
+            (
+                "map".into(),
+                AttributeValue::M(Item::from([("value".into(), AttributeValue::S("".into()))])),
+            ),
+        ]);
+        let images = vec![Some(attributes), None, Some(Item::new())];
+        let account = TransactionReadOutcome::Applied(images.clone());
+        let partition = PartitionTransactReadOutcome::Applied(images);
+        assert_eq!(
+            roundtrip(TransactionReadQueryOutput(account.clone())).0,
+            account
+        );
+        assert_eq!(
+            roundtrip(PartitionTransactReadQueryOutput(partition.clone())).0,
+            partition
+        );
+        for outcome in [
+            PartitionTransactReadOutcome::NotInstalled,
+            PartitionTransactReadOutcome::StaleRoute,
+            PartitionTransactReadOutcome::Sealed,
+            PartitionTransactReadOutcome::NotReady,
+            PartitionTransactReadOutcome::WrongPartition,
+            PartitionTransactReadOutcome::SavedImagesRequired,
+            PartitionTransactReadOutcome::Rejected {
+                index: 3,
+                reason: TransactionFailure::Conflict,
+            },
+        ] {
+            assert_eq!(
+                roundtrip(PartitionTransactReadQueryOutput(outcome.clone())).0,
+                outcome
+            );
+        }
+        let rejected = TransactionReadOutcome::Rejected {
+            index: 2,
+            reason: TransactionFailure::Validation("invalid read".into()),
+        };
+        assert_eq!(
+            roundtrip(TransactionReadQueryOutput(rejected.clone())).0,
+            rejected
+        );
+    }
+
+    #[test]
+    fn read_images_reject_noncanonical_json_envelopes() {
+        let mut encoder = BoundedEncoder::new(OPERATION_BYTES).unwrap();
+        encoder.write_u8(0).unwrap();
+        Json(TransactionReadOutcome::Applied(vec![]))
+            .encode(&mut encoder)
+            .unwrap();
+        let bytes = encoder.finish();
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        assert!(TransactionReadQueryOutput::decode(&mut decoder).is_err());
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        assert!(PartitionTransactReadQueryOutput::decode(&mut decoder).is_err());
+    }
+
+    #[test]
+    fn compact_read_keeps_large_escaped_strings_inside_the_query_envelope() {
+        let images = vec![
+            Some(Item::from([(
+                "payload".into(),
+                AttributeValue::S("\0".repeat(380 * 1024))
+            )]));
+            10
+        ];
+        let value = TransactionReadOutcome::Applied(images);
+        assert!(roundtrip(TransactionReadQueryOutput(value.clone())).0 == value);
+    }
+
+    #[test]
+    fn transaction_read_codecs_preserve_legal_aggregates_and_bound_output() {
+        for (count, size, oversized) in [
+            (1, 100, false),
+            (10, 380 * 1024, false),
+            (12, 380 * 1024, true),
+        ] {
             let images = vec![
                 Some(Item::from([(
                     "payload".into(),
@@ -589,8 +723,14 @@ mod transaction_read_codec_tests {
                     PartitionTransactReadOutcome::SavedImagesRequired
                 );
             } else {
-                assert_eq!(account_result, account);
-                assert_eq!(partition_result, partition);
+                assert!(
+                    account_result == account,
+                    "legal account aggregate must retain all items"
+                );
+                assert!(
+                    partition_result == partition,
+                    "legal partition aggregate must retain all items"
+                );
             }
         }
     }

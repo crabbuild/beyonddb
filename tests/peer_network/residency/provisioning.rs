@@ -178,7 +178,7 @@ pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn oversized_transaction_read_from_remote_owner_uses_saved_images() {
+async fn large_transaction_read_from_remote_owner_keeps_read_only_snapshot() {
     use aws_sdk_dynamodb::types::{Get, TransactGetItem};
 
     let fixture = Fixture::with_partition_count(1).await;
@@ -242,9 +242,72 @@ async fn oversized_transaction_read_from_remote_owner_uses_saved_images() {
         .await
         .unwrap();
     assert_eq!(result.responses().len(), expected.len());
-    for (response, item) in result.responses().iter().zip(expected) {
-        assert_eq!(response.item(), Some(&item));
+    for (response, item) in result.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
     }
+    let after = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.value().root,
+        owner.value().root,
+        "large binary read must not publish participant mutations"
+    );
+    // Rewrite through the returning PutItem path, whose declared input envelope
+    // can carry a legal item expanded by JSON escaping.
+    for item in &mut expected {
+        item.insert(
+            "payload".into(),
+            AwsAttributeValue::S("\0".repeat(380 * 1024)),
+        );
+        sdk.put_item()
+            .table_name("Residency")
+            .set_item(Some(item.clone()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .unwrap();
+    }
+    let before = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let reads = expected
+        .iter()
+        .map(|item| {
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    let read = sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    for (response, item) in read.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
+    }
+    let after = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.value().root,
+        before.value().root,
+        "escaped string read must not publish participant mutations"
+    );
     remote.shutdown().await;
     fixture.shutdown().await;
 }

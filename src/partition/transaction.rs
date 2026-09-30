@@ -204,7 +204,7 @@ impl Command for PartitionTransactRead {
 /// Read a transaction batch through Cellule's read-only query path.
 pub struct PartitionTransactReadQuery;
 
-/// Bounded JSON read result with an explicit fallback for oversized aggregates.
+/// Compact read images with an explicit fallback for oversized aggregates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PartitionTransactReadQueryOutput(pub PartitionTransactReadOutcome);
 
@@ -212,6 +212,10 @@ impl WireValue for PartitionTransactReadQueryOutput {
     fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
         crate::encode_read_query(
             &self.0,
+            match &self.0 {
+                PartitionTransactReadOutcome::Applied(images) => Some(images),
+                _ => None,
+            },
             &PartitionTransactReadOutcome::SavedImagesRequired,
             encoder,
         )
@@ -219,7 +223,15 @@ impl WireValue for PartitionTransactReadQueryOutput {
 
     fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
         Ok(Self(
-            Json::<PartitionTransactReadOutcome>::decode(decoder)?.0,
+            if let Some(images) = crate::decode_read_query_images(decoder)? {
+                PartitionTransactReadOutcome::Applied(images)
+            } else {
+                let outcome = Json::<PartitionTransactReadOutcome>::decode(decoder)?.0;
+                if matches!(outcome, PartitionTransactReadOutcome::Applied(_)) {
+                    return Err(CodecError::Invalid("read images require compact envelope"));
+                }
+                outcome
+            },
         ))
     }
 }
@@ -227,7 +239,7 @@ impl WireValue for PartitionTransactReadQueryOutput {
 impl Query for PartitionTransactReadQuery {
     const MODULE: &'static str = DATA_MODULE;
     const ID: u32 = 19;
-    const CODEC_VERSION: u32 = 2;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<PartitionTransactWriteInput>;
     type Output = PartitionTransactReadQueryOutput;
 
