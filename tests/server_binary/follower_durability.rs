@@ -5,9 +5,14 @@ use std::sync::{Arc, Mutex};
 use axum::{body::Body, extract::State, http::Request, response::Response};
 use beyonddb::{APPLICATION_ID, Beyonddb};
 use cellule_app::CellApplication;
-use cellule_peer_http::LoadedPeerTls;
+use cellule_peer_http::{LoadedPeerTls, PeerHttpRoundTrip};
 use cellule_runtime::{
-    Digest, control::authority::CellAuthority, ltx::CellStorageLayout, node::NodeDirectory,
+    Digest,
+    client::CellClient,
+    control::authority::CellAuthority,
+    ltx::CellStorageLayout,
+    node::NodeDirectory,
+    peer::{PeerPrincipal, PeerSigner},
     registry::BuildDescriptor,
 };
 use cellule_store::Store;
@@ -114,6 +119,7 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
     config["follower_store_bytes"] = json!(1_u64 << 30);
     config["follower_durability_enabled"] = json!(true);
     config["auth_cache_enabled"] = json!(true);
+    config["runtime_metrics_file"] = json!(root.join("owner-metrics.json"));
     fs::write(&fixture.config, config.to_string()).unwrap();
     let mut followers = Vec::new();
     for name in ["follower-a", "follower-b"] {
@@ -132,6 +138,7 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         next["owned_accounts"] = json!([]);
         next["owned_access_keys"] = json!([]);
         next["bootstrap"] = serde_json::Value::Null;
+        next["runtime_metrics_file"] = json!(root.join(format!("{name}-metrics.json")));
         let path = root.join(format!("{name}.json"));
         let log = root.join(format!("{name}.log"));
         fs::write(&path, next.to_string()).unwrap();
@@ -179,7 +186,7 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
     );
     let authority = CellAuthority::new(layout.clone());
     let directory = NodeDirectory::new(
-        layout,
+        layout.clone(),
         tls.fleet(),
         application.descriptor_digest(),
         application.registry().release_digest(),
@@ -237,7 +244,10 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
             .await
             .unwrap()
             .unwrap();
-        if node.advertisement().log().is_some_and(|log| log.active()) {
+        // Enrollment is sufficient to submit the first cut. Normal warmup
+        // writes can all win object publication and leave the log inactive.
+        // The withheld write below must force fsync and authoritative activation.
+        if node.advertisement().log().is_some() {
             break owner;
         }
         if Instant::now() >= deadline {
@@ -247,17 +257,72 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
                         .iter()
                         .map(|node| (node.node(), node.session(), node.capacity(), node.log()))
                         .collect::<Vec<_>>();
-                    panic!(
-                        "owner never activated a follower log; live node capacity: {capacity:?}"
-                    );
+                    panic!("owner never enrolled a follower log; live node capacity: {capacity:?}");
                 }
                 Err(error) => {
-                    panic!("owner never activated a follower log; directory read failed: {error}");
+                    panic!("owner never enrolled a follower log; directory read failed: {error}");
                 }
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
+    // Obtain the owner's FIFO observation after the last warmup command, then
+    // wait for that exact committed sequence to reach object storage. An SDK
+    // acknowledgement may use follower durability while publication is pending.
+    let local = directory
+        .live(now_ms(), 16)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|node| node.endpoint() == format!("https://{}", fixture.peer))
+        .unwrap();
+    let session = local.session();
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let client = CellClient::peer(
+        application.registry(),
+        Arc::new(PeerSigner::new(
+            session,
+            application.registry().release_digest(),
+            tls.signing_key().clone(),
+        )),
+        PeerPrincipal {
+            issuer: format!("beyonddb-peer:{}", hex(directory.fleet().as_bytes())),
+            subject: hex(session.as_bytes()),
+            actions: vec!["beyonddb.cell.invoke".into()],
+        },
+        Arc::new(PeerHttpRoundTrip::new(
+            Arc::new(beyonddb::BeyonddbPeerScope),
+            authority.clone(),
+            directory.clone(),
+            Arc::new(tls.client_identity()),
+            session,
+        )),
+    );
+    let warmup = client
+        .query::<beyonddb::ReadPartitionState>(&target, None, beyonddb::Json(()))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let published = authority.load(target.cell_id()).await.unwrap().unwrap();
+            if published
+                .value()
+                .root
+                .as_ref()
+                .is_some_and(|root| root.commit_sequence >= warmup.receipt.commit_sequence)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("all warmup commits must publish before the object barrier is installed");
     let before = authority.load(target.cell_id()).await.unwrap().unwrap();
     let predecessor = before.value().root.as_ref().unwrap().commit_sequence;
     let cell = target
@@ -292,6 +357,41 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
     .await
     .expect("follower proof must acknowledge while object publication is withheld")
     .unwrap();
+    let active = directory
+        .load(owner.session, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        active.advertisement().log().is_some_and(|log| log.active()),
+        "the first withheld write must activate the enrolled follower log before acknowledgement"
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let metrics = match followers
+            .iter()
+            .position(|(_, _, _, peer, _)| owner.endpoint == format!("https://{peer}"))
+        {
+            Some(index) => root.join(format!(
+                "follower-{}-metrics.json",
+                if index == 0 { "a" } else { "b" }
+            )),
+            None => root.join("owner-metrics.json"),
+        };
+        loop {
+            if let Ok(bytes) = fs::read(&metrics)
+                && let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                && snapshot["command_responses"]["fleet"]["count"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
+            {
+                assert_eq!(snapshot["version"], 1);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("serving binary must write follower response metrics");
     let updated = sdk
         .update_item()
         .table_name("FollowerRecovery")

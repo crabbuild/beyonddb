@@ -9,6 +9,7 @@ mod node_log_recovery;
 mod node_log_sender;
 mod peer_receiver;
 mod placement;
+mod runtime_metrics;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
@@ -16,6 +17,7 @@ pub use node_log_authority::PublishedNodeLogAuthority;
 pub use node_log_provider::PeerNodeDurabilityProvider;
 pub use node_log_recovery::recover_fenced_node_log;
 pub use node_log_sender::PeerNodeLogTransport;
+pub use runtime_metrics::RuntimeMetrics;
 
 use std::sync::Arc;
 

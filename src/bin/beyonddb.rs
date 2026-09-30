@@ -16,7 +16,7 @@ use std::{
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
     CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeDurabilityProvider,
-    PeerNodeLogTransport, build_http_state_with_cache, measured_node_capacity,
+    PeerNodeLogTransport, RuntimeMetrics, build_http_state_with_cache, measured_node_capacity,
     shutdown_serving_node,
 };
 use cellule_app::CellApplication;
@@ -66,6 +66,9 @@ struct Config {
     follower_durability_enabled: bool,
     #[serde(default = "default_node_retained_bytes")]
     node_retained_bytes: usize,
+    /// Optional bounded runtime observations, atomically refreshed once per second.
+    #[serde(default)]
+    runtime_metrics_file: Option<PathBuf>,
     #[serde(default = "default_max_active_cells")]
     max_active_cells: usize,
     /// Optional SQL worker override. The runtime caps this at sixteen workers.
@@ -288,6 +291,47 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let node = builder.build()?;
     let node_shutdown = CancellationToken::new();
     let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
+    if let Some(path) = config.runtime_metrics_file.clone() {
+        let metrics = Arc::new(RuntimeMetrics::default());
+        node.install_telemetry(metrics.clone())?;
+        let metrics_runtime = node.runtime();
+        let cancellation = tasks.cancellation_token();
+        tasks.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut pending = path.as_os_str().to_os_string();
+            pending.push(".pending");
+            let pending = PathBuf::from(pending);
+            loop {
+                tokio::select! {
+                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
+                    _ = tick.tick() => {}
+                }
+                let mut snapshot = metrics.snapshot();
+                let stats = metrics_runtime.stats();
+                snapshot["node_resources"] = serde_json::json!({
+                    "active_cells": stats.active_cells(),
+                    "active_cell_capacity": stats.active_cell_capacity(),
+                    "retained_bytes": stats.retained_bytes(),
+                    "retained_capacity_bytes": stats.retained_capacity_bytes(),
+                    "worker_jobs": stats.worker_jobs(),
+                    "worker_job_capacity": stats.worker_job_capacity(),
+                    "unpublished_node_log_bytes": stats.unpublished_node_log_bytes(),
+                });
+                let encoded = serde_json::to_vec_pretty(&snapshot);
+                let result = match encoded {
+                    Ok(encoded) => match tokio::fs::write(&pending, encoded).await {
+                        Ok(()) => tokio::fs::rename(&pending, &path).await,
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(std::io::Error::other(error)),
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, "runtime metrics snapshot failed");
+                }
+            }
+        })?;
+    }
     let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
     let endpoint = config.peer_endpoint.clone();
     let signer = tls.signing_key().clone();

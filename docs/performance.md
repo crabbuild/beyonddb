@@ -26,8 +26,10 @@ also differ, so this pair does not establish a controlled speed ratio or
 production capacity. The all-API SQLite objective remains unmet.
 
 The release build, 25 library tests, 11 transaction tests, formatting, and
-strict Clippy passed. Full SDK CI on the production code is still running;
-the preceding failed recovery/activation checks remain open. Four background
+strict Clippy passed. Full SDK CI on the production code failed: elastic tests
+46/46, peers 51/52, and process tests 7/8. Credential lookup failed after the
+explicit memory-exhaustion probe, and the follower test did not activate its
+log during unblocked warmup. Recovery qualification remains open. Four background
 operations were deferred by Cell mailbox-byte capacity during measurement.
 The follower closure was not reproduced; append errors occurred only after
 measurement during cleanup. The report retains all API rates, latencies,
@@ -255,6 +257,46 @@ The routed no-return path now coalesces a bounded burst of unconditional `PutIte
 The pinned ExtendDB `BatchWriteItem` handler awaits each item mutation in a request before starting the next. This means a single two-item request still incurs two durable publications when both items are handled individually. The no-return batcher can combine mutations arriving from *different concurrent requests*, but it cannot combine items that ExtendDB submits sequentially within one request. This is a separate bottleneck from the batcher's queue window; improving it requires a batch-aware protocol path that preserves ExtendDB's validation and result semantics.
 
 Temporary stage timings on a separate instrumented fixture put typical credential, IAM, table record, and data Cell reads around 3–4 ms each, while each route traversal took around 6–7 ms. The requests perform several of these operations in sequence. The instrumented write fixture differed materially from the clean fixture, so its write timings are not a publication-cost estimate. A temporary S3 proxy disrupted publication and its counts were discarded.
+
+## Observe runtime costs and durability acknowledgements
+
+For a diagnostic run, add an absolute path to the server's JSON configuration:
+
+```json
+{
+  "runtime_metrics_file": "/var/lib/beyonddb/runtime-metrics.json"
+}
+```
+
+The parent directory must exist. Give each process its own file path. The server
+refreshes the file once per second through a temporary file and atomic rename.
+This option is disabled by default; enabling it adds atomic counter updates and
+a periodic snapshot task. A write failure logs a warning and sampling continues.
+
+| Observation | What it measures |
+| --- | --- |
+| `command_responses` | Runtime command replies using recorded results, follower proof (`fleet`), or object publication (`object`) |
+| `command_queue`, `command_worker` | Command admission queue and worker execution time |
+| `primitive_execution` | Command and query primitive execution time |
+| `publication` | Queue, preparation, authority, total duration, and uploaded objects/bytes |
+| `activation` | Ownership, resume, root opening, restore, and activation phases |
+| `durability_submissions`, `follower_appends` | Follower submission outcomes and append acknowledgement/failure counts |
+| `catalog_reads`, `control_reads` | Reads observed by the runtime telemetry hooks |
+| `node_resources` | Sampled active Cells, retained bytes, worker jobs, and unpublished log bytes |
+
+Timing objects contain cumulative `count`, `failed`, `total_us`, and `max_us`.
+Durations use microseconds. Counter snapshots are approximate because work can
+continue during sampling. They include background commands; runtime command
+reply counts are **not SDK request counts** and exclude queries, transport, and
+abandoned replies. Catalog/control counters do not cover all application or
+object-store reads. These counters cannot provide p95 latency.
+
+Save snapshots before and after a run, check that
+`first_snapshot_at_unix_ms` is unchanged, and check the freshness of
+`sampled_at_unix_ms`. A server restart begins a new counter series. Divide the
+change in `total_us` by the change in `count` to estimate a phase's mean duration.
+Phases can overlap and cover different events; do not sum them into SDK latency.
+Use the signed SDK harness for end-to-end latency and foreground errors.
 
 ## Run a repeatable point-operation sample
 

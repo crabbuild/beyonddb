@@ -42,8 +42,8 @@ pub use provision::*;
 pub use routing::*;
 pub use server::{
     BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PeerNodeDurabilityProvider,
-    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, build_http_state,
-    build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
+    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, RuntimeMetrics,
+    build_http_state, build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
     shutdown_serving_node,
 };
 pub use split::*;

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, sync::Mutex, time::Duration};
 
 use async_trait::async_trait;
-use beyonddb::{PeerNodeDurabilityProvider, PeerNodeLogTransport};
+use beyonddb::{PeerNodeDurabilityProvider, PeerNodeLogTransport, RuntimeMetrics};
 use cellule_host::{FOLLOWER_STORE_COMPONENT, NodeDurabilitySupervisorConfig};
 use cellule_runtime::node::{NODE_LOG_PROTOCOL_VERSION, NodeCapacity};
 use cellule_runtime::{NodeLeaseGuard, follower::FollowerStore, ltx::Limits};
@@ -106,6 +106,7 @@ impl ObjectStore for WithheldPublication {
 
 struct LogNode {
     node: CellNode,
+    metrics: Arc<RuntimeMetrics>,
     _tasks: Arc<CellNodeTaskGroup>,
     provisioner: Arc<CellInitialPartitionProvisioner>,
     guard: NodeLeaseGuard,
@@ -141,6 +142,8 @@ impl LogNode {
             );
         }
         let node = builder.build().unwrap();
+        let metrics = Arc::new(RuntimeMetrics::default());
+        node.install_telemetry(metrics.clone()).unwrap();
         let crash = CancellationToken::new();
         let shutdown = CancellationToken::new();
         let tasks = node
@@ -295,6 +298,7 @@ impl LogNode {
         node.start().unwrap();
         Self {
             node,
+            metrics,
             _tasks: tasks,
             provisioner,
             guard,
@@ -350,6 +354,7 @@ async fn assert_follower_durability(durability: bool) {
     let predecessor = before.value().root.as_ref().unwrap().commit_sequence;
     withheld.withhold(target.cell_id().as_bytes());
     let sdk = super::provisioning::sdk_without_retries(&fixture);
+    let metrics_before = leader.metrics.snapshot();
     let item = HashMap::from([
         ("id".into(), AwsAttributeValue::S("follower-only".into())),
         ("value".into(), AwsAttributeValue::S("acknowledged".into())),
@@ -363,6 +368,11 @@ async fn assert_follower_durability(durability: bool) {
     )
     .await;
     if !durability {
+        assert_eq!(
+            leader.metrics.snapshot()["command_responses"]["fleet"]["count"],
+            metrics_before["command_responses"]["fleet"]["count"],
+            "object-only timeout must not be counted as a follower acknowledgement"
+        );
         assert!(
             result.is_err(),
             "object-only write acknowledged before publication"
@@ -388,6 +398,16 @@ async fn assert_follower_durability(durability: bool) {
         "signed write still waits for object publication despite an eligible follower"
     );
     result.unwrap().unwrap();
+    let metrics_after = leader.metrics.snapshot();
+    assert!(
+        metrics_after["command_responses"]["fleet"]["count"]
+            .as_u64()
+            .unwrap()
+            > metrics_before["command_responses"]["fleet"]["count"]
+                .as_u64()
+                .unwrap(),
+        "the signed SDK acknowledgement must be counted as a follower response"
+    );
     tokio::time::timeout(Duration::from_secs(5), withheld.blocked.cancelled())
         .await
         .unwrap();
