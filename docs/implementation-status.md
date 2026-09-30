@@ -158,6 +158,21 @@ starts a digest-pinned RustFS 1.0 GA container with an isolated Docker volume
 and a random loopback port; no native RustFS installation is used. Colima users
 can select their daemon with `DOCKER_CONTEXT=colima`.
 
+When Docker's own volume filesystem is short of space or inodes, select a host
+bind root that the daemon shares. Each test creates a fresh child directory
+there. For example, with Colima's home-directory sharing:
+
+```bash
+export BEYONDDB_TEST_RUSTFS_BIND_ROOT="$HOME/.codex/tmp/beyonddb-rustfs-tests"
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-sdk-verification" \
+  cargo test --locked --test server_binary -- --ignored --test-threads=1
+```
+
+Successful tests remove their owned bind data; failed tests retain it and print
+the path. A bind mount still requires enough free Docker VM inodes to create a
+container. Preserve failed fixture evidence before cleaning up owned test
+resources.
+
 ```bash
 CARGO_TARGET_DIR=$HOME/Workspace/crabbuild-target/beyonddb-cellule \
   cargo test -p beyonddb --test server_binary -- --ignored --test-threads=1

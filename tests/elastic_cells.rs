@@ -52,6 +52,7 @@ mod elastic_cells {
     mod recovery_admission;
     mod table_residency;
     mod transaction_capacity;
+    mod transaction_commit;
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;

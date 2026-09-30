@@ -304,6 +304,137 @@ impl Command for DecideCrossCellTransaction {
     }
 }
 
+/// One durable participant receipt, scoped by the enclosing transaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoordinatorPrepareReceipt {
+    pub position: u8,
+    pub participant_cell: [u8; 32],
+    pub sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommitPreparedTransactionInput {
+    pub transaction: ReadCrossCellTransactionInput,
+    pub prepares: Vec<CoordinatorPrepareReceipt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CommitPreparedTransactionOutcome {
+    EvidenceRejected(Vec<CoordinatorPhaseOutcome>),
+    Decision(DecideCrossCellTransactionOutcome),
+}
+
+/// Publish prepare evidence and the terminal decision in one Cell command.
+///
+/// The existing decision handler still checks every durable participant row.
+/// A partial receipt set cannot commit an unprepared transaction. Older drivers
+/// and recovery can continue using the separate phase commands.
+pub struct CommitPreparedTransaction;
+
+impl Command for CommitPreparedTransaction {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 11;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<CommitPreparedTransactionInput>;
+    type Output = Json<CommitPreparedTransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let transaction = input.transaction;
+        phase_identity(context, &transaction.account_id, &transaction.routing_key)?;
+        if input.prepares.len() > 100 {
+            return Err(Error::Command("prepare evidence count exceeds 100"));
+        }
+        let mut outcomes = Vec::with_capacity(input.prepares.len());
+        for receipt in input.prepares {
+            let result = record_participant_prepare(
+                context,
+                CoordinatorPhaseInput {
+                    account_id: transaction.account_id.clone(),
+                    transaction_id: transaction.transaction_id,
+                    routing_key: transaction.routing_key.clone(),
+                    position: receipt.position,
+                    participant_cell: receipt.participant_cell,
+                    sequence: receipt.sequence,
+                },
+            )?;
+            outcomes.push(match result {
+                CommandResult::Success(Json(outcome)) | CommandResult::Rejected(Json(outcome)) => {
+                    outcome
+                }
+            });
+        }
+        if outcomes.iter().any(|outcome| {
+            !matches!(
+                outcome,
+                CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+            )
+        }) {
+            return Ok(CommandResult::Rejected(Json(
+                CommitPreparedTransactionOutcome::EvidenceRejected(outcomes),
+            )));
+        }
+        let decision = DecideCrossCellTransaction::execute(
+            context,
+            Json(DecideCrossCellTransactionInput {
+                account_id: transaction.account_id,
+                transaction_id: transaction.transaction_id,
+                routing_key: transaction.routing_key,
+                decision: CoordinatorDecision::Commit,
+            }),
+        )?;
+        Ok(match decision {
+            CommandResult::Success(Json(outcome)) => {
+                CommandResult::Success(Json(CommitPreparedTransactionOutcome::Decision(outcome)))
+            }
+            CommandResult::Rejected(Json(outcome)) => {
+                CommandResult::Rejected(Json(CommitPreparedTransactionOutcome::Decision(outcome)))
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod prepared_commit_tests {
+    use super::*;
+
+    #[test]
+    fn maximum_prepare_receipts_fit_the_registered_wire_limit() {
+        let input = Json(CommitPreparedTransactionInput {
+            transaction: ReadCrossCellTransactionInput {
+                account_id: "123456789012".into(),
+                transaction_id: [255; 16],
+                routing_key: vec![255; 128],
+            },
+            prepares: (0..100)
+                .map(|position| CoordinatorPrepareReceipt {
+                    position,
+                    participant_cell: [255; 32],
+                    sequence: i64::MAX as u64,
+                })
+                .collect(),
+        });
+        let descriptor = super::super::COMMANDS
+            .iter()
+            .find(|operation| operation.id == CommitPreparedTransaction::ID)
+            .unwrap();
+        let limit = descriptor.input_limit;
+        let mut encoder = BoundedEncoder::new(limit).unwrap();
+        input.encode(&mut encoder).unwrap();
+        let encoded = encoder.finish();
+        let mut decoder = BoundedDecoder::new(&encoded, limit).unwrap();
+        assert_eq!(
+            Json::<CommitPreparedTransactionInput>::decode(&mut decoder)
+                .unwrap()
+                .0,
+            input.0
+        );
+        decoder.finish().unwrap();
+    }
+}
+
 /// Record evidence that one participant resolution was published.
 pub struct RecordParticipantResolution;
 

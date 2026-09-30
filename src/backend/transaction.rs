@@ -9,14 +9,15 @@ use std::time::Duration;
 use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
-    CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
-    CoordinatorPhaseOutcome, CrossCellTransactionStatus, DecideCrossCellTransaction,
+    CommitPreparedTransaction, CommitPreparedTransactionInput, CommitPreparedTransactionOutcome,
+    CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseOutcome,
+    CoordinatorPrepareReceipt, CrossCellTransactionStatus, DecideCrossCellTransaction,
     DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json,
     ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepares,
-    TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, TransactionCommandInput,
+    TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -220,54 +221,54 @@ impl CellStorage {
             evidence.push((position, target, receipt));
         }
 
-        // Participant prepares already ran concurrently. Record their receipts
-        // in one coordinator command so the coordinator publishes one durable
-        // evidence update instead of one round trip per participant.
-        let phases: Vec<_> = evidence
+        // All participant receipts are already durable. Record their evidence
+        // and COMMIT in one coordinator command, retaining the existing check
+        // that every participant has a prepare receipt before deciding.
+        let prepares = evidence
             .into_iter()
-            .map(|(position, target, receipt)| CoordinatorPhaseInput {
-                account_id: read.account_id.clone(),
-                transaction_id,
-                routing_key: read.routing_key.clone(),
+            .map(|(position, target, receipt)| CoordinatorPrepareReceipt {
                 position,
                 participant_cell: *target.cell_id().as_bytes(),
                 sequence: receipt.commit_sequence,
             })
             .collect();
-        if phases.is_empty() {
-            return self
-                .decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
-                .await;
-        }
-        let recorded = self
+        let result = self
             .client
-            .command::<RecordParticipantPrepares>(&coordinator, mutation_identity()?, Json(phases))
+            .command::<CommitPreparedTransaction>(
+                &coordinator,
+                mutation_identity()?,
+                Json(CommitPreparedTransactionInput {
+                    transaction: read.clone(),
+                    prepares,
+                }),
+            )
             .await;
-        match recorded {
-            Ok(result)
-                if result.output.0.iter().all(|outcome| {
-                    matches!(
-                        outcome,
-                        CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                    )
-                }) => {}
-            Ok(result)
-                if result
-                    .output
-                    .0
-                    .contains(&CoordinatorPhaseOutcome::WrongDecision) =>
-            {
+        let outcome = match result {
+            Ok(result) => result.output.0,
+            Err(InvocationError::Rejected(result)) => result.output.0,
+            // An absent reply cannot distinguish a durable decision from an
+            // unfinished command. Read authoritative state before resolving.
+            Err(InvocationError::Pending(_)) => {
                 return self.finish_transaction(&coordinator, &read).await;
             }
-            Ok(_) | Err(InvocationError::Rejected(_)) => {
-                return Err(StorageError::Internal(
-                    "coordinator refused prepare evidence".into(),
-                ));
-            }
             Err(error) => return Err(cell_error(error)),
+        };
+        match outcome {
+            CommitPreparedTransactionOutcome::Decision(
+                DecideCrossCellTransactionOutcome::Decided(_)
+                | DecideCrossCellTransactionOutcome::DecisionConflict,
+            ) => self.finish_transaction(&coordinator, &read).await,
+            CommitPreparedTransactionOutcome::EvidenceRejected(outcomes)
+                if outcomes.contains(&CoordinatorPhaseOutcome::WrongDecision) =>
+            {
+                // A competing driver may have committed or aborted while the
+                // prepares were in flight. Its durable decision is authoritative.
+                self.finish_transaction(&coordinator, &read).await
+            }
+            _ => Err(StorageError::Internal(
+                "coordinator refused prepared transaction commit".into(),
+            )),
         }
-        self.decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
-            .await
     }
 
     async fn transaction_status(

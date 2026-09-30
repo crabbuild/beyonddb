@@ -63,15 +63,29 @@ Driver or recovery worker: idempotent participant resolution
 
 | After prepare | Durable action | Caller-visible result |
 | --- | --- | --- |
-| Every participant prepared | Coordinator changes `BEGIN` to `COMMIT`. | Success follows durable apply and a resolution receipt from every participant. |
+| Every participant prepared | One coordinator command records prepare receipts and changes `BEGIN` to `COMMIT`. | Success follows durable apply and a resolution receipt from every participant. |
 | A condition definitively fails while still in `BEGIN` | Coordinator changes `BEGIN` to `ABORT`. | Return the ordered cancellation result after abort resolution. |
 | A reply or caller times out | Read the coordinator decision and participant state during retry or recovery. | The timeout alone does not establish `COMMIT` or `ABORT`. |
 
 `COMMIT` and `ABORT` are immutable. A participant that has not yet applied a
 durable `COMMIT` remains locked until resolution.
 
-Two keys in the same Cell share one prepare and one resolution. The public
-adapter uses this protocol even when every key belongs to one Cell.
+The normal successful path uses `CommitPreparedTransaction` to publish the
+prepare receipts and COMMIT together. It still verifies that every participant
+has durable prepare evidence; an incomplete or mismatched receipt set cannot
+commit. Existing phase commands remain available for recovery and older driver
+paths. A lost response requires reading the authoritative decision before
+resolving participants. The [driver regression](../tests/elastic_cells/transaction_driver.rs)
+and [commit assertions](../tests/elastic_cells/transaction_commit.rs) cover
+partial/wrong receipts, one coordinator commit, replay, coordinator restoration,
+competing drivers, and lost replies.
+
+
+Two write keys in the same Cell share one prepare and one resolution. The public
+write adapter uses this protocol even when every key belongs to one Cell. A
+single-Cell `TransactGetItems` instead uses one atomic Cell query with a compact
+internal response; outputs that exceed its envelope use the durable saved-image
+fallback.
 
 ### Atomicity includes what concurrent readers can observe
 
@@ -82,7 +96,7 @@ return a retryable error. It must not return B's old image. The lock check and
 item read occur inside one Cell query, including when the item does not yet
 exist. The coordinator's durable COMMIT is the logical write serialization point.
 
-`TransactGetItems` prepares shared locks and immutable read images in every
+Cross-Cell `TransactGetItems` prepares shared locks and immutable read images in every
 participant. Once the last shared prepare succeeds, all captured keys remain
 locked and those images coexist; this supplies its serialization point. Read
 resolution releases locks but preserves the saved images for response assembly.
@@ -146,7 +160,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Safety qualification | Deterministic failure tests cover selected schedules | Exercise concurrent transfers, conditional write skew, read transactions, owner replacement, and lost replies with a recorded-history checker. Check conservation, serializability, and no duplicate effects at every injected phase cut. |
 | Bounded history | Completed decisions, participant markers, and committed read images are retained | Design an acknowledged retirement boundary that rejects late phase messages before deleting tombstones; include split/backup pins and outstanding read fetches. Ten-minute client token expiry alone cannot authorize deletion. Prove storage reaches a steady state under a soak workload. |
 | Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages before index/journal claims and payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
-| Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
+| Latency | Up to eight prepares and four terminal resolutions overlap. Prepare receipts and COMMIT share one coordinator command; provisioning, payload uploads, resolution receipts, and read-result cleanup add work. | Measure cold admission separately from warm phase execution, by participant count. The combined decision removes one publication; end-to-end SQLite parity still requires measurement and further work. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
 | API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; committed writes append stream records locally. Non-ALL LSIs, online GSI lifecycle, Streams policy transitions, and aggregate evaluated Update-size semantics remain incomplete or unqualified. | Complete the engine read contract, index lifecycle, and Streams qualification; compare size and error semantics with AWS before claiming compatibility. |
