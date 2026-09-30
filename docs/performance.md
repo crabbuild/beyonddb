@@ -2,26 +2,24 @@
 
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: an item write waits for Cellule to publish the committed Cell state to an object store.
 
-The latest full signed-API rerun used the `7655c60` BeyondDB release and the
-pinned `7eaa89b` ExtendDB SQLite release. Both finished all 24 five-second
-cases without SDK errors. ExtendDB SQLite was faster in every API and client
-count on this run: at eight clients, BeyondDB/SQLite measured 723/899
-`GetItem`, 83/358 `PutItem`, and 2.94/145.89 `TransactWriteItems` requests/s.
-BeyondDB also logged four deferred background operations from Cell mailbox-byte
-exhaustion. The host was heavily loaded, and the durability and IAM contracts
-differ. See the [full table, p95 latencies, fixture, and raw JSON](../benchmarks/2026-09-29-current-release-rerun/README.md);
-these numbers do not establish production capacity or a controlled speed ratio.
+The latest full signed-API rerun pinned Cellule to `9e17746` and ExtendDB
+SQLite to `7eaa89b`. Both completed all 24 five-second cases without
+foreground SDK errors. At eight clients, BeyondDB/SQLite measured 235/507
+`GetItem`, 78/55 `PutItem`, and 1.50/131 `TransactWriteItems` requests/s.
+BeyondDB exceeded SQLite in BatchGetItem and metadata reads at both client
+counts, and in PutItem at eight clients, but did not meet the all-API target.
+It logged deferred background work. External host load changed materially
+between fixtures. See the [full table, p95 latencies, fixture, and raw
+JSON](../benchmarks/2026-09-29-cellule-main-rerun/README.md); the result does
+not establish production capacity or a controlled speed ratio.
 
-The next release build pinned Cellule to `9e17746`. Its [signed RustFS and
-SQLite attempt](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
-started at host load 44.5 on 12 logical CPUs. BeyondDB recorded ten cases,
-then an eight-client `TransactGetItems` request returned a throttling
-cancellation; SQLite completed all 24 cases without request errors while host
-load rose to 90.4. The attempt is incomplete and cannot establish a speed
-ratio or a Cellule upgrade regression. A signed 1 KiB PutItem survived an
-unclean owner restart, while the larger SDK restart suite separately failed
-with HTTP 503 during GSI setup under similar contention. The all-API
-qualification remains open.
+An [earlier attempt with the same pin](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
+stopped after ten BeyondDB cases when eight-client TransactGetItems returned
+a throttling cancellation. SQLite completed all 24 cases while host load rose
+to 90.4 on 12 logical CPUs. A signed 1 KiB PutItem survived an unclean owner
+restart, while the larger SDK restart suite separately failed with HTTP 503
+during GSI setup under similar contention. That verification failure remains
+open pending a successful repeat.
 
 ## Refresh of the earlier high-throughput sample
 

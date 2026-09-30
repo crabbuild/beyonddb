@@ -1,0 +1,22 @@
+{
+  "root": "/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/beyonddb-perf-current-e5u_kfni",
+  "started_at_unix": 1790751017.3765981,
+  "host_load_start": [
+    47.482421875,
+    54.33837890625,
+    56.6396484375
+  ],
+  "beyond_exit_code": 0,
+  "host_load_after_beyond": [
+    30.32177734375,
+    44.060546875,
+    51.97900390625
+  ],
+  "sqlite_exit_code": 0,
+  "ended_at_unix": 1790751317.781413,
+  "host_load_end": [
+    37.271484375,
+    41.0068359375,
+    49.60595703125
+  ]
+}

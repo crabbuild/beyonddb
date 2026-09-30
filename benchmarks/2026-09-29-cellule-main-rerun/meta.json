@@ -1,0 +1,29 @@
+{
+  "server_commit": "3c712f4526c3a59e361925f9df0872b2b681defa + Cellule 9e17746 pin and recovery fix",
+  "binary_sha256": "6429879d281eb49c9dd5b9b361007d52002560e64ce43a5da5c5a34e05c12abf",
+  "rustfs_image": "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
+  "host_load_start": [
+    47.21875,
+    54.048828125,
+    56.50927734375
+  ],
+  "logical_cpus": 12,
+  "boto3_version": "1.43.105",
+  "fixture": {
+    "initial_partitions": 4,
+    "sql_workers": 12,
+    "max_active_cells": 128,
+    "follower_store_bytes": 1073741824,
+    "auth_cache_enabled": true,
+    "server_object_publication": true
+  },
+  "endpoint": "http://127.0.0.1:52340",
+  "started_at_unix": 1790751025.832394,
+  "host_load_end": [
+    30.32177734375,
+    44.060546875,
+    51.97900390625
+  ],
+  "ended_at_unix": 1790751188.958745,
+  "bench_exit_code": 0
+}
