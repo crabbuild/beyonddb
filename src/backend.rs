@@ -4,6 +4,7 @@ mod admission;
 mod batch;
 mod data;
 mod global_index;
+mod metadata_cache;
 mod recovery;
 mod remaining;
 mod statistics;
@@ -40,6 +41,7 @@ use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
 
 use batch::NoReturnBatcher;
+use metadata_cache::MetadataCache;
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -93,6 +95,7 @@ pub struct CellStorage {
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
     route_cache: Arc<RwLock<RouteCacheState>>,
     route_cache_enabled: bool,
+    metadata_cache: MetadataCache,
 }
 
 #[derive(Clone)]
@@ -132,6 +135,7 @@ impl CellStorage {
                 routes: HashMap::new(),
             })),
             route_cache_enabled: false,
+            metadata_cache: MetadataCache::default(),
         }
     }
 
@@ -155,11 +159,12 @@ impl CellStorage {
         self
     }
 
-    /// Enables process-local caching for immutable route leaf pages.
+    /// Enables process-local route pages and short-lived metadata responses.
     ///
     /// A stale cached route is rejected by the data Cell and invalidated; the
-    /// next request reads the current directory. Keep this opt-in alongside
-    /// other explicitly stale-tolerant serving caches.
+    /// next request reads the current directory. Metadata responses expire
+    /// after 500 ms and local table changes invalidate them. Keep this opt-in
+    /// alongside other explicitly stale-tolerant serving caches.
     #[must_use]
     pub fn with_route_cache(mut self, enabled: bool) -> Self {
         self.route_cache_enabled = enabled;
@@ -391,6 +396,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.metadata_cache.invalidate();
             if let Some(provisioner) = &self.initial_partitions {
                 table_creation::publish_initial_routes(
                     provisioner.as_ref(),
@@ -465,6 +471,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.metadata_cache.invalidate();
             self.invalidate_route_cache(&account_id, &previous.id);
             // A concurrent delete/recreate can change the name's generation.
             // Never attach the previous table's sample to the newly deleted one.
@@ -484,6 +491,15 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<TableDescription, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
+            let name = input.table_name.clone();
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.description(&account_id, &name)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let (record, status) = match self.lifecycle(&account_id, &input.table_name).await? {
                 crate::TableLifecycle::Missing => {
                     return Err(StorageError::TableNotFound(input.table_name));
@@ -500,7 +516,16 @@ impl TableEngine for CellStorage {
                     (record, status)
                 }
             };
-            self.table_description(record, &account_id, status).await
+            let description = self.table_description(record, &account_id, status).await?;
+            if let Some(generation) = generation {
+                self.metadata_cache.insert_description(
+                    &account_id,
+                    name,
+                    generation,
+                    description.clone(),
+                );
+            }
+            Ok(description)
         })
     }
 
@@ -511,6 +536,16 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<ListTablesOutput, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
+            let limit = i64::from(input.limit.unwrap_or(100));
+            let start = input.exclusive_start_table_name;
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.listing(&account_id, limit, &start)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let target = target(&account_id)?;
             let output = self
                 .client
@@ -518,18 +553,30 @@ impl TableEngine for CellStorage {
                     &target,
                     None,
                     Json(ListTablesInput {
-                        limit: i64::from(input.limit.unwrap_or(100)),
-                        exclusive_start: input.exclusive_start_table_name,
+                        limit,
+                        exclusive_start: start.clone(),
                         live_only: false,
                     }),
                 )
                 .await
                 .map_err(cell_error)?;
             match output.output.0 {
-                ListTablesOutcome::Page(page) => Ok(ListTablesOutput {
-                    table_names: page.names,
-                    last_evaluated_table_name: page.last_evaluated,
-                }),
+                ListTablesOutcome::Page(page) => {
+                    let listing = ListTablesOutput {
+                        table_names: page.names,
+                        last_evaluated_table_name: page.last_evaluated,
+                    };
+                    if let Some(generation) = generation {
+                        self.metadata_cache.insert_listing(
+                            &account_id,
+                            limit,
+                            start,
+                            generation,
+                            listing.clone(),
+                        );
+                    }
+                    Ok(listing)
+                }
                 ListTablesOutcome::InvalidLimit => Err(StorageError::Validation(
                     "table listing limit must be 1..=100".into(),
                 )),
@@ -608,6 +655,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.metadata_cache.invalidate();
             self.table_description(record, &account_id, TableStatus::Active)
                 .await
         })

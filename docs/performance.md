@@ -10,6 +10,12 @@ On September 29, 2026, two fresh four-partition RustFS fixtures ran the `af8fab7
 
 This refresh does not reproduce the earlier rates and is not a clean matched regression test: the code revision and host load differ. The [raw results and fixture details](../benchmarks/2026-09-29-claim-refresh/README.md) provide the full API table, latencies, errors, and conditions. Repeat on an otherwise idle host with retained raw results and background-work checks before using either sample as a performance target.
 
+## Contemporaneous comparison with pinned ExtendDB SQLite
+
+A later pair of fresh release fixtures exercised all 12 benchmark APIs with the same signed boto3 workload. The [full comparison and raw results](../benchmarks/2026-09-29-sqlite-comparison/README.md) show BeyondDB near SQLite on warm `GetItem` (583 versus 646 requests/s at one client), but far behind on `PutItem` (9 versus 811) and cross-partition `TransactGetItems` (1.5 versus 572). Eight-client `Scan` and one-client `BatchGetItem` were the only cases in which BeyondDB exceeded SQLite. Both backends had zero SDK request errors; BeyondDB also logged deferred background work.
+
+These sequential cases ran while other virtual machines consumed CPU, and host load changed between fixtures. ExtendDB's SQLite development mode uses open authorization and local-file durability, while BeyondDB verified IAM and waited for RustFS publication. The result identifies the remaining work; it does not establish a controlled throughput ratio or a production capacity target.
+
 ## What a request waits for
 
 ```text
@@ -27,6 +33,10 @@ signed AWS SDK request
 With the default `auth_cache_enabled: false`, the server has no process-wide credential or authorization-result cache. It keeps a positive in-memory proof that a credential Cell exists, while it still reads the credential record for every signed request. Table metadata and authorization use pass-through stores so concurrent deletion, recreation, and policy changes are observed. Item routing reads the published directory; writes also wait for durable publication. These choices protect correctness but add work compared with an embedded SQLite test server. The route anchor and leaf can be read concurrently because the anchor remains the authority for whether a route is published.
 
 For a workload that accepts bounded cross-node visibility, set `auth_cache_enabled` to `true` in the node configuration. This enables ExtendDB's 60-second stale-while-revalidate credential, IAM, and table metadata caches and wires local management invalidation through `AuthCacheRegistry`. It also caches immutable catalog proofs and resident local Cell handles for 500 ms, so warm requests avoid repeated catalog and owner-resolution reads. The Cell handle still fences drained owners; authority is refreshed after the cache window. Keep it disabled when immediate remote credential revocation, table recreation visibility, or owner changes are required.
+
+The same opt-in mode caches positive `DescribeTable` and `ListTables` responses for 500 ms, with at most 128 entries of each type per node. Local table creation, deletion, and update invalidate these responses as soon as the durable command completes. A remote node's table change can remain absent from a cached response until its entry expires. Item reads and writes still reach their owning Cell.
+
+On a fresh release fixture, the metadata cache measured 489/571 `DescribeTable` and 583/786 `ListTables` requests/s at one/eight clients, compared with 285/384 and 215/472 in an earlier BeyondDB fixture. A nearby SQLite fixture reached 835/1,196 and 701/343 respectively; its eight-client listing rate fell under host contention. The [raw metadata sample](../benchmarks/2026-09-29-metadata-cache/README.md) records the conditions. These short runs show an improvement in the cached path, not consistent SQLite parity.
 
 ## Release comparison: one local node
 
