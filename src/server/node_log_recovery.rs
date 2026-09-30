@@ -243,7 +243,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
-        APPLICATION, APPLICATION_ID, Beyonddb, NAMESPACE, account_target, initialize_account,
+        APPLICATION, APPLICATION_ID, Beyonddb, CellInitialPartitionProvisioner, NAMESPACE,
+        account_target, initialize_account,
     };
 
     fn scope(cell: CellId) -> NodeFrameScope {
@@ -659,49 +660,33 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(3_100)).await;
-        let fenced = directory
-            .claim_expired_for_recovery(leader_session, claimant_session, unix_time_ms().unwrap())
-            .await
-            .unwrap();
-        let scratch = files.path().join("recovery");
-        let recovered = recover_fenced_node_log(
-            &directory,
-            &layout,
-            transport,
-            fenced,
-            Limits::default(),
-            scratch.clone(),
-            1,
-            1,
-        )
-        .await
-        .unwrap();
-        assert_eq!(recovered.controls.len(), 1);
-        assert!(recovered.controls[0].value().recovery.is_some());
-
         let successor = cellule_runtime::CellRuntime::new(
             SqlWorkerPool::new(1, 8).unwrap(),
             16 << 20,
             claimant_session,
         )
         .unwrap();
-        let restored = successor
-            .takeover_restored(
-                proof,
-                replica,
-                authority.clone(),
-                recovered.controls[0].clone(),
-                recovered.takeover,
-                RecoveryManifestStore::new(layout.clone(), Limits::default())
-                    .with_recovery_scratch(scratch),
-                files.path().join("successor.sqlite"),
-                Owner {
-                    session: claimant_session,
-                    endpoint: "https://successor.internal:8081".into(),
-                },
-            )
+        let provisioner = CellInitialPartitionProvisioner::new(
+            successor.clone(),
+            application,
+            layout.clone(),
+            claimant_session,
+            "https://successor.internal:8081".into(),
+            files.path().join("recovery"),
+        )
+        .unwrap()
+        .with_test_node_log_recovery(transport);
+        let restored = provisioner
+            .takeover_expired_account("123456789012", &directory)
             .await
             .unwrap();
+        assert!(
+            directory
+                .takeover_proof(leader_session, claimant_session, unix_time_ms().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+        );
         let replayed_sequence = restored
             .query(64, 64, |connection| {
                 let sequence = connection.query_row(

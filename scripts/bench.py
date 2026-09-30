@@ -218,6 +218,11 @@ def main():
     parser.add_argument("--sort-key-value", default="1")
     parser.add_argument("--operations", nargs="+", choices=OPERATIONS, default=["get", "put"])
     parser.add_argument("--output", help="write JSON results to this path")
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="record every case even if an earlier case has request errors",
+    )
     args = parser.parse_args()
     if args.seconds <= 0 or args.payload_bytes <= 0 or args.seed_keys <= 0:
         parser.error("seconds, payload bytes, and seed keys must be positive")
@@ -287,8 +292,10 @@ def main():
                 with open(args.output, "w", encoding="utf-8") as output:
                     json.dump(results, output, indent=2)
                     output.write("\n")
-            if case["errors"]:
+            if case["errors"] and not args.continue_on_error:
                 raise SystemExit("stopped after request error")
+    if any(case["errors"] for case in results["cases"]):
+        raise SystemExit("one or more cases had request errors")
 
 
 if __name__ == "__main__":

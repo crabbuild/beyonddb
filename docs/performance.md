@@ -12,6 +12,17 @@ exhaustion. The host was heavily loaded, and the durability and IAM contracts
 differ. See the [full table, p95 latencies, fixture, and raw JSON](../benchmarks/2026-09-29-current-release-rerun/README.md);
 these numbers do not establish production capacity or a controlled speed ratio.
 
+The next release build pinned Cellule to `9e17746`. Its [signed RustFS and
+SQLite attempt](../benchmarks/2026-09-29-cellule-main-attempt/README.md)
+started at host load 44.5 on 12 logical CPUs. BeyondDB recorded ten cases,
+then an eight-client `TransactGetItems` request returned a throttling
+cancellation; SQLite completed all 24 cases without request errors while host
+load rose to 90.4. The attempt is incomplete and cannot establish a speed
+ratio or a Cellule upgrade regression. A signed 1 KiB PutItem survived an
+unclean owner restart, while the larger SDK restart suite separately failed
+with HTTP 503 during GSI setup under similar contention. The all-API
+qualification remains open.
+
 ## Refresh of the earlier high-throughput sample
 
 The `1,488.6/1,903.2` GetItem and `81.2/176.2` PutItem requests/s figures previously quoted in PR #14 were reported with commit `880b4aa` from a then-fresh local fixture. We could not locate its raw benchmark JSON. They are historical observations, not verified current-release rates.

@@ -64,7 +64,7 @@ pub struct CellInitialPartitionProvisioner {
     transaction_recovery: transactions::CoordinatorRecovery,
     admission: tokio::sync::Mutex<()>,
     peers: Option<Arc<crate::BeyonddbPeers>>,
-    recovery_transport: Option<Arc<PeerNodeLogTransport>>,
+    recovery_transport: Option<Arc<dyn NodeLogTransport>>,
 }
 
 impl CellInitialPartitionProvisioner {
@@ -119,6 +119,15 @@ impl CellInitialPartitionProvisioner {
         }
         self.recovery_transport = Some(transport);
         Ok(self)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_node_log_recovery(
+        mut self,
+        transport: Arc<dyn NodeLogTransport>,
+    ) -> Self {
+        self.recovery_transport = Some(transport);
+        self
     }
 
     /// Start each new table with a power-of-two number of independently owned ranges.
@@ -629,30 +638,32 @@ impl CellInitialPartitionProvisioner {
         let _admission = self.admission.lock().await;
         self.reclaim_settled_capacity(target).await?;
         let authority = CellAuthority::new(self.layout.clone());
-        let observed = authority
+        let mut observed = authority
             .load(target.cell_id())
             .await
             .map_err(provision_error)?
             .ok_or_else(|| StorageError::Transient("Cell has no authority".into()))?;
-        let former = observed
+        let former_session = observed
             .value()
             .owner
             .as_ref()
+            .map(|owner| owner.session)
             .ok_or_else(|| StorageError::Transient("Cell has no serving owner".into()))?;
-        if former.session == self.session {
+        if former_session == self.session {
             return Err(StorageError::Transient(
                 "Cell cannot be taken over from this owner state".into(),
             ));
         }
         let now_ms = lease_time_ms()?;
+        let mut recovery_scratch = self.directory.clone();
         let takeover = match nodes
-            .takeover_proof(former.session, self.session, now_ms)
+            .takeover_proof(former_session, self.session, now_ms)
             .await
             .map_err(provision_error)?
         {
             Some(proof) => proof,
             None => match nodes
-                .claim_expired_for_takeover(former.session, self.session, now_ms)
+                .claim_expired_for_takeover(former_session, self.session, now_ms)
                 .await
             {
                 Ok(proof) => proof,
@@ -663,23 +674,32 @@ impl CellInitialPartitionProvisioner {
                         .ok_or(CellError::PendingPublication)
                         .map_err(provision_error)?;
                     let fenced = nodes
-                        .claim_expired_for_recovery(former.session, self.session, lease_time_ms()?)
+                        .claim_expired_for_recovery(former_session, self.session, lease_time_ms()?)
                         .await
                         .map_err(provision_error)?;
-                    let transport: Arc<dyn NodeLogTransport> = transport.clone();
-                    recover_fenced_node_log(
+                    recovery_scratch = self.directory.join("node-log-recovery");
+                    let recovered = recover_fenced_node_log(
                         nodes,
                         &self.layout,
-                        transport,
+                        transport.clone(),
                         fenced,
                         Limits::default(),
-                        self.directory.join("node-log-recovery"),
+                        recovery_scratch.clone(),
                         MAX_NODE_LOG_RECOVERY_TENANTS,
                         MAX_NODE_LOG_RECOVERY_CELLS,
                     )
                     .await
-                    .map_err(provision_error)?
-                    .takeover
+                    .map_err(provision_error)?;
+                    // Recovery pins the overlay by changing Cell authority.
+                    // The takeover must see that new control and its scratch.
+                    observed = authority
+                        .load(target.cell_id())
+                        .await
+                        .map_err(provision_error)?
+                        .ok_or_else(|| {
+                            StorageError::Transient("recovered Cell has no authority".into())
+                        })?;
+                    recovered.takeover
                 }
                 Err(error) => return Err(provision_error(error)),
             },
@@ -721,7 +741,7 @@ impl CellInitialPartitionProvisioner {
                         self.layout.clone(),
                         self.replica_limits(target).map_err(provision_error)?,
                     )
-                    .with_recovery_scratch(self.directory.clone()),
+                    .with_recovery_scratch(recovery_scratch),
                     destination,
                     owner,
                 )
