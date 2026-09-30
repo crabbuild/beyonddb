@@ -20,7 +20,9 @@ A separate [direct RustFS PUT probe](../benchmarks/2026-09-29-rustfs-put-probe/R
 measured object-store calls without the DynamoDB or Cell request path. It ran
 under even higher host load, so its rates are diagnostic. It reinforces the
 need to measure publication I/O and evaluate Cellule's follower durability
-path before expecting local SQLite write latency from this RustFS fixture.
+path before expecting local SQLite write latency from this RustFS fixture. The
+[follower durability design](follower-durability.md) lists the BeyondDB
+integration and recovery gates required before that mode can be benchmarked.
 
 ## What a request waits for
 
