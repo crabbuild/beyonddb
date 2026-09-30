@@ -188,11 +188,14 @@ published. Token lookup precedes current table routing and uses that same
 coordinator authority. The earlier account claims and local token receipts
 have been removed.
 
-`TransactGetItems` uses the same durable coordinator for every request, with
-shared key locks and immutable participant images. Saved images are fetched
-individually, including when all requested keys share one Cell. Account and data reads reject unresolved
-write intents instead of returning images that could predate a published
-commit. Full DynamoDB compatibility and fleet-scale qualification remain open.
+`TransactGetItems` uses one read-only Cell query when every key routes to the
+same Cell and its encoded response fits the Cell wire limit. The Cell worker
+checks locks and reads the items in one serialized callback. Cross-Cell reads,
+and same-Cell reads whose encoded response exceeds that limit, use the durable
+coordinator with shared locks and individually fetched saved images. Account
+and data reads reject unresolved write intents instead of returning images
+that could predate a published commit. Full DynamoDB compatibility and
+fleet-scale qualification remain open.
 
 Each coordinator now indexes records with unresolved participants and exposes
 bounded cursor pages. A new owner can discover both undecided and decided
@@ -305,9 +308,10 @@ Within one transaction, prepare remains sequential and
 terminal resolution has a four-participant window. Coordinator progress writes
 remain serialized by their Cell owner.
 
-All transactional reads pay the same phase cost and persist their captured
-images; assembly additionally queries each saved item. A same-Cell read therefore
-requires six phase commands, at least two upload commands, and result queries. Before optimizing the protocol, measure publication latency,
+Cross-Cell reads and oversized same-Cell reads pay the coordinator phase cost
+and persist their captured images; assembly additionally queries each saved
+item. Same-Cell responses that fit the wire limit avoid this publication work.
+Before optimizing the coordinator protocol, measure publication latency,
 participant count, hot-key conflicts, recovery competition, and retained bytes.
 
 Terminal resolution now overlaps independent participants after a durable
@@ -448,39 +452,44 @@ codec framing. BeyondDB's `Json<T>` serializes ExtendDB attribute values as
 DynamoDB JSON. Binary values become base64; control characters can expand to
 six JSON bytes per source byte. SQL chunking does not change that outer limit.
 
-The former same-Cell read optimization returned every requested image in one
-query. A host reproduction stored ten 380-KiB binary values successfully, then
-failed `TransactGetItems` with `Cell wire codec failed`. The aggregate raw
+The same-Cell read query returns every requested image in one response. A host
+reproduction stored ten 380-KiB binary values successfully, then failed
+`TransactGetItems` with `Cell wire codec failed`. The aggregate raw
 payload was 3,891,200 bytes, below 4 MiB; its base64 alone was 5,188,280 bytes.
 The signed SDK reproduction against a remote data owner returned HTTP 503.
 Neither failure demonstrates partial writes: both occurred during a read.
 
-All transactional reads now use shared prepare, durable decision, resolution,
-and individual saved-image retrieval. The account and data aggregate snapshot
-queries and the adapter's route-dependent branch are removed. The public API
-retains one ordered, serializable result; HTTP response assembly happens above
-the Cell wire boundary.
+If the Cell query exceeds its wire limit, the adapter retries through the
+durable coordinator read protocol. That protocol uses shared prepare, durable
+decision, resolution, and individual saved-image retrieval. A read-only query
+never commits a mutation, so this fallback does not duplicate work. The public
+API retains one ordered, serializable result; HTTP response assembly happens
+above the Cell wire boundary.
 
 A saved image remains immutable after lock release,
 so fetching its siblings later cannot mix newer live versions into the result.
 The adapter and participant still enforce the raw 4-MiB read limit.
+The adapter fetches saved images sequentially from each Cell to stay within
+that Cell's fixed mailbox budget; different participant Cells can be read in
+parallel.
 
-**Is this the best fix here?** Reusing the existing prepare/resolve and saved-image
-lifecycle removes the failing path without adding a separate snapshot retention
-protocol. It deliberately trades the former optimization for one recovery path.
+This fallback reuses the existing prepare/resolve and saved-image lifecycle for
+large responses without adding a separate snapshot retention protocol. Smaller
+same-Cell reads retain the faster read-only query.
 
-**Cost:** same-Cell reads publish six phase commands plus input uploads and retain recovery/image
-records. They depend on coordinator availability and contend with writes during
-prepare. This is a correctness tradeoff, not a read performance optimization.
-A future fast path needs a bounded snapshot handle and explicit retention and
-recovery rules; repeatedly reading live pages would violate the transaction.
+**Cost:** oversized same-Cell reads publish coordinator phase commands and retain
+recovery/image records. They depend on coordinator availability and contend with
+writes during prepare. A future large-read fast path needs a bounded snapshot
+handle and explicit retention and recovery rules; repeatedly reading live pages
+would violate the transaction.
 
 `tests/account_cell.rs` covers ten binary images on an account participant.
 The shared signed SDK fixture covers ten 380-KiB binary values and four
 380-KiB control-character strings, each group deliberately routed to one data
-Cell. It checks every byte in reversed request order and repeats reads after
-owner replacement and hard process restart. Existing conflict, absent-image,
-projection, and cross-Cell tests exercise the same read protocol.
+Cell. It checks every byte in reversed request order. The broader restart
+fixture also exercises these reads, though a separate owner-activation failure
+currently prevents the full restart suite from passing. Existing conflict,
+absent-image, projection, and cross-Cell tests exercise the same read protocol.
 
 The expanded `scripts/probe-transaction-size.py` also ran both read cases
 against the verified DynamoDB Local 3.3.1 reference: both succeeded, all

@@ -4,6 +4,7 @@ use cellule_runtime::client::InvocationError;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use super::{CellStorage, cell_error, mutation_identity};
@@ -72,7 +73,7 @@ impl CellStorage {
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
-        let mut image_reads = Vec::new();
+        let mut image_reads: HashMap<[u8; 32], Vec<_>> = HashMap::new();
         let mut participant_targets = Vec::with_capacity(participant_results.len());
         for (participant_position, result) in participant_results {
             let participant = result?.ok_or_else(|| {
@@ -96,7 +97,12 @@ impl CellStorage {
                         "read transaction contains a write".into(),
                     ));
                 }
-                image_reads.push((
+                let cell = match &target {
+                    ReadTarget::Account(target) | ReadTarget::Data(target) => {
+                        *target.cell_id().as_bytes()
+                    }
+                };
+                image_reads.entry(cell).or_default().push((
                     operation.index,
                     target.clone(),
                     Json(ReadTransactionResultInput {
@@ -110,8 +116,12 @@ impl CellStorage {
                 ));
             }
         }
-        let images = stream::iter(image_reads.into_iter().map(
-            |(index, target, input)| async move {
+        // One image query reserves up to the Cell wire result ceiling. Fetch
+        // each participant's images serially to stay inside its 16 MiB mailbox,
+        // while independent participant Cells can still make progress together.
+        let images = stream::iter(image_reads.into_values().map(|reads| async move {
+            let mut group = Vec::with_capacity(reads.len());
+            for (index, target, input) in reads {
                 let image = match target {
                     ReadTarget::Account(target) => {
                         self.client
@@ -132,22 +142,24 @@ impl CellStorage {
                         "committed read image is missing".into(),
                     ));
                 };
-                Ok((index, image))
-            },
-        ))
+                group.push((index, image));
+            }
+            Ok::<_, StorageError>(group)
+        }))
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
         let mut items = vec![None; count];
-        for result in images {
-            let (index, image) = result?;
-            let slot = items
-                .get_mut(usize::from(index))
-                .ok_or_else(|| StorageError::Internal("invalid transaction read index".into()))?;
-            if slot.replace(image).is_some() {
-                return Err(StorageError::Internal(
-                    "duplicate transaction read index".into(),
-                ));
+        for group in images {
+            for (index, image) in group? {
+                let slot = items.get_mut(usize::from(index)).ok_or_else(|| {
+                    StorageError::Internal("invalid transaction read index".into())
+                })?;
+                if slot.replace(image).is_some() {
+                    return Err(StorageError::Internal(
+                        "duplicate transaction read index".into(),
+                    ));
+                }
             }
         }
         for item in &items {

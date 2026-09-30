@@ -105,6 +105,9 @@ impl CellStorage {
                             Err(transaction_canceled(index, reason, count, &[]))
                         }
                     },
+                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
+                        cellule_runtime::codec::CodecError::Limit,
+                    ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }
             }
@@ -131,6 +134,9 @@ impl CellStorage {
                     Ok(committed) => {
                         local_partition_transaction_read_result(committed.output.0, count)
                     }
+                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
+                        cellule_runtime::codec::CodecError::Limit,
+                    ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }
             }

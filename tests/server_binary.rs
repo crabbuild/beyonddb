@@ -6,6 +6,7 @@ mod server_binary {
     mod capacity;
     mod coordinator_recovery;
     pub(super) mod global_indexes;
+    mod large_reads;
     pub(super) mod local_indexes;
     mod metadata_cache;
 }
