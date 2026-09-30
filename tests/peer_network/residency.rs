@@ -8,6 +8,7 @@ mod forward_cache;
 mod index_splits;
 mod ownership_race;
 mod placement;
+mod pressure;
 mod provisioning;
 mod rebalance;
 mod reclamation;
@@ -72,6 +73,23 @@ impl Fixture {
         store: Arc<dyn object_store::ObjectStore>,
         cell_capacity: usize,
         peer_cache: bool,
+    ) -> Self {
+        Self::with_store_capacity_cache_and_router(
+            partitions,
+            store,
+            cell_capacity,
+            peer_cache,
+            std::convert::identity,
+        )
+        .await
+    }
+
+    async fn with_store_capacity_cache_and_router(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
     ) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
@@ -167,7 +185,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let client = peers.client(provisioner.clone());
+        let client = peers.client_with_cache(provisioner.clone(), peer_cache);
         CellAuthorizationStore::new(client.clone())
             .put_user_policy(
                 "123456789012",
@@ -185,7 +203,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let router = peers.router_with_cache(provisioner.clone(), peer_cache);
+        let router = wrap(peers.router_with_cache(provisioner.clone(), peer_cache));
         let peer_server = tokio::spawn(async move {
             axum::serve(
                 tls.listener(listener),

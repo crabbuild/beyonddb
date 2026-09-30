@@ -106,7 +106,17 @@ impl LocalCellResolver for LocalResolver {
             if let Some(cache) = resolver.handle_cache.as_ref() {
                 let cached = cache.read().await.get(&cell).cloned();
                 if let Some(cached) = cached {
-                    if cached.expires_at > Instant::now() {
+                    if cached.expires_at > Instant::now()
+                        && resolver
+                            .runtime
+                            .resident_handle(&target, CatalogRole::Sql)
+                            .await?
+                            .is_some_and(|resident| {
+                                resident.incarnation() == cached.handle.incarnation()
+                                    && resident.code() == cached.handle.code()
+                                    && resident.schema() == cached.handle.schema()
+                            })
+                    {
                         return Ok(Some(cached.handle));
                     }
                     cache.write().await.remove(&cell);
@@ -156,6 +166,24 @@ impl LocalCellResolver for LocalResolver {
                 || proof.entry().initial_schema() != 1
             {
                 return Err(Error::CatalogCollision);
+            }
+            if let Some(cache) = resolver.handle_cache.as_ref()
+                && let Some(local) = resolver
+                    .runtime
+                    .resident_handle(&target, CatalogRole::Sql)
+                    .await?
+            {
+                // The actor owns this capability and still fences drain,
+                // incarnation, code and schema at dispatch. Cache expiry
+                // need not read object storage for a resident owner.
+                cache.write().await.insert(
+                    cell,
+                    CachedHandle {
+                        handle: local.clone(),
+                        expires_at: Instant::now() + LOCAL_HANDLE_CACHE_TTL,
+                    },
+                );
+                return Ok(Some(local));
             }
             let authority = CellAuthority::new(resolver.layout.clone());
             for attempt in 0..2 {

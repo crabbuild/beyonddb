@@ -20,6 +20,22 @@ pub(super) struct Remote {
 }
 
 impl Remote {
+    pub(super) fn client(&self, fixture: &Fixture) -> CellClient {
+        self.client_with_cache(fixture, false)
+    }
+
+    pub(super) fn client_with_cache(&self, fixture: &Fixture, enabled: bool) -> CellClient {
+        BeyonddbPeers::new(
+            &self.node,
+            fixture.layout.clone(),
+            fixture.directory.clone(),
+            self.session,
+            &fixture.remote_tls,
+        )
+        .unwrap()
+        .client_with_cache(self.provisioner.clone(), enabled)
+    }
+
     pub(super) async fn new(fixture: &Fixture) -> Self {
         Self::with_router(fixture, std::convert::identity).await
     }
@@ -314,7 +330,15 @@ async fn large_transaction_read_from_remote_owner_keeps_read_only_snapshot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_read_recovers_expired_directory_and_data_owners() {
-    let fixture = Fixture::with_partition_count(1).await;
+    for enabled in [false, true] {
+        read_recovers_expired_directory_and_data_owners(enabled).await;
+    }
+}
+
+async fn read_recovers_expired_directory_and_data_owners(enabled: bool) {
+    println!("owner-expiry recovery: cache enabled={enabled}");
+    let fixture =
+        Fixture::with_store_capacity_and_peer_cache(1, Arc::new(InMemory::new()), 8, enabled).await;
     let remote = Remote::new(&fixture).await;
     let sdk = sdk_without_retries(&fixture);
     let table_id = table_id(&fixture, "Residency").await;

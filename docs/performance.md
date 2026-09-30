@@ -38,11 +38,18 @@ strict Clippy, and Rust CI passed. Full SDK CI on the measured source failed:
 native 45/47, peers 51/52, process 8/8. Two native fixtures warmed the new route
 cache before blocking control reads; both failures reproduced locally and passed
 with their original assertions after giving recovery a fresh client. This test-only
-correction happened after measurement. The peer credential lookup failure after
-the explicit memory-exhaustion probe remains open. Two local process-suite attempts
-failed owner recovery and subsequent fixture creation; Docker’s filesystem had
-almost no free inodes. All eight process tests passed in CI. These records leave
-full recovery qualification open.
+correction happened after measurement. The follow-up CI run passed native 47/47
+and process 8/8 but failed two peer cases: directory retirement saw a draining
+Cell, and abandoned-coordinator recovery missed its deadline. A focused credential
+pressure regression now passes after one bounded retry of a proven not-started
+query. The original long test passed that step, then failed coordinator recovery.
+The opt-in resident resolver also avoids authority reads after handle-cache expiry
+and checks the current actor before reusing a cached handle. Signed owner-expiry
+recovery passes with caches off and on. These source changes have no new API
+throughput measurement yet; see the [follow-up verification record](../benchmarks/2026-09-30-cellule-resident-verification/README.md).
+Two local process-suite attempts failed owner recovery and subsequent fixture
+creation; Docker’s filesystem had almost no free inodes. All eight process tests
+passed in CI. Full recovery qualification remains open.
 
 ### Previous instrumented release pair
 
@@ -267,7 +274,7 @@ signed AWS SDK request
 
 With the default `auth_cache_enabled: false`, the server has no process-wide credential or authorization-result cache. It keeps a positive in-memory proof that a credential Cell exists, while it still reads the credential record for every signed request. Table metadata and authorization use pass-through stores so concurrent deletion, recreation, and policy changes are observed. Item routing reads the published directory; writes also wait for durable publication. These choices protect correctness but add work compared with an embedded SQLite test server. The route anchor and leaf can be read concurrently because the anchor remains the authority for whether a route is published.
 
-For a workload that accepts bounded cross-node visibility, set `auth_cache_enabled` to `true` in the node configuration. This enables ExtendDB's 60-second stale-while-revalidate credential, IAM, and table metadata caches and wires local management invalidation through `AuthCacheRegistry`. It also caches immutable catalog proofs and resident local Cell handles for 500 ms, so warm requests avoid repeated catalog and owner-resolution reads. The Cell handle still fences drained owners; authority is refreshed after the cache window. Keep it disabled when immediate remote credential revocation, table recreation visibility, or owner changes are required.
+For a workload that accepts bounded cross-node visibility, set `auth_cache_enabled` to `true` in the node configuration. This enables ExtendDB's 60-second stale-while-revalidate credential, IAM, and table metadata caches and wires local management invalidation through `AuthCacheRegistry`. It also caches immutable catalog proofs and resident local Cell handles for 500 ms. After expiry, the runtime can resolve the resident actor without provider reads. Cached handles are checked against the current resident actor before reuse. Handles still fence drained owners; remote routing, admission and recovery use exact authority checks. Keep the flag disabled when immediate remote credential revocation or table recreation visibility is required.
 
 The same opt-in mode caches positive `DescribeTable`, `ListTables`, and backend table-key metadata for 500 ms, with at most 128 entries of each type per node. Batch APIs call the backend metadata lookup directly, so this cache also removes repeated account-Cell queries on that path. Local table creation, deletion, and update invalidate these entries as soon as the durable command completes. A remote node's table change can remain absent from a cached response until its entry expires. Item reads and writes still reach their owning Cell.
 
@@ -296,7 +303,7 @@ The server now sizes Cellule's SQL worker pool from host parallelism (capped by 
 
 When `auth_cache_enabled` is enabled, routed table directory leaf pages are cached by account and table generation. Large directories can retain up to 64 partial pages instead of caching only a complete page. The owning data Cell still checks the cached epoch, and stale or split routes invalidate the entry; this keeps route changes safe while avoiding a directory traversal on steady-state point operations. The local handle cache is 500 ms. An earlier release fixture measured `GetItem` at 1,323.6 requests/s with one client (p95 1.4 ms) and 1,776.6 requests/s with eight clients (p95 7.4 ms), `Query` at 1,293.9/1,722.2 requests/s (p95 1.4/7.6 ms), `PutItem` at 62.6/120.8 requests/s (p95 25.4/155.2 ms), and `UpdateItem` at 54.4/103.6 requests/s (p95 68.0/170.1 ms). All cases had zero errors. In that earlier run, reads exceeded the one-client SQLite samples; durable writes remained slower because each mutation waited for publication.
 
-Increasing the local handle cache from 50 ms to 500 ms reduces repeated authority resolution inside a transaction. On a fresh four-partition fixture, signed `TransactWriteItems` reached 4.46 requests/s at one client (p95 306 ms) and 1.55 requests/s at four clients (p95 2.87 s), with zero errors. An eight-client run reached 2.02 requests/s before one `ServiceUnavailable`; the coordinator and durable participant Cells still contend under concurrency. The longer cache remains safe for owner fencing because each resident `CellHandle` rejects drained ownership; it bounds fresh authority discovery at 500 ms when the cache is enabled.
+Increasing the local handle cache from 50 ms to 500 ms reduces repeated authority resolution inside a transaction. On a fresh four-partition fixture, signed `TransactWriteItems` reached 4.46 requests/s at one client (p95 306 ms) and 1.55 requests/s at four clients (p95 2.87 s), with zero errors. An eight-client run reached 2.02 requests/s before one `ServiceUnavailable`; the coordinator and durable participant Cells still contend under concurrency. The longer cache remains safe for owner fencing because each resident `CellHandle` rejects drained ownership. This historical sample predates the resident-actor resolution path.
 
 The same earlier run measured `Scan` at 1,101.1/1,660.0 requests/s, `BatchGetItem` at 857.2/1,498.2 requests/s (1,714.3/2,996.4 items/s), `BatchWriteItem` at 33.8/64.3 requests/s (67.5/128.5 items/s), `DescribeTable` at 919.0/1,474.0 requests/s, and `ListTables` at 1,457.8/1,725.0 requests/s for one/eight clients. Transactions reached 4.17/4.95 `TransactGetItems` requests/s and 1.27/1.53 `TransactWriteItems` requests/s; all cases completed without request errors, but transaction latency and durable-write throughput remain the limiting gap.
 

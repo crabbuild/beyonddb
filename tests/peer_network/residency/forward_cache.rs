@@ -227,9 +227,16 @@ async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
             ));
             assert_eq!(
                 store.reads.load(Ordering::SeqCst),
-                1,
-                "expired cache must reload authority"
+                0,
+                "expired cache should resolve the still-resident actor without authority I/O"
             );
+        }
+        if enabled {
+            fixture
+                .client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+                .unwrap();
         }
         handle.drain().await.unwrap();
         let drained = send(true).await;
@@ -246,6 +253,24 @@ async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
             owner.value().owner.is_none(),
             "forwarded invocation must not acquire a drained Cell"
         );
+        if enabled {
+            fixture
+                .client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+                .unwrap();
+            let restored = CellAuthority::new(fixture.layout.clone())
+                .load(handle.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(restored.value().owner.is_some());
+            assert!(restored.value().root.is_some());
+            assert_eq!(
+                restored.value().state,
+                cellule_runtime::control::ControlState::Serving
+            );
+        }
         *store.path.lock().unwrap() = None;
         remote.shutdown().await;
         fixture.shutdown().await;

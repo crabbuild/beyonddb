@@ -179,9 +179,9 @@ impl BeyonddbPeers {
 
     /// Build a client with the opt-in short-lived local owner cache.
     ///
-    /// The cache keeps resident handles for 500 ms while the Cell handle still
-    /// fences drained owners. Authority is re-read after expiry, so ownership
-    /// changes remain bounded by the cache window.
+    /// The cache keeps resident handles for 500 ms, then resolves the current
+    /// actor without provider reads. Reuse checks the current resident owner;
+    /// dispatch fences drained handles. Remote routing keeps exact checks.
     pub fn client_with_cache(
         &self,
         provisioner: Arc<CellInitialPartitionProvisioner>,
