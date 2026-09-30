@@ -669,13 +669,24 @@ impl TableEngine for CellStorage {
         let account_id = account_id.to_owned();
         let table_name = table_name.to_owned();
         Box::pin(async move {
+            // Batch APIs can bypass ExtendDB's HTTP table-info cache. Reuse
+            // the same opt-in backend policy; item access still checks table ID
+            // and partition epoch, so a stale entry cannot alias a new table.
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.key_info(&account_id, &table_name)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let record = self.record(&account_id, &table_name).await?;
             if matches!(record.placement, TablePlacement::Routed { .. })
                 && !self.route_active_for(&account_id, &record.id).await?
             {
                 return Err(StorageError::TableNotActive(table_name));
             }
-            Ok(TableKeyInfo {
+            let info = TableKeyInfo {
                 has_lsi: !record.local_secondary_indexes.is_empty(),
                 local_secondary_indexes: record
                     .local_secondary_indexes
@@ -698,7 +709,16 @@ impl TableEngine for CellStorage {
                 key_schema: record.key_schema,
                 attribute_definitions: record.attribute_definitions,
                 ..TableKeyInfo::default()
-            })
+            };
+            if let Some(generation) = generation {
+                self.metadata_cache.insert_key_info(
+                    &info.account_id,
+                    table_name,
+                    generation,
+                    info.clone(),
+                );
+            }
+            Ok(info)
         })
     }
 
