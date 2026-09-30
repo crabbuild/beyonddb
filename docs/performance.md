@@ -38,6 +38,10 @@ in CI; a local retry committed transactions but missed the replacement server's
 45-second health deadline. The measured frontend also logged 12 node-log
 submission rejections with `RuntimeClosed` and fallback to object coverage.
 The dependency pin and follower durability remain incompletely qualified.
+A [diagnostic follow-up](../benchmarks/2026-09-30-prepared-commit/diagnostics/README.md)
+adds first-error logging and records two passing local follower process-kill
+checks. The CI activation failure remains unresolved; these checks do not
+change the benchmark results.
 
 The preceding [compact transaction-read pair](../benchmarks/2026-09-30-compact-transaction-read/README.md)
 recorded six transaction-read timeouts. That response codec keeps legal large
