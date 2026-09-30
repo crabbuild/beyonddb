@@ -849,56 +849,69 @@ impl DataEngine for CellStorage {
                     })
                 })
                 .transpose()?;
-            if let Some((items, last_evaluated_key)) = self
-                .scan_routed(
-                    &key_info,
-                    limit,
-                    exclusive_start_key.clone(),
-                    segment,
-                    index_name.as_deref(),
-                )
-                .await?
-            {
-                // Retain the unfiltered cursor so empty segment pages still advance.
-                return Ok((
-                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
-                    last_evaluated_key,
-                ));
-            }
-            let target = target(&key_info.account_id)?;
-            let output = self
-                .query_resolving::<ScanItems>(
-                    &target,
-                    &key_info.account_id,
-                    Json(ScanItemsInput {
-                        index_name: index_name.clone(),
-                        table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id.clone(),
+            let mut cursor = exclusive_start_key;
+            loop {
+                let (items, next) = if let Some(page) = self
+                    .scan_routed(
+                        &key_info,
                         limit,
-                        exclusive_start_key,
-                    }),
-                )
-                .await?;
-            match output.output.0 {
-                ScanItemsOutcome::Page {
-                    items,
-                    last_evaluated_key,
-                } => Ok((
-                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
-                    last_evaluated_key,
-                )),
-                ScanItemsOutcome::Conflict(_) => Err(StorageError::Transient(
-                    "scan range is locked by a transaction".into(),
-                )),
-                ScanItemsOutcome::TableNotFound => {
-                    Err(StorageError::TableNotFound(key_info.table_name))
+                        cursor.clone(),
+                        segment,
+                        index_name.as_deref(),
+                    )
+                    .await?
+                {
+                    page
+                } else {
+                    let account = target(&key_info.account_id)?;
+                    let output = self
+                        .query_resolving::<ScanItems>(
+                            &account,
+                            &key_info.account_id,
+                            Json(ScanItemsInput {
+                                index_name: index_name.clone(),
+                                table_name: key_info.table_name.clone(),
+                                table_id: key_info.table_id.clone(),
+                                limit,
+                                exclusive_start_key: cursor.clone(),
+                            }),
+                        )
+                        .await?;
+                    match output.output.0 {
+                        ScanItemsOutcome::Page {
+                            items,
+                            last_evaluated_key,
+                        } => (items, last_evaluated_key),
+                        ScanItemsOutcome::Conflict(_) => {
+                            return Err(StorageError::Transient(
+                                "scan range is locked by a transaction".into(),
+                            ));
+                        }
+                        ScanItemsOutcome::TableNotFound => {
+                            return Err(StorageError::TableNotFound(key_info.table_name));
+                        }
+                        ScanItemsOutcome::InvalidKey => {
+                            return Err(StorageError::Validation(
+                                "scan continuation key does not match table schema".into(),
+                            ));
+                        }
+                        ScanItemsOutcome::InvalidLimit => {
+                            return Err(StorageError::Validation(
+                                "scan limit must be positive".into(),
+                            ));
+                        }
+                    }
+                };
+                let visible = scan_segment(items, &key_info, segment, index_name.as_deref())?;
+                if !visible.is_empty() || next.is_none() {
+                    return Ok((visible, next));
                 }
-                ScanItemsOutcome::InvalidKey => Err(StorageError::Validation(
-                    "scan continuation key does not match table schema".into(),
-                )),
-                ScanItemsOutcome::InvalidLimit => Err(StorageError::Validation(
-                    "scan limit must be positive".into(),
-                )),
+                if cursor == next {
+                    return Err(StorageError::Internal(
+                        "scan continuation did not advance".into(),
+                    ));
+                }
+                cursor = next;
             }
         })
     }
