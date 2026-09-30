@@ -94,6 +94,7 @@ impl LargeTransaction {
 
     pub async fn assert_state(&self, sdk: &Client) {
         for case in &self.cases {
+            eprintln!("checking large transaction case {}", case.put_token);
             case.assert_state(sdk).await;
         }
     }
