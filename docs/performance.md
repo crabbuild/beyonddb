@@ -4,40 +4,50 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
-The [compact transaction-read release pair](../benchmarks/2026-09-30-compact-transaction-read/README.md)
-uses source `10c1e2d`, Cellule `30671d5`, three BeyondDB processes, four initial
+The [combined coordinator-commit release pair](../benchmarks/2026-09-30-prepared-commit/README.md)
+uses source `3ccab15`, Cellule `30671d5`, three BeyondDB processes, four initial
 partitions, experimental follower durability, and signed boto3. Both backends
-completed all 24 cases. BeyondDB recorded **six timeouts**, all in eight-client
-`TransactGetItems`; SQLite recorded zero errors.
+completed all 24 cases. BeyondDB recorded **eight timeouts**: five in eight-client
+`TransactGetItems`, three in eight-client `TransactWriteItems`. SQLite had zero errors.
 
 | API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
 | --- | ---: | ---: | ---: |
-| GetItem | 147.40 | 768.95 | 135.96 ms |
-| PutItem | 22.13 | 412.95 | 919.77 ms |
-| TransactGetItems | 0.29 | 612.78 | 5,339.10 ms* |
-| TransactWriteItems | 1.09 | 165.19 | 8,263.11 ms |
+| GetItem | 234.19 | 778.00 | 66.49 ms |
+| PutItem | 23.57 | 477.86 | 645.39 ms |
+| TransactGetItems | 0.50 | 525.13 | 7,889.40 ms* |
+| TransactWriteItems | 0.56 | 458.64 | 8,429.05 ms* |
 
-\* Only three transaction reads succeeded; p95 excludes the six timeouts.
-The one-minute host load was 37.75–34.02 during BeyondDB and 31.01–61.24
-during SQLite, on 12 logical CPUs. These sequential samples do not establish
-a controlled speed improvement or production capacity. The all-API SQLite
-objective remains unmet.
+\* Transaction percentiles exclude timeouts. Only six reads and eight writes
+succeeded in the eight-client cases. One-minute host load changed from
+27.75 to 44.72 during BeyondDB and from 45.67 to 51.88 during SQLite, on
+12 logical CPUs. These sequential samples do not establish a controlled
+speed improvement or production capacity. The all-API SQLite objective remains unmet.
 
-The new internal response codec keeps legal large binary and escaped-string
-reads on the single-Cell query path, avoiding JSON expansion into the durable
-saved-image fallback. Signed remote-owner reads preserved exact values and
-left the participant root unchanged; large binary reads also survived an
-actual owner restart. All 24 library tests, formatting, strict Clippy, the
-release build, and Rust CI passed. The account/partition transaction-read
-query codec versions are now 3; mixed-version peer rollout is not qualified.
-The benchmark above uses two small items and can cross partitions, so it
-does not measure the large single-Cell improvement.
+The successful transaction path now records participant prepare receipts and
+COMMIT in one coordinator command. Its regression verifies exactly one durable
+coordinator commit, idempotent replay, rejected incomplete/wrong receipts, and
+restoration from the published root before participant resolution. All 25
+library tests, 11 transaction tests, formatting, strict Clippy, the release
+build, and Rust CI passed. This proves the command reduction; it does not
+prove an end-to-end speedup.
 
-Full SDK CI on this source is running. The preceding production source
-`138a128` passed elastic Cells 46/46, peer tests 51/52, and process tests
-7/8; replacement-owner and follower-log activation checks failed. The pin is
-not fully qualified. See the report for raw measurements, errors, sample
-counts, CI links, and local test evidence.
+Full SDK CI on `3ccab15` **failed**: elastic Cells 46/46, peers 51/52, process
+tests 7/8. A two-owner recovery test failed its index-owner assertion and the
+follower durability test never activated a log. Broad SDK owner restart passed
+in CI; a local retry committed transactions but missed the replacement server's
+45-second health deadline. The measured frontend also logged 12 node-log
+submission rejections with `RuntimeClosed` and fallback to object coverage.
+The dependency pin and follower durability remain incompletely qualified.
+
+The preceding [compact transaction-read pair](../benchmarks/2026-09-30-compact-transaction-read/README.md)
+recorded six transaction-read timeouts. That response codec keeps legal large
+binary and escaped-string reads on the single-Cell query path, avoiding JSON
+expansion into durable saved images. Signed remote-owner reads preserved exact
+values without mutating the participant root; large binary reads also survived
+an actual owner restart. Query codec versions are now 3; mixed-version peer
+rollout is unqualified. Its full SDK CI failed with elastic Cells 46/46,
+peers 50/52, and process tests 7/8. See both reports for raw measurements,
+sample counts, CI links, and local evidence.
 
 The preceding [peer owner-cache pair](../benchmarks/2026-09-30-peer-owner-cache/README.md)
 recorded 19 timeouts under different load. Its signed mTLS regression proves
@@ -88,8 +98,8 @@ all seven server-binary restart tests and 47 of 48 peer-network tests. On the
 new `30671d5` pin, the first GitHub qualification run passed all 46 elastic
 tests, 46 of 48 peer-network tests, and six of seven server-binary tests.
 Concurrent-delete placement, a two-owner large binary transaction read, and
-an oversized same-Cell read failed. A repeat full run is in progress; the
-new pin is not yet fully qualified.
+an oversized same-Cell read failed. Later qualification runs are recorded above; the
+new pin remains incompletely qualified.
 
 ## Refresh of the earlier high-throughput sample
 
