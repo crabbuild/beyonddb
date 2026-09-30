@@ -4,6 +4,48 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [Cellule e07670e release pair](../benchmarks/2026-09-30-cellule-e07670e-release/README.md)
+measures source `664e07a`, reviewed upstream Cellule `e07670e`, and ExtendDB
+`7eaa89b`. All 24 cases completed per backend. BeyondDB recorded **seven SDK
+timeouts** in eight-client TransactGetItems; SQLite recorded zero.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 310.54 | 459.75 | 64.82 ms |
+| PutItem | 10.09 | 800.97 | 1880.62 ms |
+| TransactGetItems | 0.19 | 752.99 | 1429.53 ms* |
+| TransactWriteItems | 1.14 | 453.42 | 8179.69 ms |
+
+\* Only two transaction reads completed; seven timeouts are excluded from the
+percentile. This p95 does not establish improvement over an error-free run.
+Only single-client Query exceeded SQLite. Every eight-client case remains slower;
+the all-API SQLite objective is unmet.
+
+The workstation was heavily contended: BeyondDB host load was 69.98→23.59 on
+12 logical CPUs; SQLite ran afterward at 22.59→21.72. No local build or test
+from this task overlapped measurement. Fresh owner placement and provider costs
+also vary. This pair does not isolate the upgrade's performance effect or qualify
+production/fleet capacity. All fixture processes and the exact RustFS container
+are absent, with no forced PID cleanup. Raw data and hashes are retained.
+
+The new main includes the approved one-read append API unchanged, lease-fenced
+resident-route reuse, bounded owner-discovery coalescing, read-replica release
+checks and serialized directory-cache index snapshots. The lockfile changes only
+seven Cellule Git sources. [Upgrade verification](../benchmarks/2026-09-30-cellule-e07670e-verification/README.md)
+passes 27 library tests, 58 residency/routing tests, formatting and strict Clippy;
+seven coordinator cases also pass and overlap residency. Upstream's four CI
+workflows and BeyondDB source Rust CI pass. Full signed recovery CI remains in
+progress at report time; earlier full runs failed. Recovery qualification is open.
+
+Across 1,572 samples per follower phase, lookup averaged 85.002 ms, HTTP round
+trip 45.940 ms, fresh enrollment 29.041 ms and durable append 16.119 ms. SQL
+command execution averaged 0.423 ms, provider GET/PUT 15.753/264.510 ms and
+publication total 1240.378 ms. These overlapping populations include background
+work; do not add them into SDK latency. The complete report includes all APIs,
+request failures, case metrics and fixture metadata.
+
+### Previous parallel coordinator release pair
+
 The [parallel coordinator release pair](../benchmarks/2026-09-30-parallel-coordinator-release/README.md)
 measures source `388ae62`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
 Both backends completed all 24 cases with **zero SDK errors**.
