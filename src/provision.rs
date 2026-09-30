@@ -689,7 +689,10 @@ impl CellInitialPartitionProvisioner {
                         MAX_NODE_LOG_RECOVERY_CELLS,
                     )
                     .await
-                    .map_err(provision_error)?;
+                    .map_err(|error| {
+                        tracing::warn!(?error, former = ?former_session, claimant = ?self.session, "node-log recovery failed");
+                        provision_error(error)
+                    })?;
                     // Recovery pins the overlay by changing Cell authority.
                     // The takeover must see that new control and its scratch.
                     observed = authority

@@ -1,14 +1,29 @@
 //! Run ExtendDB's signed DynamoDB endpoint over a leased BeyondDB Cell node.
 
-use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    io,
+    io::Read,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeLogTransport,
-    build_http_state_with_cache, measured_node_capacity, shutdown_serving_node,
+    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeDurabilityProvider,
+    PeerNodeLogTransport, build_http_state_with_cache, measured_node_capacity,
+    shutdown_serving_node,
 };
 use cellule_app::CellApplication;
-use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT};
+use cellule_host::{
+    CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT,
+    NodeDurabilitySupervisorConfig,
+};
 use cellule_peer_http::{LoadedPeerTls, PeerTlsIdentity};
 use cellule_runtime::{
     NodeLeaseGuard, SqlWorkerPool,
@@ -21,7 +36,11 @@ use cellule_runtime::{
     },
     registry::BuildDescriptor,
 };
-use cellule_store::{Store, provider_store::build_url_object_store};
+use cellule_store::{
+    Store,
+    identity::StorageProviderKind,
+    provider_store::{build_static_env_store, build_url_object_store},
+};
 use extenddb_auth::StoredCredential;
 use extenddb_server::ServerTlsConfig;
 use serde::Deserialize;
@@ -42,6 +61,9 @@ struct Config {
     /// Optional persistent follower-lane budget. Does not enable fleet proofs.
     #[serde(default)]
     follower_store_bytes: Option<u64>,
+    /// Experimental follower fsync proofs with fenced-owner recovery.
+    #[serde(default)]
+    follower_durability_enabled: bool,
     #[serde(default = "default_node_retained_bytes")]
     node_retained_bytes: usize,
     #[serde(default = "default_max_active_cells")]
@@ -104,6 +126,7 @@ const fn default_max_active_cells() -> usize {
 }
 
 const MAX_SQL_WORKERS: usize = 16;
+const REQUIRED_FOLLOWER_BYTES: u64 = 64 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
@@ -151,6 +174,16 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     {
         return Err(invalid(
             "disk, optional follower-store, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
+        )
+        .into());
+    }
+    if config.follower_durability_enabled
+        && config
+            .follower_store_bytes
+            .is_none_or(|bytes| bytes < REQUIRED_FOLLOWER_BYTES)
+    {
+        return Err(invalid(
+            "follower durability requires a persistent follower-store budget of at least 64 MiB",
         )
         .into());
     }
@@ -209,12 +242,25 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     })?);
     let release = application.registry().release_digest();
     let image = application.descriptor_digest();
-    let url_store = build_url_object_store(&config.storage_url)?;
-    let layout = CellStorageLayout::new(
-        Store::new(url_store.store_arc()),
-        url_store.prefix().clone(),
-        *APPLICATION_ID.as_bytes(),
-    );
+    let (store, prefix) = if config.storage_url.starts_with("s3://") {
+        let url = reqwest::Url::parse(&config.storage_url)?;
+        let bucket = url
+            .host_str()
+            .ok_or_else(|| invalid("S3 bucket is missing"))?;
+        // Recovery pins immutable overlays with conditional copies. The provider
+        // builder configures multipart copy-if-absent and transport admission.
+        (
+            build_static_env_store(bucket, StorageProviderKind::S3)?,
+            object_store::path::Path::from_url_path(url.path())?,
+        )
+    } else {
+        let url_store = build_url_object_store(&config.storage_url)?;
+        (
+            Store::new(url_store.store_arc()),
+            url_store.prefix().clone(),
+        )
+    };
+    let layout = CellStorageLayout::new(store, prefix, *APPLICATION_ID.as_bytes());
     let directory = NodeDirectory::new(layout.clone(), tls.fleet(), image, release);
     let peer_listener = TcpListener::bind(config.peer_bind).await?;
     let public_listener = TcpListener::bind(config.public_bind).await?;
@@ -250,6 +296,12 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let capacity_runtime = node.runtime();
     let capacity_dir = config.data_dir.clone();
     let recovery_capable = config.follower_store_bytes.is_some();
+    let follower_store = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT);
+    let follower_ready = Arc::new(AtomicBool::new(false));
+    let recruitment_ready = Arc::new(AtomicBool::new(false));
+    let advertised_store = follower_store.clone();
+    let advertised_ready = follower_ready.clone();
+    let follower_durability_enabled = config.follower_durability_enabled;
     let modules = application.registry().module_digests();
     let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
         let (capacity, placement) = if capacity_runtime.is_shutting_down() {
@@ -257,11 +309,16 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         } else {
             match measured_node_capacity(&capacity_dir, capacity_runtime.stats()) {
                 Ok((mut capacity, placement)) => {
-                    // A persistent follower store permits fenced recovery claims.
-                    // Zero advertised follower bytes still prevents recruitment
-                    // until follower-backed serving has a tested recovery path.
                     if recovery_capable {
                         capacity.log_protocol = NODE_LOG_PROTOCOL_VERSION;
+                    }
+                    // Only a listening authenticated receiver may be recruited.
+                    if follower_durability_enabled
+                        && advertised_ready.load(Ordering::Acquire)
+                        && let Some(store) = advertised_store.as_ref()
+                    {
+                        capacity.follower_free_bytes =
+                            store.available_bytes().min(capacity.free_disk_bytes);
                     }
                     (capacity, Some(placement))
                 }
@@ -299,6 +356,39 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     .await?;
     let follower_guard = published.guard();
     node.install_node_lease_for_startup(follower_guard.clone())?;
+    if config.follower_durability_enabled {
+        let store =
+            follower_store.ok_or_else(|| invalid("persistent follower store is unavailable"))?;
+        let transport = PeerNodeLogTransport::new(
+            directory.clone(),
+            tls.client_identity(),
+            session,
+            node_id,
+            follower_guard.clone(),
+        )
+        .with_local_follower_store(store);
+        let provider = PeerNodeDurabilityProvider::new(
+            published.log_authority(),
+            transport,
+            session,
+            node_id,
+            follower_guard.clone(),
+            node.runtime().telemetry_handle(),
+        )?
+        .with_recruitment_gate(recruitment_ready.clone());
+        node.install_node_durability_provider(
+            Arc::new(provider),
+            NodeDurabilitySupervisorConfig::new(
+                APPLICATION_ID,
+                Limits::default(),
+                REQUIRED_FOLLOWER_BYTES,
+                1024,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+                65_536,
+            )?,
+        )?;
+    }
     // Publication during drain still needs the node lease. The host cancels
     // lease maintenance only after the runtime and its durable log close.
     tasks.spawn_lease_maintenance(async move { published.run(&node_shutdown).await })?;
@@ -320,6 +410,8 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         public_tls,
         encryption_key,
         bootstrap_secret,
+        follower_ready,
+        recruitment_ready,
     )
     .await;
     let shutdown = shutdown_serving_node(&node, &directory, session).await;
@@ -356,6 +448,8 @@ async fn serve_ready(
     public_tls: Option<ServerTlsConfig>,
     encryption_key: [u8; 32],
     bootstrap_secret: Option<Zeroizing<String>>,
+    follower_ready: Arc<AtomicBool>,
+    recruitment_ready: Arc<AtomicBool>,
 ) -> ServerResult<()> {
     let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
     let mut recovery_transport = None;
@@ -449,6 +543,7 @@ async fn serve_ready(
         .with_graceful_shutdown(async move { peer_shutdown.cancelled().await })
         .await
     });
+    follower_ready.store(true, Ordering::Release);
     let recovery: ServerResult<()> = async {
         let storage = CellStorage::new(client.clone(), config.region.clone());
         for account_id in &config.owned_accounts {
@@ -538,6 +633,7 @@ async fn serve_ready(
         peer_server.await??;
         return Err(error);
     }
+    recruitment_ready.store(true, Ordering::Release);
     let mut public_server = tokio::spawn(extenddb_server::start_server(
         public_listener,
         state,

@@ -61,6 +61,7 @@ extenddb-storage = { git = "https://github.com/crabbuild/extenddb.git", rev = "7
 futures-util.workspace = true
 fs4 = "0.13.1"
 getrandom = "0.3"
+object_store.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -80,6 +81,5 @@ aws-credential-types.workspace = true
 aws-sdk-dynamodb.workspace = true
 ed25519-dalek.workspace = true
 extenddb-engine = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
-object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }

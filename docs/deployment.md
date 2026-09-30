@@ -169,13 +169,27 @@ while bounding visibility of an ownership change.
 The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
 `follower_store_bytes` is an optional positive disk budget for persistent
-follower lanes under `data_dir/follower-store`. Setting it opens a private,
-authenticated node-log receiver; it does **not** enable follower durability or
-improve write latency yet. BeyondDB still waits for object-store publication
-and advertises no follower capacity. Reserve this budget in addition to
-`disk_budget_bytes`, and retain the follower directory across process restart.
-The [follower durability guide](follower-durability.md) tracks the remaining
-enrollment, lifecycle, and recovery work.
+follower lanes under `data_dir/follower-store`. Reserve it in addition to
+`disk_budget_bytes`, and retain the directory across process restart. By
+itself, it opens the authenticated receiver for recovery and advertises zero
+follower capacity; writes still wait for object publication.
+
+Experimental `follower_durability_enabled: true` requires a follower-store
+budget of at least 64 MiB. It installs the host provider during startup, gates
+recruitment until configured-account recovery completes, and advertises actual
+remaining follower bytes only after the private listener starts. Each enrolled
+member must fsync before a follower proof; absent an eligible ensemble, the
+object-publication path remains available. Use separate node IDs, certificates,
+and data directories for every server. The three-process crash test exercises
+same-partition item mutations, transaction replay, and stream records;
+independent-host failure, cross-partition transaction faults, rotation under
+load, and sustained throughput still need qualification. See the
+[follower durability guide](follower-durability.md).
+
+The S3 serving path uses Cellule's provider builder, including multipart
+conditional copy support needed to pin recovery overlays. The URL-only builder
+previously left that operation unconfigured, which the real RustFS process-kill
+test exposed. GCS and Azure retain their URL-based configuration paths.
 
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |

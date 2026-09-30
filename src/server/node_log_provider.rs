@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -26,7 +26,7 @@ use super::{PeerNodeLogTransport, PublishedNodeLogAuthority};
 /// Recruits authoritative follower sets for the host's durability supervisor.
 ///
 /// Constructing this adapter does not install it or enable follower proofs.
-/// The serving binary must complete owner recovery before installing it.
+/// A serving host must gate recruitment until owner recovery completes.
 pub struct PeerNodeDurabilityProvider {
     authority: Arc<PublishedNodeLogAuthority>,
     transport: Arc<PeerNodeLogTransport>,
@@ -35,6 +35,7 @@ pub struct PeerNodeDurabilityProvider {
     guard: NodeLeaseGuard,
     telemetry: CellTelemetryHandle,
     next_epoch: AtomicU64,
+    recruitment_ready: Arc<AtomicBool>,
 }
 
 impl PeerNodeDurabilityProvider {
@@ -64,7 +65,15 @@ impl PeerNodeDurabilityProvider {
             guard,
             telemetry,
             next_epoch: AtomicU64::new(1),
+            recruitment_ready: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    /// Install during host startup, but defer recruitment until recovery is ready.
+    #[must_use]
+    pub fn with_recruitment_gate(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.recruitment_ready = ready;
+        self
     }
 }
 
@@ -77,6 +86,9 @@ impl NodeDurabilityProvider for PeerNodeDurabilityProvider {
     ) -> Pin<Box<dyn Future<Output = FacilityResult<Option<NodeDurabilityConfig>>> + Send>> {
         Box::pin(async move {
             self.guard.check()?;
+            if !self.recruitment_ready.load(Ordering::Acquire) {
+                return Ok(None);
+            }
             let epoch = self.next_epoch.load(Ordering::Acquire);
             let Some(members) = self
                 .authority

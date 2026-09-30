@@ -1,5 +1,6 @@
 use super::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, sync::Mutex, time::Duration};
 
 use async_trait::async_trait;
@@ -239,17 +240,44 @@ impl LogNode {
             .unwrap();
         });
         if durability {
-            let provider = PeerNodeDurabilityProvider::new(
-                authority,
-                transport.as_ref().clone(),
-                session,
-                id,
-                guard.clone(),
-                node.runtime().telemetry_handle(),
+            let ready = Arc::new(AtomicBool::new(false));
+            let provider = Arc::new(
+                PeerNodeDurabilityProvider::new(
+                    authority,
+                    transport.as_ref().clone(),
+                    session,
+                    id,
+                    guard.clone(),
+                    node.runtime().telemetry_handle(),
+                )
+                .unwrap()
+                .with_recruitment_gate(ready.clone()),
+            );
+            let recruited = cellule_host::NodeDurabilityProvider::recruit(
+                provider.clone(),
+                Limits::default(),
+                64 << 20,
+                1024,
             )
+            .await
             .unwrap();
+            assert!(
+                recruited.is_none(),
+                "startup recovery must gate recruitment"
+            );
+            assert!(
+                fixture
+                    .directory
+                    .load(session, now_ms())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .advertisement()
+                    .log()
+                    .is_none()
+            );
             node.install_node_durability_provider(
-                Arc::new(provider),
+                provider,
                 NodeDurabilitySupervisorConfig::new(
                     beyonddb::APPLICATION_ID,
                     Limits::default(),
@@ -262,6 +290,7 @@ impl LogNode {
                 .unwrap(),
             )
             .unwrap();
+            ready.store(true, Ordering::Release);
         }
         node.start().unwrap();
         Self {

@@ -5,6 +5,7 @@ mod support;
 mod server_binary {
     mod capacity;
     mod coordinator_recovery;
+    mod follower_durability;
     pub(super) mod global_indexes;
     mod large_reads;
     pub(super) mod local_indexes;
