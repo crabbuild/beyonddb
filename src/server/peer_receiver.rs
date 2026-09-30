@@ -342,6 +342,7 @@ struct Receiver {
 pub(super) fn peer_router(
     peers: &super::BeyonddbPeers,
     provisioner: Arc<crate::CellInitialPartitionProvisioner>,
+    handle_cache_enabled: bool,
 ) -> Router {
     let runtime = peers.runtime.clone();
     let directory = peers.placement.directory.clone();
@@ -352,7 +353,7 @@ pub(super) fn peer_router(
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
-            handle_cache: None,
+            handle_cache: handle_cache_enabled.then(|| Arc::new(RwLock::new(HashMap::new()))),
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,

@@ -205,7 +205,19 @@ impl BeyonddbPeers {
 
     /// Build the authenticated peer route; mount only on this identity's mTLS listener.
     pub fn router(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> axum::Router {
-        let router = peer_receiver::peer_router(self, provisioner);
+        self.router_with_cache(provisioner, false)
+    }
+
+    /// Build the authenticated peer route with the opt-in 500 ms resident handle cache.
+    ///
+    /// Cell handles still fence drained owners; peer enrollment and request
+    /// authorization are checked for every invocation.
+    pub fn router_with_cache(
+        &self,
+        provisioner: Arc<CellInitialPartitionProvisioner>,
+        handle_cache_enabled: bool,
+    ) -> axum::Router {
+        let router = peer_receiver::peer_router(self, provisioner, handle_cache_enabled);
         match &self.follower {
             Some(follower) => router.merge(node_log_receiver::router(follower.clone())),
             None => router,

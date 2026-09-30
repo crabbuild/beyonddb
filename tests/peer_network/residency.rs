@@ -4,6 +4,7 @@ mod deletion;
 mod directories;
 mod discovery;
 mod follower_durability;
+mod forward_cache;
 mod index_splits;
 mod ownership_race;
 mod placement;
@@ -62,6 +63,15 @@ impl Fixture {
         partitions: u16,
         store: Arc<dyn object_store::ObjectStore>,
         cell_capacity: usize,
+    ) -> Self {
+        Self::with_store_capacity_and_peer_cache(partitions, store, cell_capacity, false).await
+    }
+
+    async fn with_store_capacity_and_peer_cache(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
     ) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
@@ -175,7 +185,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let router = peers.router(provisioner.clone());
+        let router = peers.router_with_cache(provisioner.clone(), peer_cache);
         let peer_server = tokio::spawn(async move {
             axum::serve(
                 tls.listener(listener),
