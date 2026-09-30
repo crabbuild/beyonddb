@@ -84,6 +84,15 @@ local in-process follower under a second logical node ID would not provide
 an independent failure domain and must not be used as a production durability
 shortcut.
 
+`recover_fenced_node_log` now composes Cellule's bounded witness reader,
+tenant catalog inventory, overlay manifest pinning, and final directory seal
+for a caller that already holds a fenced recovery claim. It resolves every
+authenticated Cell scope through a durable tenant catalog and rejects missing,
+ambiguous, or over-limit inventory before attaching an overlay. The serving
+binary does not call this coordinator yet; the claimant advertisement,
+recovery scheduling, and crash-after-acknowledged-write test remain required
+before follower-backed acknowledgments can be enabled.
+
 ## Verification before comparing throughput
 
 1. Prove append, duplicate append, lost acknowledgement, seal, tail paging,
