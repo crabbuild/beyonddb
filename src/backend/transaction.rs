@@ -15,9 +15,9 @@ use crate::{
     DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json,
     ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
-    ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, TransactionCommandInput,
-    TransactionFailure, account_target, coordinator_target, data_target,
+    ReadCoordinatorParticipantInput, ReadCoordinatorResume, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
+    TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -51,49 +51,70 @@ impl CellStorage {
             transaction_id,
             routing_key: routing_key.to_vec(),
         };
-        if self.transaction_status(&coordinator, &read).await?.decision
-            != CoordinatorDecision::Begin
-        {
-            return self.finish_transaction(&coordinator, &read).await;
-        }
-        let participants = self
+        let snapshot = self
             .client
-            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read.clone()))
+            .query::<ReadCoordinatorResume>(&coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
             .0;
-        // Fetch immutable participant payloads concurrently. Each participant
-        // has its own durable cell, so these reads do not need to be serialized.
-        let payloads = stream::iter(
+        let status = snapshot
+            .status
+            .ok_or_else(|| StorageError::Internal("coordinator transaction is missing".into()))?;
+        if status.decision != CoordinatorDecision::Begin {
+            return self.finish_transaction(&coordinator, &read).await;
+        }
+        // The Cell query returns status and bounded immutable operations from
+        // the same observation. Large payloads retain chunked retrieval.
+        let payloads = if let Some(participants) = snapshot.participants {
             participants
                 .into_iter()
-                .filter(|participant| {
-                    // Durable prepare evidence survives driver and owner replacement.
-                    // Keep these participants in recovery's list until resolution, but
-                    // do not re-upload their payloads or publish another prepare receipt.
-                    !participant.prepared
-                })
-                .map(|participant| {
-                    let participant_coordinator = coordinator.clone();
-                    let input = ReadCoordinatorParticipantInput {
-                        account_id: read.account_id.clone(),
-                        transaction_id,
-                        routing_key: read.routing_key.clone(),
-                        position: participant.position,
-                        chunk: 0,
-                    };
-                    async move {
-                        let payload = self
-                            .coordinator_participant(&participant_coordinator, input)
-                            .await?;
-                        Ok::<_, StorageError>((participant.position, payload))
-                    }
-                }),
-        )
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
+                .map(|entry| Ok((entry.position, Some(entry.participant))))
+                .collect::<Vec<Result<_, StorageError>>>()
+        } else {
+            let participants = self
+                .client
+                .query::<ReadUnresolvedCoordinatorParticipants>(
+                    &coordinator,
+                    None,
+                    Json(read.clone()),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            // Fetch immutable coordinator chunks in a bounded window. The
+            // participant targets remain the durable transaction authority.
+            stream::iter(
+                participants
+                    .into_iter()
+                    .filter(|participant| {
+                        // Durable prepare evidence survives driver and owner replacement.
+                        // Keep these participants in recovery's list until resolution, but
+                        // do not re-upload their payloads or publish another prepare receipt.
+                        !participant.prepared
+                    })
+                    .map(|participant| {
+                        let participant_coordinator = coordinator.clone();
+                        let input = ReadCoordinatorParticipantInput {
+                            account_id: read.account_id.clone(),
+                            transaction_id,
+                            routing_key: read.routing_key.clone(),
+                            position: participant.position,
+                            chunk: 0,
+                        };
+                        async move {
+                            let payload = self
+                                .coordinator_participant(&participant_coordinator, input)
+                                .await?;
+                            Ok::<_, StorageError>((participant.position, payload))
+                        }
+                    }),
+            )
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await
+        };
         let mut attempts = Vec::new();
         for payload in payloads {
             let (position, Some(payload)) = payload? else {

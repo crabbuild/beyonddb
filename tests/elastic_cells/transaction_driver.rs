@@ -1,5 +1,5 @@
 use crate::*;
-use beyonddb::{TableRecord, TransactionFailure};
+use beyonddb::{ReadCoordinatorResume, TableRecord, TransactionFailure};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures() {
@@ -187,6 +187,40 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         )
         .await
         .unwrap();
+        let snapshot = client
+            .query::<ReadCoordinatorResume>(
+                &coordinator,
+                None,
+                Json(ReadCrossCellTransactionInput {
+                    account_id: account_id.into(),
+                    transaction_id,
+                    routing_key: transaction_id.to_vec(),
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        assert_eq!(
+            snapshot.status.unwrap().decision,
+            CoordinatorDecision::Begin
+        );
+        if scenario == 188 {
+            assert!(
+                snapshot.participants.is_none(),
+                "large escaped payloads must retain chunked retrieval"
+            );
+        } else {
+            assert_eq!(
+                snapshot
+                    .participants
+                    .unwrap()
+                    .into_iter()
+                    .map(|p| p.participant)
+                    .collect::<Vec<_>>(),
+                request
+            );
+        }
         if matches!(scenario, 180 | 181 | 183) {
             // Cover recorded and lost prepare receipts, plus a conflicting
             // transaction on the second participant.
@@ -232,6 +266,25 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     )
                     .await
                     .unwrap();
+                let partial = client
+                    .query::<ReadCoordinatorResume>(
+                        &coordinator,
+                        None,
+                        Json(ReadCrossCellTransactionInput {
+                            account_id: account_id.into(),
+                            transaction_id,
+                            routing_key: transaction_id.to_vec(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0;
+                assert_eq!(partial.status.unwrap().prepared_count, 1);
+                let remaining = partial.participants.unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].position, 1);
+                assert_eq!(remaining[0].participant, request[1]);
                 coordinator_file = super::transaction_commit::assert_atomic_prepared_commit(
                     &client,
                     &bootstrap,

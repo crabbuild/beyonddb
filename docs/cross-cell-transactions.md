@@ -219,8 +219,34 @@ finish a terminal decision across account and data Cell participants, using part
 state after an ambiguous reply and recording each resolution durably.
 
 A transaction driver can also resume a published `BEGIN`: it reads the
-immutable participant payloads, prepares in Cell order, records receipts,
+immutable participant payloads, prepares with bounded concurrency, records receipts,
 publishes one decision, and finishes resolution before returning that decision.
+
+For small transactions, one coordinator query observes the durable status and
+all unprepared participant payloads together. This replaces separate status,
+participant-list and payload requests. It accepts at most 32 KiB of saved
+payload bytes and keeps the complete encoded reply within 64 KiB. Large or
+multi-chunk inputs use the existing chunk protocol. Prepared participants need
+no payload reload; terminal decisions return status only.
+
+```text
+Coordinator query: status + small immutable payloads
+                       |
+                       v
+Participant prepares (up to eight concurrently)
+                       |
+                       v
+Durable prepare evidence + COMMIT
+                       |
+                       v
+Participant resolution + final coordinator status
+```
+
+The combined query changes preparation discovery only. It retains published
+BEGIN, immutable targets, idempotent participant commands, durable decision and
+resolution checks. The compiled coordinator code and query contract include
+this operation; peers must use the matching compiled release. Stored schemas
+and payload formats are unchanged.
 
 Concurrent resumes and lost prepare/decision replies use durable state as the
 authority. Definitive condition, lock, or routing failures request an abort;
