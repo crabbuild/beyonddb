@@ -4,6 +4,36 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [resident-admission release pair](../benchmarks/2026-09-30-resident-admission-release/README.md)
+measures source `6e92b5d`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. All 24
+cases completed per backend: BeyondDB recorded **four SDK errors** in
+eight-client TransactGetItems; SQLite recorded zero.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 307.70 | 818.16 | 86.21 ms |
+| PutItem | 21.17 | 1102.79 | 877.43 ms |
+| TransactGetItems | 0.48 | 759.27 | 7441.80 ms* |
+| TransactWriteItems | 1.74 | 783.82 | 5192.66 ms |
+
+\* Successful calls only; four failed requests are excluded. SQLite was faster
+in every measured case. Host load during BeyondDB was 41.43→32.36; SQLite ran
+sequentially at 32.36→20.40. Fresh owner placement also varies. This busy local
+sample cannot isolate the optimization's speedup or establish fleet capacity.
+
+The [focused admission regression](../benchmarks/2026-09-30-resident-admission-verification/README.md)
+proves four warm admissions remove four canonical coordinator reads and perform
+zero provider reads. Drain, a new provisioner, and missing registration still
+use canonical admission. Two focused regressions, five coordinator lifecycle
+checks, formatting, strict Clippy, and source Rust CI pass. Full signed peer/restart
+qualification remains open. Provider and follower costs remain the next profiling
+focus: SQL command/query means were 0.456/0.115 ms, logical provider PUT mean
+181.040 ms, and fleet command-response mean 149.089 ms. These overlapping
+populations must not be summed into SDK latency. The all-API SQLite objective
+remains unmet.
+
+### Previous provider-observation release pair
+
 The [provider-observation release pair](../benchmarks/2026-09-30-provider-observations-release/README.md)
 measures source `b2b6350`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. Both
 backends completed all 24 cases with **zero SDK errors**.
