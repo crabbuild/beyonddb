@@ -3,6 +3,7 @@ mod creation;
 mod deletion;
 mod directories;
 mod discovery;
+mod follower_durability;
 mod index_splits;
 mod ownership_race;
 mod placement;

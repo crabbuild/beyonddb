@@ -99,6 +99,23 @@ successor restores the untiered commit before takeover. This path still
 lacks a multi-node crash-after-acknowledged-write SDK test; the provider
 remains uninstalled and follower-backed acknowledgments remain disabled.
 
+The signed SDK component test in
+[`tests/peer_network/residency/follower_durability.rs`](../tests/peer_network/residency/follower_durability.rs)
+now connects the real host provider to two persistent followers over mTLS.
+It withholds only the data Cell's immutable object uploads and verifies that
+the signed `PutItem` succeeds while the object root remains unchanged. After
+fencing the owner and stopping renewal, a successor recovers the item through
+the authorized follower tail. A matching object-only control uses the same
+fixture and confirms that the write waits for publication.
+
+This test runs the nodes within one process. It establishes the composition
+of enrollment, fsync proof, SDK acknowledgement, and successor recovery;
+it does not establish process-crash durability, independent failure domains,
+transaction or stream recovery, or release throughput. The provider must be
+installed during node startup, before `CellNode::start`. Cellule selects a
+complete follower ensemble from the live fleet, so this fixture's additional
+frontend means two eligible followers are required for recruitment.
+
 ## Verification before comparing throughput
 
 1. Prove append, duplicate append, lost acknowledgement, seal, tail paging,
