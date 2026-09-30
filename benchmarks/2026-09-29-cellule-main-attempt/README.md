@@ -25,6 +25,10 @@ the impact of the Cellule update.
 
 The eight-client TransactGetItems case completed 21 requests and returned one
 `TransactionCanceledException` with a `ThrottlingError` cancellation reason.
+The BeyondDB server also logged deferred GSI projection and capacity sweeps,
+incomplete cross-Cell participant resolution, and a transaction participant
+capacity refusal from Cell mailbox-byte exhaustion. Zero errors in the first
+nine cases therefore do not mean background work settled.
 The fail-fast harness then stopped, leaving **10 of 24 BeyondDB cases** in
 [run.json](run.json). SQLite completed **24 of 24 cases with zero request
 errors** in [sqlite-run.json](sqlite-run.json). Full p50/p95/p99 latency,

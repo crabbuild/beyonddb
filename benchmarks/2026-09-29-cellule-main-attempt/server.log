@@ -1,0 +1,6 @@
+2026-09-30T06:32:50.770967Z  WARN beyonddb::backend::global_index: global index projection deferred error=Cell invocation did not start: Cell runtime capacity exhausted: Cell mailbox bytes
+2026-09-30T06:32:51.239427Z  WARN beyonddb::provision::capacity: capacity sweep deferred account_id="123456789012" error=Cell invocation did not start: Cell runtime capacity exhausted: Cell mailbox bytes
+2026-09-30T06:32:54.162214Z  WARN beyonddb::backend::global_index: global index projection deferred error=Cell invocation did not start: Cell runtime capacity exhausted: Cell mailbox bytes
+2026-09-30T06:32:57.275346Z  WARN beyonddb::provision::transactions: transaction recovery deferred error=cross-Cell participant resolution is incomplete
+2026-09-30T06:33:01.628778Z  WARN beyonddb::backend::global_index: global index projection deferred error=Cell invocation did not start: Cell runtime capacity exhausted: Cell mailbox bytes
+2026-09-30T06:33:07.977511Z  WARN beyonddb::backend::transaction: transaction participant capacity refused error=Cell runtime capacity exhausted: Cell mailbox bytes
