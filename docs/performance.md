@@ -484,6 +484,7 @@ a periodic snapshot task. A write failure logs a warning and sampling continues.
 | `publication` | Queue, preparation, authority, total duration, and uploaded objects/bytes |
 | `activation` | Ownership, resume, root opening, restore, and activation phases |
 | `durability_submissions`, `follower_appends` | Follower submission outcomes and append acknowledgement/failure counts |
+| `follower_append_phases` | Sender peer lookup and HTTP round trip; receiver fresh enrollment and durable store append |
 | `catalog_reads`, `control_reads` | Reads observed by the runtime telemetry hooks |
 | `node_resources` | Sampled active Cells, retained bytes, worker jobs, and unpublished log bytes |
 | `object_store` | Logical storage operations across the configured provider, including routing and enrollment I/O |
@@ -504,6 +505,17 @@ duration includes that lifetime, rather than measuring network time alone.
 `failed` includes normal `not_found`, `conflict`, and `cancelled` outcomes, so it
 is **not an SDK error count**. No object paths, tenant IDs, or credentials are
 recorded. These counters also include startup and background work.
+
+`follower_append_phases` observes Append only. Seal, Tail and Retire are excluded.
+The sender's `round_trip` starts after peer lookup and includes the complete
+bounded HTTP response body. The receiver's `enrollment` covers the fresh
+mTLS-bound canonical read; `durable_append` covers `FollowerStore::append`,
+including its durable acknowledgement. Neither receiver phase includes HTTP
+body admission or response scheduling. Timings add `started`, `in_flight` and
+`cancelled`; dropping an active future records a cancelled failure. They use
+fixed labels with no node/session IDs. Sender and receiver observations cover
+different, overlapping scopes: do not subtract their aggregate means to claim
+network latency or add them into SDK latency.
 
 Save snapshots before and after a run, check that
 `first_snapshot_at_unix_ms` is unchanged, and check the freshness of

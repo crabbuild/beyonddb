@@ -23,6 +23,7 @@ use reqwest::{StatusCode, Url, header};
 use super::{
     node_lease::unix_time_ms,
     node_log_receiver::{self, Operation, WireRequest},
+    runtime_metrics::{FollowerPhase, RuntimeMetrics, observe_follower},
 };
 
 const PEER_CACHE_MS: i64 = 500;
@@ -44,6 +45,7 @@ pub struct PeerNodeLogTransport {
     guard: NodeLeaseGuard,
     local_store: Option<Arc<FollowerStore>>,
     peers: Arc<Mutex<VecDeque<CachedPeer>>>,
+    metrics: Option<Arc<RuntimeMetrics>>,
 }
 
 #[derive(Clone)]
@@ -85,7 +87,15 @@ impl PeerNodeLogTransport {
             guard,
             local_store: None,
             peers: Arc::new(Mutex::new(VecDeque::new())),
+            metrics: None,
         }
+    }
+
+    /// Enable bounded append-phase observations, including cancelled requests.
+    #[must_use]
+    pub fn with_runtime_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Allow a recovery claimant to seal/read its own persistent follower lane.
@@ -196,10 +206,23 @@ impl PeerNodeLogTransport {
     }
 
     async fn send(&self, member: NodeId, request: WireRequest, tail: bool) -> Result<Bytes> {
+        let append_metrics = matches!(&request.operation, Operation::Append(_))
+            .then_some(self.metrics.as_deref())
+            .flatten();
         let encoded = request
             .encode()
             .map_err(|()| Error::Peer("invalid node-log request"))?;
-        let peer = self.peer(member).await?;
+        let peer =
+            observe_follower(append_metrics, FollowerPhase::PeerLookup, self.peer(member)).await?;
+        observe_follower(
+            append_metrics,
+            FollowerPhase::RoundTrip,
+            self.send_resolved(peer, encoded, tail),
+        )
+        .await
+    }
+
+    async fn send_resolved(&self, peer: CachedPeer, encoded: Vec<u8>, tail: bool) -> Result<Bytes> {
         let url = peer
             .endpoint
             .join("internal/node-log/v1")
@@ -610,6 +633,8 @@ mod tests {
 
     #[tokio::test]
     async fn pinned_mtls_append_survives_follower_store_reopen() {
+        let sender_metrics = Arc::new(RuntimeMetrics::default());
+        let receiver_metrics = Arc::new(RuntimeMetrics::default());
         let root = tempfile::TempDir::new().unwrap();
         let ca_key = root.path().join("ca.key");
         let ca = root.path().join("ca.crt");
@@ -716,7 +741,8 @@ mod tests {
             follower_node,
             store.clone(),
             guard.clone(),
-        );
+        )
+        .with_runtime_metrics(receiver_metrics.clone());
         let follower_client = follower_tls.client_identity();
         let server = tokio::spawn(async move {
             axum::serve(
@@ -732,7 +758,8 @@ mod tests {
             leader_session,
             leader_node,
             guard.clone(),
-        );
+        )
+        .with_runtime_metrics(sender_metrics.clone());
         let saved = frame(limits, leader_session);
         for _ in 0..2 {
             let receipt = transport
@@ -808,6 +835,19 @@ mod tests {
             .unwrap();
         assert_eq!(page.frames, vec![saved.clone()]);
         assert_eq!(page.next_sequence, None);
+        for (metrics, phases) in [
+            (&sender_metrics, ["peer_lookup", "round_trip"]),
+            (&receiver_metrics, ["enrollment", "durable_append"]),
+        ] {
+            let snapshot = metrics.snapshot();
+            for phase in phases {
+                let observed = &snapshot["follower_append_phases"][phase];
+                assert_eq!(observed["count"], 2, "{phase}: {observed}");
+                assert_eq!(observed["failed"], 0);
+                assert_eq!(observed["cancelled"], 0);
+                assert_eq!(observed["in_flight"], 0);
+            }
+        }
         server.abort();
         let _ = server.await;
         drop(transport);

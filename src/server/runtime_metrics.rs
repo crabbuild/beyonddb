@@ -1,8 +1,9 @@
 //! Optional bounded runtime observations for performance diagnosis.
 
 use std::{
+    future::Future,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use cellule_runtime::fleet::telemetry::{
@@ -50,6 +51,74 @@ struct StoreOperationMetrics {
     bytes_read: AtomicU64,
     bytes_written: AtomicU64,
     outcomes: [AtomicU64; StorageOutcome::ALL.len()],
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum FollowerPhase {
+    PeerLookup = 0,
+    RoundTrip = 1,
+    Enrollment = 2,
+    DurableAppend = 3,
+}
+
+#[derive(Default)]
+struct FollowerPhaseMetrics {
+    timing: Timing,
+    started: AtomicU64,
+    cancelled: AtomicU64,
+}
+
+impl FollowerPhaseMetrics {
+    fn snapshot(&self) -> Value {
+        let mut value = self.timing.snapshot();
+        value["started"] = json!(self.started.load(Ordering::Relaxed));
+        value["cancelled"] = json!(self.cancelled.load(Ordering::Relaxed));
+        value["in_flight"] = json!(
+            self.started
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.timing.count.load(Ordering::Relaxed))
+        );
+        value
+    }
+}
+
+struct FollowerObservation<'a> {
+    metrics: &'a FollowerPhaseMetrics,
+    started: Instant,
+    outcome: Option<bool>,
+}
+
+impl Drop for FollowerObservation<'_> {
+    fn drop(&mut self) {
+        if self.outcome.is_none() {
+            self.metrics.cancelled.fetch_add(1, Ordering::Relaxed);
+        }
+        self.metrics
+            .timing
+            .record(self.started.elapsed(), self.outcome == Some(true));
+    }
+}
+
+/// Observe only append phases; recovery operations are excluded. Dropped futures
+/// count as cancelled failures. With metrics disabled, no clock or atomics run.
+pub(super) async fn observe_follower<T>(
+    metrics: Option<&RuntimeMetrics>,
+    phase: FollowerPhase,
+    future: impl Future<Output = cellule_runtime::Result<T>>,
+) -> cellule_runtime::Result<T> {
+    let Some(metrics) = metrics else {
+        return future.await;
+    };
+    let metrics = &metrics.follower_phases[phase as usize];
+    metrics.started.fetch_add(1, Ordering::Relaxed);
+    let mut observation = FollowerObservation {
+        metrics,
+        started: Instant::now(),
+        outcome: None,
+    };
+    let result = future.await;
+    observation.outcome = Some(result.is_ok());
+    result
 }
 
 impl StoreOperationMetrics {
@@ -100,6 +169,7 @@ pub struct RuntimeMetrics {
     control: Timing,
     activation: [Timing; 5],
     store: [StoreOperationMetrics; StorageOperation::ALL.len()],
+    follower_phases: [FollowerPhaseMetrics; 4],
 }
 
 impl RuntimeMetrics {
@@ -143,6 +213,12 @@ impl RuntimeMetrics {
                 "acknowledged": self.append[0].load(Ordering::Relaxed),
                 "failed": self.append[1].load(Ordering::Relaxed),
                 "bytes": self.append_bytes.load(Ordering::Relaxed),
+            },
+            "follower_append_phases": {
+                "peer_lookup": self.follower_phases[0].snapshot(),
+                "round_trip": self.follower_phases[1].snapshot(),
+                "enrollment": self.follower_phases[2].snapshot(),
+                "durable_append": self.follower_phases[3].snapshot(),
             },
             "catalog_reads": {"head": self.catalog[0].snapshot(), "page": self.catalog[1].snapshot()},
             "control_reads": self.control.snapshot(),
@@ -280,6 +356,30 @@ mod tests {
     use object_store::{ObjectStoreExt, memory::InMemory, path::Path};
     use std::sync::Arc;
     use tokio_util::bytes::Bytes;
+
+    #[tokio::test]
+    async fn follower_metrics_finish_when_an_in_flight_append_is_cancelled() {
+        let metrics = RuntimeMetrics::default();
+        let observed = observe_follower(
+            Some(&metrics),
+            FollowerPhase::DurableAppend,
+            std::future::pending::<cellule_runtime::Result<()>>(),
+        );
+        let mut observed = Box::pin(observed);
+        assert!(futures_util::poll!(&mut observed).is_pending());
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot["follower_append_phases"]["durable_append"]["in_flight"],
+            1
+        );
+        drop(observed);
+        let snapshot = metrics.snapshot();
+        let phase = &snapshot["follower_append_phases"]["durable_append"];
+        assert_eq!(phase["count"], 1);
+        assert_eq!(phase["failed"], 1);
+        assert_eq!(phase["cancelled"], 1);
+        assert_eq!(phase["in_flight"], 0);
+    }
 
     #[tokio::test]
     async fn store_metrics_observe_consumption_cancellation_and_missing_objects_without_labels() {

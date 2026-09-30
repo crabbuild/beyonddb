@@ -21,7 +21,10 @@ use cellule_runtime::{
 use futures_util::StreamExt;
 use tokio::sync::Semaphore;
 
-use super::node_lease::unix_time_ms;
+use super::{
+    node_lease::unix_time_ms,
+    runtime_metrics::{FollowerPhase, RuntimeMetrics, observe_follower},
+};
 
 pub(super) const MEDIA_TYPE: &str = "application/vnd.beyonddb.node-log-v1";
 const MAGIC: &[u8; 4] = b"BNL1";
@@ -42,6 +45,7 @@ pub(super) struct FollowerEndpoint {
     store: Arc<FollowerStore>,
     guard: NodeLeaseGuard,
     permits: Arc<Semaphore>,
+    metrics: Option<Arc<RuntimeMetrics>>,
 }
 
 impl FollowerEndpoint {
@@ -59,7 +63,13 @@ impl FollowerEndpoint {
             store,
             guard,
             permits: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            metrics: None,
         }
+    }
+
+    pub(super) fn with_runtime_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     async fn dispatch(&self, request: WireRequest, identity: PeerTlsIdentity) -> Result<Vec<u8>> {
@@ -75,10 +85,16 @@ impl FollowerEndpoint {
     ) -> Result<Vec<u8>> {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
-        let enrollment = self
-            .directory
-            .peer_verifier(request.caller, certificate, public_key, now_ms)
-            .await?;
+        let append_metrics = matches!(&request.operation, Operation::Append(_))
+            .then_some(self.metrics.as_deref())
+            .flatten();
+        let enrollment = observe_follower(
+            append_metrics,
+            FollowerPhase::Enrollment,
+            self.directory
+                .peer_verifier(request.caller, certificate, public_key, now_ms),
+        )
+        .await?;
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
         let response = match request.operation {
@@ -98,9 +114,13 @@ impl FollowerEndpoint {
                 )?;
                 self.guard.check()?;
                 encode_receipt(
-                    self.store
-                        .append(request.leader, request.epoch, frames, request.argument)
-                        .await?,
+                    observe_follower(
+                        append_metrics,
+                        FollowerPhase::DurableAppend,
+                        self.store
+                            .append(request.leader, request.epoch, frames, request.argument),
+                    )
+                    .await?,
                 )
             }
             Operation::Seal => {

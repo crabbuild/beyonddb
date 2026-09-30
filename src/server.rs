@@ -108,6 +108,7 @@ pub struct BeyonddbPeers {
     registry: Arc<cellule_runtime::registry::Registry>,
     placement: Arc<placement::RangePlacement>,
     follower: Option<node_log_receiver::FollowerEndpoint>,
+    follower_metrics: Option<Arc<RuntimeMetrics>>,
 }
 
 impl BeyonddbPeers {
@@ -149,6 +150,7 @@ impl BeyonddbPeers {
                 round_trip,
             }),
             follower: None,
+            follower_metrics: None,
         })
     }
 
@@ -162,13 +164,27 @@ impl BeyonddbPeers {
         store: Arc<FollowerStore>,
         guard: cellule_runtime::NodeLeaseGuard,
     ) -> Self {
-        self.follower = Some(node_log_receiver::FollowerEndpoint::new(
+        let mut endpoint = node_log_receiver::FollowerEndpoint::new(
             self.placement.directory.clone(),
             self.runtime.clone(),
             node,
             store,
             guard,
-        ));
+        );
+        if let Some(metrics) = &self.follower_metrics {
+            endpoint = endpoint.with_runtime_metrics(metrics.clone());
+        }
+        self.follower = Some(endpoint);
+        self
+    }
+
+    /// Observe authenticated follower append phases on the private listener.
+    #[must_use]
+    pub fn with_follower_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        if let Some(endpoint) = self.follower.take() {
+            self.follower = Some(endpoint.with_runtime_metrics(metrics.clone()));
+        }
+        self.follower_metrics = Some(metrics);
         self
     }
 

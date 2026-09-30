@@ -299,7 +299,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let node = builder.build()?;
     let node_shutdown = CancellationToken::new();
     let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
-    if let Some((path, metrics)) = config.runtime_metrics_file.clone().zip(metrics) {
+    if let Some((path, metrics)) = config.runtime_metrics_file.clone().zip(metrics.clone()) {
         node.install_telemetry(metrics.clone())?;
         let metrics_runtime = node.runtime();
         let cancellation = tasks.cancellation_token();
@@ -410,7 +410,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     if config.follower_durability_enabled {
         let store =
             follower_store.ok_or_else(|| invalid("persistent follower store is unavailable"))?;
-        let transport = PeerNodeLogTransport::new(
+        let mut transport = PeerNodeLogTransport::new(
             directory.clone(),
             tls.client_identity(),
             session,
@@ -418,6 +418,9 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
             follower_guard.clone(),
         )
         .with_local_follower_store(store);
+        if let Some(metrics) = &metrics {
+            transport = transport.with_runtime_metrics(metrics.clone());
+        }
         let provider = PeerNodeDurabilityProvider::new(
             published.log_authority(),
             transport,
@@ -463,6 +466,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         bootstrap_secret,
         follower_ready,
         recruitment_ready,
+        metrics,
     )
     .await;
     let shutdown = shutdown_serving_node(&node, &directory, session).await;
@@ -501,21 +505,27 @@ async fn serve_ready(
     bootstrap_secret: Option<Zeroizing<String>>,
     follower_ready: Arc<AtomicBool>,
     recruitment_ready: Arc<AtomicBool>,
+    metrics: Option<Arc<RuntimeMetrics>>,
 ) -> ServerResult<()> {
     let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
+    if let Some(metrics) = &metrics {
+        peers = peers.with_follower_metrics(metrics.clone());
+    }
     let mut recovery_transport = None;
     if let Some(store) = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT) {
         let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
-        recovery_transport = Some(Arc::new(
-            PeerNodeLogTransport::new(
-                directory.clone(),
-                tls.client_identity(),
-                session,
-                node_id,
-                follower_guard.clone(),
-            )
-            .with_local_follower_store(store.clone()),
-        ));
+        let mut transport = PeerNodeLogTransport::new(
+            directory.clone(),
+            tls.client_identity(),
+            session,
+            node_id,
+            follower_guard.clone(),
+        )
+        .with_local_follower_store(store.clone());
+        if let Some(metrics) = &metrics {
+            transport = transport.with_runtime_metrics(metrics.clone());
+        }
+        recovery_transport = Some(Arc::new(transport));
         peers = peers.with_follower_store(node_id, store, follower_guard);
     }
     let peers = Arc::new(peers);
