@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use cellule_peer_http::PeerTlsClient;
 use cellule_runtime::{
     Error, NodeLeaseGuard, Result,
-    follower::{FollowerReceipt, FollowerTailPage},
+    follower::{FollowerReceipt, FollowerStore, FollowerTailPage},
     identity::{Digest, NodeId, SessionId},
     node::{
         NodeAdvertisement, NodeDirectory,
@@ -42,6 +42,7 @@ pub struct PeerNodeLogTransport {
     session: SessionId,
     node: NodeId,
     guard: NodeLeaseGuard,
+    local_store: Option<Arc<FollowerStore>>,
     peers: Arc<Mutex<VecDeque<CachedPeer>>>,
 }
 
@@ -81,8 +82,39 @@ impl PeerNodeLogTransport {
             session,
             node,
             guard,
+            local_store: None,
             peers: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// Allow a recovery claimant to seal/read its own persistent follower lane.
+    ///
+    /// Local recovery still requires the directory's fenced-owner claim.
+    #[must_use]
+    pub fn with_local_follower_store(mut self, store: Arc<FollowerStore>) -> Self {
+        self.local_store = Some(store);
+        self
+    }
+
+    async fn local_recovery_store(
+        &self,
+        member: NodeId,
+        leader: SessionId,
+        epoch: u64,
+    ) -> Result<&FollowerStore> {
+        self.guard.check()?;
+        if member != self.node {
+            return Err(Error::PeerAuthorization("local follower member differs"));
+        }
+        let store = self
+            .local_store
+            .as_deref()
+            .ok_or(Error::Peer("local follower store is unavailable"))?;
+        self.directory
+            .authorize_log_recovery(leader, self.session, member, epoch, unix_time_ms()?)
+            .await?;
+        self.guard.check()?;
+        Ok(store)
     }
 
     async fn peer(&self, member: NodeId) -> Result<CachedPeer> {
@@ -290,6 +322,16 @@ impl NodeLogTransport for PeerNodeLogTransport {
         request: SealRequest,
     ) -> BoxFuture<'a, Result<FollowerReceipt>> {
         Box::pin(async move {
+            if member == self.node {
+                let store = self
+                    .local_recovery_store(member, request.leader_session, request.log_epoch)
+                    .await?;
+                let receipt = store
+                    .seal(request.leader_session, request.log_epoch)
+                    .await?;
+                self.guard.check()?;
+                return Ok(receipt);
+            }
             self.receipt(
                 member,
                 WireRequest {
@@ -373,6 +415,20 @@ impl NodeLogTransport for PeerNodeLogTransport {
         request: TailRequest,
     ) -> BoxFuture<'a, Result<FollowerTailPage>> {
         Box::pin(async move {
+            if member == self.node {
+                let store = self
+                    .local_recovery_store(member, request.leader_session, request.log_epoch)
+                    .await?;
+                let page = store
+                    .read_tail_page(
+                        request.leader_session,
+                        request.log_epoch,
+                        request.first_sequence,
+                    )
+                    .await?;
+                self.guard.check()?;
+                return Ok(page);
+            }
             let response = self
                 .send(
                     member,
@@ -436,7 +492,10 @@ mod tests {
         cell::actor::CellRuntime,
         follower::FollowerStore,
         ltx::{CellStorageLayout, DiskBudget, Host, Limits},
-        node::{NODE_LOG_PROTOCOL_VERSION, NodeCapacity, NodeFailureDomain},
+        node::{
+            NODE_LOG_PROTOCOL_VERSION, NodeCapacity, NodeFailureDomain,
+            log_recovery::NodeLogRecovery,
+        },
     };
     use cellule_store::Store;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
@@ -506,6 +565,7 @@ mod tests {
         tls: &LoadedPeerTls,
         follower: bool,
         now_ms: i64,
+        lease_ms: i64,
     ) -> NodeAdvertisement {
         NodeAdvertisement::sign(
             node,
@@ -518,7 +578,7 @@ mod tests {
             tls.signing_key(),
             1,
             now_ms,
-            now_ms + 15_000,
+            now_ms + lease_ms,
             vec![Digest::from_bytes([86; 32])],
             vec![1],
             NodeFailureDomain::default(),
@@ -594,6 +654,7 @@ mod tests {
                     &follower_tls,
                     true,
                     now_ms,
+                    15_000,
                 ),
                 now_ms,
             )
@@ -608,6 +669,7 @@ mod tests {
                     &leader_tls,
                     false,
                     now_ms,
+                    3_000,
                 ),
                 now_ms,
             )
@@ -643,6 +705,7 @@ mod tests {
             store.clone(),
             guard.clone(),
         );
+        let follower_client = follower_tls.client_identity();
         let server = tokio::spawn(async move {
             axum::serve(
                 follower_tls.listener(listener),
@@ -652,11 +715,11 @@ mod tests {
             .await
         });
         let transport = PeerNodeLogTransport::new(
-            directory,
+            directory.clone(),
             leader_tls.client_identity(),
             leader_session,
             leader_node,
-            guard,
+            guard.clone(),
         );
         let saved = frame(limits, leader_session);
         for _ in 0..2 {
@@ -674,9 +737,69 @@ mod tests {
                 .unwrap();
             assert_eq!(receipt.durable_through, 1);
         }
+        let local = PeerNodeLogTransport::new(
+            directory.clone(),
+            follower_client,
+            follower_session,
+            follower_node,
+            guard,
+        )
+        .with_local_follower_store(store.clone());
+        assert!(
+            local
+                .seal(
+                    follower_node,
+                    SealRequest {
+                        leader_session,
+                        log_epoch: 2,
+                    },
+                )
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(3_100)).await;
+        let fenced = directory
+            .claim_expired_for_recovery(leader_session, follower_session, unix_time_ms().unwrap())
+            .await
+            .unwrap();
+        let recovery_transport: Arc<dyn NodeLogTransport> = Arc::new(local.clone());
+        let recovery = NodeLogRecovery::from_fenced(recovery_transport, &fenced, limits)
+            .unwrap()
+            .with_recovery_scratch(root.path().to_owned());
+        let sealed = recovery.ensure_sealed_bounded().await.unwrap();
+        assert_eq!(sealed.frame_count(), 1);
+        assert_eq!(sealed.scopes(limits).unwrap()[0].cell, [4; 32]);
+        assert_eq!(
+            local
+                .seal(
+                    follower_node,
+                    SealRequest {
+                        leader_session,
+                        log_epoch: 2,
+                    },
+                )
+                .await
+                .unwrap()
+                .durable_through,
+            1
+        );
+        let page = local
+            .tail_page(
+                follower_node,
+                TailRequest {
+                    leader_session,
+                    log_epoch: 2,
+                    first_sequence: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.frames, vec![saved.clone()]);
+        assert_eq!(page.next_sequence, None);
         server.abort();
         let _ = server.await;
         drop(transport);
+        drop(local);
         drop(store);
         let reopened = FollowerStore::open(store_root, limits, DiskBudget::new(1 << 30)).unwrap();
         assert_eq!(

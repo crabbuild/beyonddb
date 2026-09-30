@@ -63,7 +63,10 @@ recovery authority before touching a lane. The outbound
 and key, and bounds requests, replies, and tail paging. Tests cover a durable
 append and duplicate append over real two-identity mTLS, follower-store
 reopen, wrong certificate, wrong epoch, and a seal attempt before owner
-fencing. Full seal/tail/retirement recovery tests remain open.
+fencing. The recovery claimant test also fences the expired leader,
+seals its own follower lane under directory authority, and passes that lane
+through Cellule's bounded witness reader. Remote-member recovery, retirement,
+and successor Cell overlay attachment still need end-to-end tests.
 
 The lease-bound `PublishedNodeLogAuthority` adapter can enroll a follower set
 and apply the directory's activation, coverage, and close transitions. It
