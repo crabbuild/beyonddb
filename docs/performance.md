@@ -4,8 +4,50 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [Cellule `70bd25f` release rerun](../benchmarks/2026-09-30-cellule-70bd25f/README.md)
+uses source `37b25ff`, upgraded from Cellule `30671d5` to the latest `origin/main`
+checked on September 30. All six direct dependencies and seven lockfile packages
+pin the new revision; ExtendDB remains `7eaa89b`. The measured code also adds the
+500 ms backend table-key metadata cache for batch APIs, so this is a combined
+product/dependency sample.
+
+Both backends completed all 24 cases. BeyondDB recorded **25 SDK errors**;
+SQLite recorded zero. Each failing case’s retained first error was a read timeout.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 100.58 | 415.51 | 389.14 ms |
+| PutItem | 12.28 | 261.16 | 1,844.92 ms |
+| TransactGetItems | 0.09 | 297.73 | 651.35 ms* |
+| TransactWriteItems | 0.00 | 221.13 | — |
+
+\* The transaction-read percentile is a single successful call, excluding eight
+timeouts. All eight transaction writes timed out. Eight batch writes at eight
+clients and one transaction write at one client also timed out. The report has
+all API rates, sample counts, latencies, raw results, runtime snapshots, and fixture
+settings.
+
+Host load rose from 28.35 to 52.46 during BeyondDB, then fell from 52.86 to 38.85
+during SQLite, on 12 logical CPUs with about 19.4–19.5 GiB of swap in use. This
+checkout had no build or test running during measurement; other work continued.
+These sequential runs do not establish a controlled speed improvement, a regression,
+or production capacity. The all-API SQLite objective remains unmet.
+
+The locked release build, 25 library tests, backend-cache regression, formatting,
+strict Clippy, and Rust CI passed. Full SDK CI on the measured source failed:
+native 45/47, peers 51/52, process 8/8. Two native fixtures warmed the new route
+cache before blocking control reads; both failures reproduced locally and passed
+with their original assertions after giving recovery a fresh client. This test-only
+correction happened after measurement. The peer credential lookup failure after
+the explicit memory-exhaustion probe remains open. Two local process-suite attempts
+failed owner recovery and subsequent fixture creation; Docker’s filesystem had
+almost no free inodes. All eight process tests passed in CI. These records leave
+full recovery qualification open.
+
+### Previous instrumented release pair
+
 The [instrumented release rerun](../benchmarks/2026-09-30-runtime-metrics/README.md)
-uses source `8e33705` and the already-current Cellule `30671d5` pin. Both backends
+uses source `8e33705` and Cellule `30671d5`, which was current at measurement. Both backends
 completed all 24 cases: BeyondDB recorded **38 SDK errors**, SQLite zero. Each
 failing case's recorded first error was a read timeout.
 
@@ -36,14 +78,15 @@ all API rates, sample counts, errors, and host memory observations.
 Fresh local checks passed all 46 native integration tests, 25 library tests,
 both signed durability controls, actual owner process-kill recovery, formatting,
 strict Clippy, and the locked release build. Rust CI passed; full SDK CI on the
-measured source is still running. Prior broad qualification failures remain
-open until the complete suite passes. The follower recovery fixture now waits
+measured source failed with native 46/46, peers 51/52, and process tests 8/8.
+Abandoned-coordinator recovery after the remote owner stopped renewing missed
+its 45-second deadline. Recovery qualification remains open. The follower recovery fixture now waits
 for its warmup receipt to publish and requires activation on the first write
 whose object publication is blocked.
 
 ### Previous follower diagnostic pair
 
-Cellule `origin/main` was checked again and remains `30671d5`, already used
+At that measurement, Cellule `origin/main` was `30671d5`, used
 by all direct dependencies and lockfile packages. The [fresh release rerun](../benchmarks/2026-09-30-follower-diagnostics/README.md)
 uses measured source `9cba5f1` (production code `d04176c`) and completed all
 24 cases per backend. BeyondDB had **three transaction read timeouts**:
@@ -226,7 +269,7 @@ With the default `auth_cache_enabled: false`, the server has no process-wide cre
 
 For a workload that accepts bounded cross-node visibility, set `auth_cache_enabled` to `true` in the node configuration. This enables ExtendDB's 60-second stale-while-revalidate credential, IAM, and table metadata caches and wires local management invalidation through `AuthCacheRegistry`. It also caches immutable catalog proofs and resident local Cell handles for 500 ms, so warm requests avoid repeated catalog and owner-resolution reads. The Cell handle still fences drained owners; authority is refreshed after the cache window. Keep it disabled when immediate remote credential revocation, table recreation visibility, or owner changes are required.
 
-The same opt-in mode caches positive `DescribeTable` and `ListTables` responses for 500 ms, with at most 128 entries of each type per node. Local table creation, deletion, and update invalidate these responses as soon as the durable command completes. A remote node's table change can remain absent from a cached response until its entry expires. Item reads and writes still reach their owning Cell.
+The same opt-in mode caches positive `DescribeTable`, `ListTables`, and backend table-key metadata for 500 ms, with at most 128 entries of each type per node. Batch APIs call the backend metadata lookup directly, so this cache also removes repeated account-Cell queries on that path. Local table creation, deletion, and update invalidate these entries as soon as the durable command completes. A remote node's table change can remain absent from a cached response until its entry expires. Item reads and writes still reach their owning Cell.
 
 On a fresh release fixture, the metadata cache measured 489/571 `DescribeTable` and 583/786 `ListTables` requests/s at one/eight clients, compared with 285/384 and 215/472 in an earlier BeyondDB fixture. A nearby SQLite fixture reached 835/1,196 and 701/343 respectively; its eight-client listing rate fell under host contention. The [raw metadata sample](../benchmarks/2026-09-29-metadata-cache/README.md) records the conditions. These short runs show an improvement in the cached path, not consistent SQLite parity.
 
