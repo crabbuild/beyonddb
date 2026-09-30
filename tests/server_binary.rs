@@ -6,7 +6,9 @@ mod server_binary {
     mod capacity;
     mod coordinator_recovery;
     pub(super) mod global_indexes;
+    mod large_reads;
     pub(super) mod local_indexes;
+    mod metadata_cache;
 }
 
 use std::{
@@ -281,6 +283,13 @@ struct ProcessFixture {
 }
 
 async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
+    process_fixture_with_cache(initial_partitions, false).await
+}
+
+async fn process_fixture_with_cache(
+    initial_partitions: u32,
+    auth_cache_enabled: bool,
+) -> ProcessFixture {
     let root = tempfile::tempdir().unwrap();
     tls_files(root.path());
     let s3 = free_addr();
@@ -358,6 +367,7 @@ async fn process_fixture(initial_partitions: u32) -> ProcessFixture {
             "owned_accounts": ["123456789012"],
             "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
             "initial_partitions": initial_partitions,
+            "auth_cache_enabled": auth_cache_enabled,
             "bootstrap": {
                 "account_id": "123456789012",
                 "access_key_id": "AKIAIOSFODNN7EXAMPLE",

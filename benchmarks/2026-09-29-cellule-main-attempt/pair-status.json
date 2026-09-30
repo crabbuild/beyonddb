@@ -1,0 +1,22 @@
+{
+  "root": "/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/beyonddb-perf-current-zsbtxro3",
+  "started_at_unix": 1790749916.511093,
+  "host_load_start": [
+    44.51318359375,
+    57.92919921875,
+    53.5283203125
+  ],
+  "beyond_exit_code": 1,
+  "host_load_after_beyond": [
+    47.5185546875,
+    56.4794921875,
+    53.38232421875
+  ],
+  "sqlite_exit_code": 0,
+  "ended_at_unix": 1790750119.0698938,
+  "host_load_end": [
+    90.37353515625,
+    66.35498046875,
+    57.46142578125
+  ]
+}

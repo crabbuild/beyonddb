@@ -5,6 +5,8 @@
 
 mod routed;
 
+use super::batch::NoReturnMutation;
+use super::transaction_read::validate_read_size;
 use routed::{
     partition_delete_rejection, partition_put_rejection, partition_update_rejection,
     stale_partition,
@@ -27,18 +29,120 @@ use super::{CellStorage, cell_error, mutation_identity, target};
 use crate::TransactionToken;
 use crate::expression_wire::{WireCondition, WireUpdate};
 use crate::{
-    ConditionCheckInput, DeleteItem, DeleteItemInput, GetItem, GetItemInput, GetItemOutcome,
-    ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput, PartitionDeleteOutcome,
-    PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut, PartitionPutInput,
-    PartitionPutOutcome, PartitionQuery, PartitionQueryInput, PartitionQueryOutcome,
-    PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome, PutItem, PutItemInput,
-    ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison, SortPredicate, TransactionFailure,
-    TransactionOperation, UpdateItem, UpdateItemInput, UpdateItemOutcome, data_key_hash,
+    ConditionCheckInput, DeleteItem, DeleteItemInput, DeleteItemNoReturn, GetItem, GetItemInput,
+    GetItemOutcome, ItemMutationOutcome, Json, PartitionDelete, PartitionDeleteInput,
+    PartitionDeleteOutcome, PartitionGet, PartitionGetInput, PartitionGetOutcome, PartitionPut,
+    PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
+    PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
+    PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
+    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome,
+    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
+    SortComparison, SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput,
+    TransactWriteNoReturn, TransactionFailure, TransactionOperation, TransactionOutcome,
+    TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome,
+    data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
 
 impl CellStorage {
+    async fn try_local_transaction_read(
+        &self,
+        account_id: &str,
+        inputs: Vec<GetItemInput>,
+        routing: Vec<(TableKeyInfo, Item)>,
+    ) -> Result<Option<Vec<Option<Item>>>, StorageError> {
+        let count = inputs.len();
+        let operations = inputs
+            .into_iter()
+            .map(TransactionOperation::Read)
+            .collect::<Vec<_>>();
+        let participants = self
+            .route_transaction_participants(account_id, operations.clone(), routing)
+            .await?;
+        if participants.len() != 1 {
+            return Ok(None);
+        }
+        let Some((_, participant)) = participants.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut participant_operations = participant.operations;
+        participant_operations.sort_unstable_by_key(|operation| operation.index);
+        let participant_operations = participant_operations
+            .into_iter()
+            .map(|operation| match operation.operation {
+                TransactionOperation::Read(input) => Ok(input),
+                _ => Err(()),
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(participant_operations) = participant_operations else {
+            return Ok(None);
+        };
+        if participant_operations.len() != count {
+            return Ok(None);
+        }
+        let transaction_operations = participant_operations
+            .into_iter()
+            .map(TransactionOperation::Read)
+            .collect();
+        match participant.target {
+            crate::CoordinatorParticipantTarget::Account => {
+                let target = target(account_id)?;
+                let result = self
+                    .client
+                    .query::<TransactReadQuery>(
+                        &target,
+                        None,
+                        Json(TransactWriteInput {
+                            operations: transaction_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => match committed.output.0 {
+                        TransactionReadOutcome::Applied(items) => Ok(Some(items)),
+                        TransactionReadOutcome::Rejected { index, reason } => {
+                            Err(transaction_canceled(index, reason, count, &[]))
+                        }
+                    },
+                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
+                        cellule_runtime::codec::CodecError::Limit,
+                    ))) => Ok(None),
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+            crate::CoordinatorParticipantTarget::Data {
+                table_id,
+                partition_id,
+                epoch,
+            } => {
+                let target = crate::data_target(account_id, &table_id, &partition_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let result = self
+                    .client
+                    .query::<PartitionTransactReadQuery>(
+                        &target,
+                        None,
+                        Json(PartitionTransactWriteInput {
+                            table_id,
+                            epoch,
+                            operations: transaction_operations,
+                        }),
+                    )
+                    .await;
+                match result {
+                    Ok(committed) => {
+                        local_partition_transaction_read_result(committed.output.0, count)
+                    }
+                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
+                        cellule_runtime::codec::CodecError::Limit,
+                    ))) => Ok(None),
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+        }
+    }
+
     pub(super) async fn delete_expired_partition_item(
         &self,
         owner: &CellTarget,
@@ -94,55 +198,146 @@ impl DataEngine for CellStorage {
         Box::pin(async move {
             let key = extract_key(&item, &key_info.base_key_schema);
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
-                let outcome = self
-                    .client
-                    .command::<PartitionPut>(
-                        &partition,
-                        mutation_identity()?,
-                        Json(PartitionPutInput {
-                            table_id: key_info.table_id,
-                            epoch,
-                            item,
-                            condition,
-                        }),
-                    )
-                    .await;
-                let old = match outcome {
-                    Ok(committed) => match committed.output.0 {
-                        PartitionPutOutcome::Applied(old) => old,
-                        _ => return Err(StorageError::Internal("unexpected partition put".into())),
-                    },
-                    Err(InvocationError::Rejected(committed)) => {
-                        return Err(partition_put_rejection(committed.output.0));
+                let no_return = !return_old && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Put(PutItemInput {
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    item,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                     }
-                    Err(error) => return Err(cell_error(error)),
+                    result?;
+                    return Ok(None);
+                }
+                let input = Json(PartitionPutInput {
+                    table_id: key_info.table_id.clone(),
+                    epoch,
+                    item,
+                    condition,
+                });
+                let old = if return_old {
+                    match self
+                        .client
+                        .command::<PartitionPut>(&partition, mutation_identity()?, input)
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionPutOutcome::Applied(old) => old,
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition put".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                            return Err(partition_put_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionPut>(&partition, mutation_identity()?, input)
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionPutOutcome::Applied(_) => None,
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition put result".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                            return Err(partition_put_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
                 };
                 return Ok(if return_old { old } else { None });
             }
             let target = target(&key_info.account_id)?;
+            let no_return = !return_old && condition.is_none();
             let input = PutItemInput {
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 item,
                 condition,
             };
-            let old = match self
-                .client
-                .command::<PutItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
-                Ok(committed) => match committed.output.0 {
-                    ItemMutationOutcome::Applied(old) => old,
-                    _ => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful put result".into(),
-                        ));
+            let old = if return_old {
+                match self
+                    .client
+                    .command::<PutItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(old) => old,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
                     }
-                },
-                Err(InvocationError::Rejected(committed)) => {
-                    return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    Err(error) => return Err(cell_error(error)),
                 }
-                Err(error) => return Err(cell_error(error)),
+            } else if no_return {
+                match self
+                    .client
+                    .command::<PutItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(_) => None,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            } else {
+                match self
+                    .client
+                    .command::<PutItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        ItemMutationOutcome::Applied(_) => None,
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful put result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(mutation_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
             };
             Ok(if return_old { old } else { None })
         })
@@ -162,7 +357,7 @@ impl DataEngine for CellStorage {
                         &partition,
                         &key_info.account_id,
                         Json(PartitionGetInput {
-                            table_id: key_info.table_id,
+                            table_id: key_info.table_id.clone(),
                             epoch,
                             key,
                         }),
@@ -180,7 +375,10 @@ impl DataEngine for CellStorage {
                     | PartitionGetOutcome::StaleRoute
                     | PartitionGetOutcome::Sealed
                     | PartitionGetOutcome::NotReady
-                    | PartitionGetOutcome::WrongPartition => Err(stale_partition()),
+                    | PartitionGetOutcome::WrongPartition => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                        Err(stale_partition())
+                    }
                 };
             }
             let target = target(&key_info.account_id)?;
@@ -190,7 +388,7 @@ impl DataEngine for CellStorage {
                     &key_info.account_id,
                     Json(GetItemInput {
                         table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id,
+                        table_id: key_info.table_id.clone(),
                         key,
                     }),
                 )
@@ -224,20 +422,44 @@ impl DataEngine for CellStorage {
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let no_return = !return_old && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Delete(DeleteItemInput {
+                                    return_old: false,
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    key,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                    }
+                    result?;
+                    return Ok(None);
+                }
+                let input = Json(PartitionDeleteInput {
+                    return_old,
+                    table_id: key_info.table_id.clone(),
+                    epoch,
+                    key,
+                    condition,
+                    ttl: false,
+                });
                 let outcome = self
                     .client
-                    .command::<PartitionDelete>(
-                        &partition,
-                        mutation_identity()?,
-                        Json(PartitionDeleteInput {
-                            return_old,
-                            table_id: key_info.table_id,
-                            epoch,
-                            key,
-                            condition,
-                            ttl: false,
-                        }),
-                    )
+                    .command::<PartitionDelete>(&partition, mutation_identity()?, input)
                     .await;
                 let old = match outcome {
                     Ok(committed) => match committed.output.0 {
@@ -249,6 +471,7 @@ impl DataEngine for CellStorage {
                         }
                     },
                     Err(InvocationError::Rejected(committed)) => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
                         return Err(partition_delete_rejection(committed.output.0));
                     }
                     Err(error) => return Err(cell_error(error)),
@@ -259,15 +482,21 @@ impl DataEngine for CellStorage {
             let input = DeleteItemInput {
                 return_old,
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 key,
                 condition,
             };
-            let old = match self
-                .client
-                .command::<DeleteItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
+            let no_return = !return_old && input.condition.is_none();
+            let outcome = if no_return {
+                self.client
+                    .command::<DeleteItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+            } else {
+                self.client
+                    .command::<DeleteItem>(&target, mutation_identity()?, Json(input))
+                    .await
+            };
+            let old = match outcome {
                 Ok(committed) => match committed.output.0 {
                     ItemMutationOutcome::Applied(old) => old,
                     _ => {
@@ -302,30 +531,80 @@ impl DataEngine for CellStorage {
         let condition = condition.map(|expr| WireCondition::from_core(expr, maps));
         Box::pin(async move {
             if let Some((partition, epoch)) = self.routed_owner(&key_info, &key).await? {
+                let no_return = !return_old && !return_new && condition.is_none();
+                if no_return {
+                    let dedup_key = crate::item_key(&key, &key_info.base_key_schema)
+                        .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    let result = self
+                        .submit_no_return(
+                            partition,
+                            NoReturnMutation {
+                                table_id: key_info.table_id.clone(),
+                                epoch,
+                                key: dedup_key,
+                                operation: TransactionOperation::Update(UpdateItemInput {
+                                    table_name: key_info.table_name.clone(),
+                                    table_id: key_info.table_id.clone(),
+                                    key,
+                                    update,
+                                    condition: None,
+                                }),
+                            },
+                        )
+                        .await;
+                    if result.is_err() {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                    }
+                    result?;
+                    return Ok((None, None));
+                }
                 let input = PartitionUpdateInput {
-                    table_id: key_info.table_id,
+                    table_id: key_info.table_id.clone(),
                     epoch,
                     key,
                     update,
                     condition,
                 };
-                let outcome = self
-                    .client
-                    .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
-                    .await;
-                let (old, new) = match outcome {
-                    Ok(committed) => match committed.output.0 {
-                        PartitionUpdateOutcome::Applied { old, new } => (old, new),
-                        _ => {
-                            return Err(StorageError::Internal(
-                                "unexpected partition update".into(),
-                            ));
+                let (old, new) = if return_old || return_new {
+                    match self
+                        .client
+                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition update".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                            return Err(partition_update_rejection(committed.output.0));
                         }
-                    },
-                    Err(InvocationError::Rejected(committed)) => {
-                        return Err(partition_update_rejection(committed.output.0));
+                        Err(error) => return Err(cell_error(error)),
                     }
-                    Err(error) => return Err(cell_error(error)),
+                } else {
+                    match self
+                        .client
+                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
+                        .await
+                    {
+                        Ok(committed) => match committed.output.0 {
+                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                            _ => {
+                                return Err(StorageError::Internal(
+                                    "unexpected partition update result".into(),
+                                ));
+                            }
+                        },
+                        Err(InvocationError::Rejected(committed)) => {
+                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                            return Err(partition_update_rejection(committed.output.0));
+                        }
+                        Err(error) => return Err(cell_error(error)),
+                    }
                 };
                 return Ok((
                     if return_old { old } else { None },
@@ -333,30 +612,71 @@ impl DataEngine for CellStorage {
                 ));
             }
             let target = target(&key_info.account_id)?;
+            let no_return = !return_old && !return_new && condition.is_none();
             let input = UpdateItemInput {
                 table_name: key_info.table_name.clone(),
-                table_id: key_info.table_id,
+                table_id: key_info.table_id.clone(),
                 key,
                 update,
                 condition,
             };
-            let (old, new) = match self
-                .client
-                .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
-                .await
-            {
-                Ok(committed) => match committed.output.0 {
-                    UpdateItemOutcome::Applied { old, new } => (old, new),
-                    _ => {
-                        return Err(StorageError::Internal(
-                            "unexpected successful update result".into(),
-                        ));
+            let (old, new) = if return_old || return_new {
+                match self
+                    .client
+                    .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::Applied { old, new } => (old, new),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
                     }
-                },
-                Err(InvocationError::Rejected(committed)) => {
-                    return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    Err(error) => return Err(cell_error(error)),
                 }
-                Err(error) => return Err(cell_error(error)),
+            } else if no_return {
+                match self
+                    .client
+                    .command::<UpdateItemNoReturn>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::AppliedNoReturn => (None, Item::new()),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
+            } else {
+                match self
+                    .client
+                    .command::<UpdateItem>(&target, mutation_identity()?, Json(input))
+                    .await
+                {
+                    Ok(committed) => match committed.output.0 {
+                        UpdateItemOutcome::Applied { old, new } => (old, new),
+                        _ => {
+                            return Err(StorageError::Internal(
+                                "unexpected successful update result".into(),
+                            ));
+                        }
+                    },
+                    Err(InvocationError::Rejected(committed)) => {
+                        return Err(update_rejection(committed.output.0, &key_info.table_name));
+                    }
+                    Err(error) => return Err(cell_error(error)),
+                }
             };
             Ok((
                 if return_old { old } else { None },
@@ -485,7 +805,10 @@ impl DataEngine for CellStorage {
                     | PartitionQueryOutcome::StaleRoute
                     | PartitionQueryOutcome::Sealed
                     | PartitionQueryOutcome::NotReady
-                    | PartitionQueryOutcome::WrongPartition => Err(stale_partition()),
+                    | PartitionQueryOutcome::WrongPartition => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                        Err(stale_partition())
+                    }
                 };
             }
             if let Some(start) = exclusive_start_key {
@@ -532,56 +855,69 @@ impl DataEngine for CellStorage {
                     })
                 })
                 .transpose()?;
-            if let Some((items, last_evaluated_key)) = self
-                .scan_routed(
-                    &key_info,
-                    limit,
-                    exclusive_start_key.clone(),
-                    segment,
-                    index_name.as_deref(),
-                )
-                .await?
-            {
-                // Retain the unfiltered cursor so empty segment pages still advance.
-                return Ok((
-                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
-                    last_evaluated_key,
-                ));
-            }
-            let target = target(&key_info.account_id)?;
-            let output = self
-                .query_resolving::<ScanItems>(
-                    &target,
-                    &key_info.account_id,
-                    Json(ScanItemsInput {
-                        index_name: index_name.clone(),
-                        table_name: key_info.table_name.clone(),
-                        table_id: key_info.table_id.clone(),
+            let mut cursor = exclusive_start_key;
+            loop {
+                let (items, next) = if let Some(page) = self
+                    .scan_routed(
+                        &key_info,
                         limit,
-                        exclusive_start_key,
-                    }),
-                )
-                .await?;
-            match output.output.0 {
-                ScanItemsOutcome::Page {
-                    items,
-                    last_evaluated_key,
-                } => Ok((
-                    scan_segment(items, &key_info, segment, index_name.as_deref())?,
-                    last_evaluated_key,
-                )),
-                ScanItemsOutcome::Conflict(_) => Err(StorageError::Transient(
-                    "scan range is locked by a transaction".into(),
-                )),
-                ScanItemsOutcome::TableNotFound => {
-                    Err(StorageError::TableNotFound(key_info.table_name))
+                        cursor.clone(),
+                        segment,
+                        index_name.as_deref(),
+                    )
+                    .await?
+                {
+                    page
+                } else {
+                    let account = target(&key_info.account_id)?;
+                    let output = self
+                        .query_resolving::<ScanItems>(
+                            &account,
+                            &key_info.account_id,
+                            Json(ScanItemsInput {
+                                index_name: index_name.clone(),
+                                table_name: key_info.table_name.clone(),
+                                table_id: key_info.table_id.clone(),
+                                limit,
+                                exclusive_start_key: cursor.clone(),
+                            }),
+                        )
+                        .await?;
+                    match output.output.0 {
+                        ScanItemsOutcome::Page {
+                            items,
+                            last_evaluated_key,
+                        } => (items, last_evaluated_key),
+                        ScanItemsOutcome::Conflict(_) => {
+                            return Err(StorageError::Transient(
+                                "scan range is locked by a transaction".into(),
+                            ));
+                        }
+                        ScanItemsOutcome::TableNotFound => {
+                            return Err(StorageError::TableNotFound(key_info.table_name));
+                        }
+                        ScanItemsOutcome::InvalidKey => {
+                            return Err(StorageError::Validation(
+                                "scan continuation key does not match table schema".into(),
+                            ));
+                        }
+                        ScanItemsOutcome::InvalidLimit => {
+                            return Err(StorageError::Validation(
+                                "scan limit must be positive".into(),
+                            ));
+                        }
+                    }
+                };
+                let visible = scan_segment(items, &key_info, segment, index_name.as_deref())?;
+                if !visible.is_empty() || next.is_none() {
+                    return Ok((visible, next));
                 }
-                ScanItemsOutcome::InvalidKey => Err(StorageError::Validation(
-                    "scan continuation key does not match table schema".into(),
-                )),
-                ScanItemsOutcome::InvalidLimit => Err(StorageError::Validation(
-                    "scan limit must be positive".into(),
-                )),
+                if cursor == next {
+                    return Err(StorageError::Internal(
+                        "scan continuation did not advance".into(),
+                    ));
+                }
+                cursor = next;
             }
         })
     }
@@ -597,6 +933,12 @@ impl DataEngine for CellStorage {
             .collect();
         Box::pin(async move {
             let (account_id, inputs) = prepared?;
+            if let Some(items) = self
+                .try_local_transaction_read(&account_id, inputs.clone(), routing.clone())
+                .await?
+            {
+                return validate_read_size(items);
+            }
             // Saved participant images keep a legal aggregate read from crossing
             // one Cell response. Use the same serialization boundary for every route.
             self.transaction_read(&account_id, inputs, routing).await
@@ -659,6 +1001,19 @@ impl DataEngine for CellStorage {
                 ));
             }
             let count = operations.len();
+            if token.is_none()
+                && self
+                    .try_local_transaction_write(
+                        &account_id,
+                        operations.clone(),
+                        routing.clone(),
+                        count,
+                        &return_old_on_failure,
+                    )
+                    .await?
+            {
+                return Ok(());
+            }
             let admitted = self
                 .admit_transaction(&account_id, token, operations, routing)
                 .await?;
@@ -734,6 +1089,130 @@ fn segment_bounds(segment: u64, total: u64) -> ([u8; 16], Option<[u8; 16]>) {
     )
 }
 
+impl CellStorage {
+    async fn try_local_transaction_write(
+        &self,
+        account_id: &str,
+        operations: Vec<TransactionOperation>,
+        routing: Vec<(TableKeyInfo, Item)>,
+        count: usize,
+        return_old_on_failure: &[bool],
+    ) -> Result<bool, StorageError> {
+        let participants = self
+            .route_transaction_participants(account_id, operations.clone(), routing)
+            .await?;
+        if participants.len() != 1 {
+            return Ok(false);
+        }
+        let Some((_, participant)) = participants.into_iter().next() else {
+            return Ok(false);
+        };
+        // A coordinator is required as soon as a request spans Cells. The local
+        // commands already stage and apply every operation in one SQLite
+        // transaction, so bypassing the coordinator is safe for this case.
+        let mut participant_operations = participant.operations;
+        participant_operations.sort_unstable_by_key(|operation| operation.index);
+        let participant_operations = participant_operations
+            .into_iter()
+            .map(|operation| operation.operation)
+            .collect::<Vec<_>>();
+        if participant_operations.len() != operations.len() {
+            return Ok(false);
+        }
+        match participant.target {
+            crate::CoordinatorParticipantTarget::Account => {
+                let target = target(account_id)?;
+                let result = if return_old_on_failure.iter().all(|return_old| !return_old) {
+                    self.client
+                        .command::<TransactWriteNoReturn>(
+                            &target,
+                            mutation_identity()?,
+                            Json(TransactWriteInput {
+                                operations: participant_operations.clone(),
+                            }),
+                        )
+                        .await
+                } else {
+                    self.client
+                        .command::<TransactWrite>(
+                            &target,
+                            mutation_identity()?,
+                            Json(TransactWriteInput {
+                                operations: participant_operations,
+                            }),
+                        )
+                        .await
+                };
+                match result {
+                    Ok(committed) => match committed.output.0 {
+                        TransactionOutcome::Applied => Ok(true),
+                        TransactionOutcome::Rejected { index, reason } => Err(
+                            transaction_canceled(index, reason, count, return_old_on_failure),
+                        ),
+                    },
+                    Err(InvocationError::Rejected(committed)) => match committed.output.0 {
+                        TransactionOutcome::Applied => Err(StorageError::Internal(
+                            "unexpected rejected local account transaction".into(),
+                        )),
+                        TransactionOutcome::Rejected { index, reason } => Err(
+                            transaction_canceled(index, reason, count, return_old_on_failure),
+                        ),
+                    },
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+            crate::CoordinatorParticipantTarget::Data {
+                table_id,
+                partition_id,
+                epoch,
+            } => {
+                let target = crate::data_target(account_id, &table_id, &partition_id)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let result = if return_old_on_failure.iter().all(|return_old| !return_old) {
+                    self.client
+                        .command::<PartitionTransactWriteNoReturn>(
+                            &target,
+                            mutation_identity()?,
+                            Json(PartitionTransactWriteInput {
+                                table_id,
+                                epoch,
+                                operations: participant_operations.clone(),
+                            }),
+                        )
+                        .await
+                } else {
+                    self.client
+                        .command::<PartitionTransactWrite>(
+                            &target,
+                            mutation_identity()?,
+                            Json(PartitionTransactWriteInput {
+                                table_id,
+                                epoch,
+                                operations: participant_operations,
+                            }),
+                        )
+                        .await
+                };
+                match result {
+                    Ok(committed) => local_partition_transaction_result(
+                        committed.output.0,
+                        count,
+                        return_old_on_failure,
+                    ),
+                    Err(InvocationError::Rejected(committed)) => {
+                        local_partition_transaction_result(
+                            committed.output.0,
+                            count,
+                            return_old_on_failure,
+                        )
+                    }
+                    Err(error) => Err(cell_error(error)),
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn transaction_canceled(
     index: usize,
     reason: TransactionFailure,
@@ -767,6 +1246,44 @@ pub(super) fn transaction_canceled(
         };
     }
     StorageError::TransactionCanceled(reasons)
+}
+
+fn local_partition_transaction_result(
+    outcome: PartitionTransactWriteOutcome,
+    count: usize,
+    return_old_on_failure: &[bool],
+) -> Result<bool, StorageError> {
+    match outcome {
+        PartitionTransactWriteOutcome::Applied => Ok(true),
+        PartitionTransactWriteOutcome::Rejected { index, reason } => Err(transaction_canceled(
+            index,
+            reason,
+            count,
+            return_old_on_failure,
+        )),
+        PartitionTransactWriteOutcome::NotInstalled
+        | PartitionTransactWriteOutcome::StaleRoute
+        | PartitionTransactWriteOutcome::Sealed
+        | PartitionTransactWriteOutcome::NotReady
+        | PartitionTransactWriteOutcome::WrongPartition => Err(stale_partition()),
+    }
+}
+
+fn local_partition_transaction_read_result(
+    outcome: PartitionTransactReadOutcome,
+    count: usize,
+) -> Result<Option<Vec<Option<Item>>>, StorageError> {
+    match outcome {
+        PartitionTransactReadOutcome::Applied(items) => Ok(Some(items)),
+        PartitionTransactReadOutcome::Rejected { index, reason } => {
+            Err(transaction_canceled(index, reason, count, &[]))
+        }
+        PartitionTransactReadOutcome::NotInstalled
+        | PartitionTransactReadOutcome::StaleRoute
+        | PartitionTransactReadOutcome::Sealed
+        | PartitionTransactReadOutcome::NotReady
+        | PartitionTransactReadOutcome::WrongPartition => Err(stale_partition()),
+    }
 }
 
 struct PreparedQuery {
@@ -912,7 +1429,7 @@ fn update_rejection(outcome: UpdateItemOutcome, table_name: &str) -> StorageErro
         }
         UpdateItemOutcome::ConditionFailed(old) => StorageError::ConditionFailed(old),
         UpdateItemOutcome::InvalidExpression(message) => StorageError::Validation(message),
-        UpdateItemOutcome::Applied { .. } => {
+        UpdateItemOutcome::Applied { .. } | UpdateItemOutcome::AppliedNoReturn => {
             StorageError::Internal("unexpected rejected update result".into())
         }
     }

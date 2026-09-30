@@ -4,20 +4,22 @@ use cellule_runtime::client::{InvocationError, Observed, Receipt};
 use cellule_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
+use std::time::Duration;
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseInput,
-    CoordinatorPhaseOutcome, DecideCrossCellTransaction, DecideCrossCellTransactionInput,
-    DecideCrossCellTransactionOutcome, Json, NAMESPACE, ParticipantTransactionState,
-    PendingCrossCellTransaction, PendingTransactionCursor, PendingTransactionState,
-    ReadAccountTransaction, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadPartitionTransaction, ReadPendingCrossCellTransactions,
-    ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadTransactionInput,
-    ReadUnresolvedCoordinatorParticipants, RecordParticipantResolution, RecordReadResultRelease,
-    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, ResolveAccountTransaction,
-    ResolvePartitionTransaction, ResolveTransactionInput, ResolveTransactionOutcome,
-    UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
+    CoordinatorPhaseOutcome, CrossCellTransactionStatus, DecideCrossCellTransaction,
+    DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json, NAMESPACE,
+    ParticipantTransactionState, PendingCrossCellTransaction, PendingTransactionCursor,
+    PendingTransactionState, ReadAccountTransaction, ReadCrossCellTransaction,
+    ReadCrossCellTransactionInput, ReadPartitionTransaction, ReadPendingCrossCellTransactions,
+    ReadPendingCrossCellTransactionsInput, ReadPendingTransactionBoundary, ReadResultRelease,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantResolutions,
+    RecordReadResultReleases, RecordReadResultReleasesInput, ReleaseAccountTransactionReads,
+    ReleasePartitionTransactionReads, ResolveAccountTransaction, ResolvePartitionTransaction,
+    ResolveTransactionInput, ResolveTransactionOutcome, UnresolvedCoordinatorParticipant,
+    account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -172,6 +174,16 @@ impl CellStorage {
             .output
             .0
             .ok_or_else(|| StorageError::Internal("coordinator transaction is missing".into()))?;
+        self.finish_decided_cross_cell_transaction_from_status(&coordinator, &read, status)
+            .await
+    }
+
+    pub(super) async fn finish_decided_cross_cell_transaction_from_status(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        status: CrossCellTransactionStatus,
+    ) -> Result<(), StorageError> {
         let commit = match status.decision {
             CoordinatorDecision::Begin => {
                 return Err(StorageError::Transient(
@@ -187,7 +199,7 @@ impl CellStorage {
         }
         let participants = self
             .client
-            .query::<ReadUnresolvedCoordinatorParticipants>(&coordinator, None, Json(read.clone()))
+            .query::<ReadUnresolvedCoordinatorParticipants>(coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -197,19 +209,58 @@ impl CellStorage {
         // window so a slow owner cannot hold healthy keys, without fanning one
         // request out to all 100 participants or detaching work on cancellation.
         let mut resolving = stream::iter(participants)
-            .map(|participant| self.finish_participant(&coordinator, &read, participant, commit))
+            .map(|participant| self.finish_participant(coordinator, read, participant, commit))
             .buffer_unordered(4);
-        while let Some(result) = resolving.next().await {
-            if let Err(error) = result {
-                failure.get_or_insert(error);
+        let mut read_releases = Vec::new();
+        let mut resolutions = Vec::new();
+        loop {
+            // Publish completed participants even if another owner has not
+            // replied. A short quiet window still coalesces nearby receipts.
+            let next = if read_releases.is_empty() && resolutions.is_empty() {
+                resolving.next().await
+            } else {
+                match tokio::time::timeout(Duration::from_millis(2), resolving.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        self.record_resolution_progress(
+                            coordinator,
+                            read,
+                            &mut read_releases,
+                            &mut resolutions,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            };
+            let Some(result) = next else {
+                break;
+            };
+            match result {
+                Ok((true, input)) => read_releases.push(input),
+                Ok((false, input)) => resolutions.push(input),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+            if read_releases.len() + resolutions.len() >= 16 {
+                self.record_resolution_progress(
+                    coordinator,
+                    read,
+                    &mut read_releases,
+                    &mut resolutions,
+                )
+                .await?;
             }
         }
+        self.record_resolution_progress(coordinator, read, &mut read_releases, &mut resolutions)
+            .await?;
         if let Some(error) = failure {
             return Err(error);
         }
         let final_status = self
             .client
-            .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
+            .query::<ReadCrossCellTransaction>(coordinator, None, Json(read.clone()))
             .await
             .map_err(cell_error)?
             .output
@@ -225,13 +276,78 @@ impl CellStorage {
         Ok(())
     }
 
+    async fn record_resolution_progress(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        read_releases: &mut Vec<CoordinatorPhaseInput>,
+        resolutions: &mut Vec<CoordinatorPhaseInput>,
+    ) -> Result<(), StorageError> {
+        if !read_releases.is_empty() {
+            let receipts = read_releases
+                .drain(..)
+                .map(|input| ReadResultRelease {
+                    position: input.position,
+                    participant_cell: input.participant_cell,
+                    sequence: input.sequence,
+                })
+                .collect();
+            let recorded = self
+                .client
+                .command::<RecordReadResultReleases>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(RecordReadResultReleasesInput {
+                        account_id: read.account_id.clone(),
+                        transaction_id: read.transaction_id,
+                        routing_key: read.routing_key.clone(),
+                        releases: receipts,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?;
+            if recorded.output.0.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                )
+            }) {
+                return Err(StorageError::Internal(
+                    "coordinator rejected read result release".into(),
+                ));
+            }
+        }
+        if !resolutions.is_empty() {
+            let recorded = self
+                .client
+                .command::<RecordParticipantResolutions>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(std::mem::take(resolutions)),
+                )
+                .await
+                .map_err(cell_error)?;
+            if recorded.output.0.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                )
+            }) {
+                return Err(StorageError::Internal(
+                    "coordinator rejected participant resolution".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn finish_participant(
         &self,
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
         participant: UnresolvedCoordinatorParticipant,
         commit: bool,
-    ) -> Result<(), StorageError> {
+    ) -> Result<(bool, CoordinatorPhaseInput), StorageError> {
         let position = participant.position;
         let target = match participant.target {
             CoordinatorParticipantTarget::Account => account_target(&read.account_id)
@@ -277,30 +393,7 @@ impl CellStorage {
             participant_cell: *target.cell_id().as_bytes(),
             sequence: receipt.commit_sequence,
         });
-        let identity = mutation_identity()?;
-        let recorded = if participant.release_read_result {
-            self.client
-                .command::<RecordReadResultRelease>(coordinator, identity, input)
-                .await
-        } else {
-            self.client
-                .command::<RecordParticipantResolution>(coordinator, identity, input)
-                .await
-        };
-        match recorded {
-            Ok(committed)
-                if matches!(
-                    committed.output.0,
-                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                ) =>
-            {
-                Ok(())
-            }
-            Ok(_) | Err(InvocationError::Rejected(_)) => Err(StorageError::Internal(
-                "coordinator rejected participant resolution".into(),
-            )),
-            Err(error) => Err(cell_error(error)),
-        }
+        Ok((participant.release_read_result, input.0))
     }
 
     async fn resolve_participant(
@@ -314,19 +407,6 @@ impl CellStorage {
             transaction_id,
             coordinator_cell: *coordinator.cell_id().as_bytes(),
         };
-        let observed = self.participant_state(target, input.clone()).await?;
-        match (commit, observed.output.0) {
-            (true, ParticipantTransactionState::Committed)
-            | (false, ParticipantTransactionState::Aborted) => return Ok(observed.receipt),
-            (true, ParticipantTransactionState::Prepared)
-            | (false, ParticipantTransactionState::Prepared)
-            | (false, ParticipantTransactionState::Missing) => {}
-            _ => {
-                return Err(StorageError::Internal(
-                    "participant state contradicts coordinator decision".into(),
-                ));
-            }
-        }
         let resolve = Json(ResolveTransactionInput {
             transaction_id,
             coordinator_cell: input.coordinator_cell,

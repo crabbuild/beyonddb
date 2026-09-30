@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -20,7 +21,7 @@ use cellule_runtime::cell::{
 };
 use cellule_runtime::client::LocalCellResolver;
 use cellule_runtime::control::{ControlState, authority::CellAuthority};
-use cellule_runtime::identity::{CellTarget, Digest, SessionId};
+use cellule_runtime::identity::{CellId, CellTarget, Digest, SessionId};
 use cellule_runtime::ltx::CellStorageLayout;
 use cellule_runtime::node::NodeDirectory;
 use cellule_runtime::peer::{
@@ -28,6 +29,7 @@ use cellule_runtime::peer::{
 };
 use cellule_runtime::registry::Registry;
 use cellule_runtime::{Error, Result};
+use tokio::sync::RwLock;
 
 use super::{BeyonddbPeerScope, node_lease::unix_time_ms};
 use crate::{DATA_MODULE, DATA_NAMESPACE, MODULE, NAMESPACE, credentials, transaction_coordinator};
@@ -43,9 +45,19 @@ pub(super) struct LocalResolver {
     runtime: CellRuntime,
     layout: CellStorageLayout,
     registry: Arc<Registry>,
+    catalog_cache: Arc<RwLock<HashMap<CellId, cellule_runtime::cell::catalog::CatalogProof>>>,
+    handle_cache: Option<Arc<RwLock<HashMap<CellId, CachedHandle>>>>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
     placement: Option<Arc<super::placement::RangePlacement>>,
     bootstrap: Option<NodeDirectory>,
+}
+
+const LOCAL_HANDLE_CACHE_TTL: Duration = Duration::from_millis(500);
+
+#[derive(Clone)]
+struct CachedHandle {
+    handle: CellHandle,
+    expires_at: Instant,
 }
 
 impl LocalResolver {
@@ -53,10 +65,20 @@ impl LocalResolver {
         peers: &super::BeyonddbPeers,
         provisioner: Arc<crate::CellInitialPartitionProvisioner>,
     ) -> Self {
+        Self::serving_with_cache(peers, provisioner, false)
+    }
+
+    pub(super) fn serving_with_cache(
+        peers: &super::BeyonddbPeers,
+        provisioner: Arc<crate::CellInitialPartitionProvisioner>,
+        handle_cache_enabled: bool,
+    ) -> Self {
         Self {
             runtime: peers.runtime.clone(),
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            handle_cache: handle_cache_enabled.then(|| Arc::new(RwLock::new(HashMap::new()))),
             provisioner: Some(provisioner),
             placement: None,
             bootstrap: None,
@@ -80,10 +102,36 @@ impl LocalCellResolver for LocalResolver {
         let resolver = self.clone();
         Box::pin(async move {
             BeyonddbPeerScope.check_target(&target)?;
-            let proof = CellCatalog::new(resolver.layout.clone(), target.tenant())
-                .lookup(target.cell_id())
-                .await?
-                .ok_or(Error::CellNotActive)?;
+            let cell = target.cell_id();
+            if let Some(cache) = resolver.handle_cache.as_ref() {
+                let cached = cache.read().await.get(&cell).cloned();
+                if let Some(cached) = cached {
+                    if cached.expires_at > Instant::now() {
+                        return Ok(Some(cached.handle));
+                    }
+                    cache.write().await.remove(&cell);
+                }
+            }
+            let proof = if let Some(proof) = resolver
+                .catalog_cache
+                .read()
+                .await
+                .get(&target.cell_id())
+                .cloned()
+            {
+                proof
+            } else {
+                let proof = CellCatalog::new(resolver.layout.clone(), target.tenant())
+                    .lookup(target.cell_id())
+                    .await?
+                    .ok_or(Error::CellNotActive)?;
+                resolver
+                    .catalog_cache
+                    .write()
+                    .await
+                    .insert(target.cell_id(), proof.clone());
+                proof
+            };
             let module = match target.namespace() {
                 NAMESPACE => MODULE,
                 DATA_NAMESPACE => DATA_MODULE,
@@ -118,6 +166,15 @@ impl LocalCellResolver for LocalResolver {
                         .local_handle(proof.clone(), control)
                         .await?
                 {
+                    if let Some(cache) = resolver.handle_cache.as_ref() {
+                        cache.write().await.insert(
+                            cell,
+                            CachedHandle {
+                                handle: local.clone(),
+                                expires_at: Instant::now() + LOCAL_HANDLE_CACHE_TTL,
+                            },
+                        );
+                    }
                     return Ok(Some(local));
                 }
                 let Some(provisioner) = &resolver.provisioner else {
@@ -294,6 +351,8 @@ pub(super) fn peer_router(
             runtime: runtime.clone(),
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
+            catalog_cache: Arc::new(RwLock::new(HashMap::new())),
+            handle_cache: None,
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,

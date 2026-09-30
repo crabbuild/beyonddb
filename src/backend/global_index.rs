@@ -26,6 +26,46 @@ impl CellStorage {
         source: &CellTarget,
         table_id: &str,
     ) -> Result<bool, StorageError> {
+        self.project_index_changes_bounded(account_id, source, table_id, 1)
+            .await
+    }
+
+    // A background pass may advance several distinct journal entries. A failed
+    // index keeps its entry for replay, but cannot hold newer healthy-index
+    // versions behind repeated attempts at the same entry in one pass.
+    async fn project_index_changes_bounded(
+        &self,
+        account_id: &str,
+        source: &CellTarget,
+        table_id: &str,
+        max_entries: usize,
+    ) -> Result<bool, StorageError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut advanced = false;
+        let mut failure = None;
+        for _ in 0..max_entries {
+            let Some((id, error)) = self
+                .project_index_change_once(account_id, source, table_id, &seen)
+                .await?
+            else {
+                break;
+            };
+            seen.insert(id);
+            advanced = true;
+            if let Some(error) = error {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(advanced), Err)
+    }
+
+    async fn project_index_change_once(
+        &self,
+        account_id: &str,
+        source: &CellTarget,
+        table_id: &str,
+        seen: &std::collections::HashSet<[u8; 32]>,
+    ) -> Result<Option<([u8; 32], Option<StorageError>)>, StorageError> {
         let account = target(account_id)?;
         if source.tenant() != account.tenant()
             || source.application() != account.application()
@@ -48,8 +88,11 @@ impl CellStorage {
         .output
         .0;
         let Some(header) = header else {
-            return Ok(false);
+            return Ok(None);
         };
+        if seen.contains(&header.id) {
+            return Ok(None);
+        }
         let mut bytes = Vec::new();
         while bytes.len() < header.bytes as usize {
             let input = Json(IndexChangeChunk {
@@ -70,7 +113,7 @@ impl CellStorage {
             .0;
             // Another worker can acknowledge only after the whole entry projects.
             let Some(part) = part else {
-                return Ok(true);
+                return Ok(Some((header.id, None)));
             };
             if part.is_empty() || bytes.len() + part.len() > header.bytes as usize {
                 return Err(StorageError::Internal(
@@ -127,7 +170,7 @@ impl CellStorage {
                 .await
         }
         .map_err(cell_error)?;
-        failure.map_or(Ok(true), Err)
+        Ok(Some((header.id, failure)))
     }
 
     async fn project_to_index(
@@ -451,7 +494,7 @@ impl CellStorage {
             .map(|source| async move {
                 provisioner.recover_projection_owner(&source, nodes).await?;
                 if project {
-                    self.project_index_changes(account, &source, table_id)
+                    self.project_index_changes_bounded(account, &source, table_id, 4)
                         .await
                         .map(|_| ())
                 } else {

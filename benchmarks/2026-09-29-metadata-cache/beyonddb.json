@@ -1,0 +1,77 @@
+{
+  "started_at": "2026-09-30T00:19:32.717111+00:00",
+  "endpoint": "http://127.0.0.1:59627",
+  "table": "PerfData",
+  "seconds_per_case": 5,
+  "payload_bytes": 1024,
+  "seed_keys": 64,
+  "sort_key": null,
+  "strong_reads": true,
+  "sdk_retries": 0,
+  "operations": [
+    "describe_table",
+    "list_tables"
+  ],
+  "cases": [
+    {
+      "operation": "describe_table",
+      "items_per_request": 0,
+      "clients": 1,
+      "elapsed_s": 5.0,
+      "completed": 2444,
+      "errors": 0,
+      "first_error": null,
+      "ops_per_s": 488.7,
+      "items_per_s": 0.0,
+      "mean_ms": 2.04,
+      "p50_ms": 1.79,
+      "p95_ms": 4.24,
+      "p99_ms": 7.37
+    },
+    {
+      "operation": "describe_table",
+      "items_per_request": 0,
+      "clients": 8,
+      "elapsed_s": 5.01,
+      "completed": 2859,
+      "errors": 0,
+      "first_error": null,
+      "ops_per_s": 571.05,
+      "items_per_s": 0.0,
+      "mean_ms": 14.0,
+      "p50_ms": 11.34,
+      "p95_ms": 31.82,
+      "p99_ms": 48.17
+    },
+    {
+      "operation": "list_tables",
+      "items_per_request": 0,
+      "clients": 1,
+      "elapsed_s": 5.0,
+      "completed": 2915,
+      "errors": 0,
+      "first_error": null,
+      "ops_per_s": 582.96,
+      "items_per_s": 0.0,
+      "mean_ms": 1.71,
+      "p50_ms": 1.53,
+      "p95_ms": 3.21,
+      "p99_ms": 5.51
+    },
+    {
+      "operation": "list_tables",
+      "items_per_request": 0,
+      "clients": 8,
+      "elapsed_s": 5.01,
+      "completed": 3933,
+      "errors": 0,
+      "first_error": null,
+      "ops_per_s": 785.79,
+      "items_per_s": 0.0,
+      "mean_ms": 10.17,
+      "p50_ms": 8.65,
+      "p95_ms": 22.23,
+      "p99_ms": 33.36
+    }
+  ]
+}

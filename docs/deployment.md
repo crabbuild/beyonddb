@@ -28,8 +28,12 @@ Prepare these resources before starting the server:
 - A 32-byte binary encryption key file. Losing it makes stored access-key
   secrets unreadable. It is shared by nodes in one fleet.
 - A writable scratch directory and enough RAM and disk for the configured
-  Cell and capture budgets. `disk_budget_bytes` and
-  `split_threshold_bytes` must be positive.
+  Cell and capture budgets. `disk_budget_bytes`, `node_retained_bytes`, and
+  `split_threshold_bytes` must be positive. `node_retained_bytes` bounds
+  in-flight Cell command and publication state; it defaults to 1 GiB so a
+  write-heavy node does not hit the runtime mailbox ceiling before durable
+  publication catches up. Lower it on a memory-constrained node or raise it
+  for a larger workload after measuring memory use.
 
 ### Local object-store fixture
 
@@ -121,6 +125,9 @@ Save the next JSON block as `config.json` in the repository root. Replace its ob
   "node_id": "01994f26-5966-7b20-8b58-2fddf198a321",
   "data_dir": "/srv/beyonddb/scratch",
   "disk_budget_bytes": 107374182400,
+  "node_retained_bytes": 1073741824,
+  "max_active_cells": 128,
+  "sql_workers": 12,
   "encryption_key_file": "/etc/beyonddb/encryption.key",
   "region": "us-east-1",
   "peer_bind": "127.0.0.1:9001",
@@ -151,9 +158,24 @@ generations can be changed by another node. Set it to `true` only when the
 cache's 60-second cross-node visibility window is acceptable. Local management
 mutations invalidate cached credentials, policies, boundaries, and table
 metadata immediately; changes made through another node become visible after
-the cache TTL.
+the cache TTL. Enabling the flag also caches complete routed directory pages
+for point operations. The owning data Cell rejects a stale epoch and the
+server drops that route entry, so a split is refreshed on the next request. It
+also keeps immutable catalog proofs and resident local Cell handles for 500 ms;
+the authority check resumes after that window, and a drained Cell handle still
+rejects work immediately. This short owner cache improves warm local latency
+while bounding visibility of an ownership change.
 
-The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+
+`follower_store_bytes` is an optional positive disk budget for persistent
+follower lanes under `data_dir/follower-store`. Setting it opens a private,
+authenticated node-log receiver; it does **not** enable follower durability or
+improve write latency yet. BeyondDB still waits for object-store publication
+and advertises no follower capacity. Reserve this budget in addition to
+`disk_budget_bytes`, and retain the follower directory across process restart.
+The [follower durability guide](follower-durability.md) tracks the remaining
+enrollment, lifecycle, and recovery work.
 
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |

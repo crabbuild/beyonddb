@@ -4,17 +4,21 @@ use std::{error::Error, io, io::Read, net::SocketAddr, path::PathBuf, sync::Arc,
 
 use beyonddb::{
     APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, build_http_state_with_cache,
-    measured_node_capacity, shutdown_serving_node,
+    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeLogTransport,
+    build_http_state_with_cache, measured_node_capacity, shutdown_serving_node,
 };
 use cellule_app::CellApplication;
-use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup};
+use cellule_host::{CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT};
 use cellule_peer_http::{LoadedPeerTls, PeerTlsIdentity};
 use cellule_runtime::{
-    SqlWorkerPool,
+    NodeLeaseGuard, SqlWorkerPool,
+    follower::FollowerStore,
     identity::{Digest, NodeId, SessionId},
-    ltx::{CellStorageLayout, DiskBudget, Host},
-    node::{NodeAdvertisement, NodeCapacity, NodeDirectory, NodeFailureDomain},
+    ltx::{CellStorageLayout, DiskBudget, Host, Limits},
+    node::{
+        NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
+        NodeFailureDomain,
+    },
     registry::BuildDescriptor,
 };
 use cellule_store::{Store, provider_store::build_url_object_store};
@@ -35,6 +39,16 @@ struct Config {
     node_id: Uuid,
     data_dir: PathBuf,
     disk_budget_bytes: u64,
+    /// Optional persistent follower-lane budget. Does not enable fleet proofs.
+    #[serde(default)]
+    follower_store_bytes: Option<u64>,
+    #[serde(default = "default_node_retained_bytes")]
+    node_retained_bytes: usize,
+    #[serde(default = "default_max_active_cells")]
+    max_active_cells: usize,
+    /// Optional SQL worker override. The runtime caps this at sixteen workers.
+    #[serde(default)]
+    sql_workers: Option<usize>,
     encryption_key_file: PathBuf,
     region: String,
     peer_bind: SocketAddr,
@@ -55,8 +69,9 @@ struct Config {
     initial_partitions: u16,
     #[serde(default = "default_split_threshold")]
     split_threshold_bytes: u64,
-    /// Enable ExtendDB's stale-while-revalidate auth and table metadata caches.
-    /// Changes made on another node become visible after the cache TTL.
+    /// Enable stale-while-revalidate auth and table metadata caches plus the
+    /// complete-page routed table cache. Changes made on another node become
+    /// visible after the cache TTL or a stale-route rejection.
     #[serde(default)]
     auth_cache_enabled: bool,
     bootstrap: Option<BootstrapConfig>,
@@ -79,6 +94,16 @@ const fn default_initial_partitions() -> u16 {
 const fn default_split_threshold() -> u64 {
     256 * 1024 * 1024
 }
+
+const fn default_node_retained_bytes() -> usize {
+    1024 * 1024 * 1024
+}
+
+const fn default_max_active_cells() -> usize {
+    128
+}
+
+const MAX_SQL_WORKERS: usize = 16;
 
 #[tokio::main]
 async fn main() -> ServerResult<()> {
@@ -115,8 +140,19 @@ async fn main() -> ServerResult<()> {
 }
 
 async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> ServerResult<()> {
-    if config.disk_budget_bytes == 0 || config.split_threshold_bytes == 0 {
-        return Err(invalid("disk budget and split threshold must be positive").into());
+    if config.disk_budget_bytes == 0
+        || config.node_retained_bytes == 0
+        || config.split_threshold_bytes == 0
+        || config.max_active_cells == 0
+        || config.follower_store_bytes == Some(0)
+        || config
+            .sql_workers
+            .is_some_and(|workers| !(1..=MAX_SQL_WORKERS).contains(&workers))
+    {
+        return Err(invalid(
+            "disk, optional follower-store, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
+        )
+        .into());
     }
     if !["s3://", "gs://", "az://"]
         .iter()
@@ -186,13 +222,24 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let session = SessionId::from_bytes(*session_uuid.as_bytes());
     let session_dir = config.data_dir.join(session_uuid.to_string());
     tokio::fs::create_dir_all(&config.data_dir).await?;
-    let node = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(4, 64)?, 256 * 1024 * 1024)
+    let sql_workers = match config.sql_workers {
+        Some(workers) => SqlWorkerPool::new(workers, config.max_active_cells)?,
+        None => SqlWorkerPool::for_system(config.max_active_cells)?,
+    };
+    let mut builder = CellNodeBuilder::new(Arc::clone(&application))
+        .with_runtime(sql_workers, config.node_retained_bytes)
         .with_replica_host(
             Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
         )
-        .with_session(session)
-        .build()?;
+        .with_session(session);
+    if let Some(bytes) = config.follower_store_bytes {
+        builder = builder.with_follower_store(
+            config.data_dir.join("follower-store"),
+            Limits::default(),
+            DiskBudget::new(bytes),
+        );
+    }
+    let node = builder.build()?;
     let node_shutdown = CancellationToken::new();
     let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
     let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
@@ -202,13 +249,22 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     let fleet = tls.fleet();
     let capacity_runtime = node.runtime();
     let capacity_dir = config.data_dir.clone();
+    let recovery_capable = config.follower_store_bytes.is_some();
     let modules = application.registry().module_digests();
     let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
         let (capacity, placement) = if capacity_runtime.is_shutting_down() {
             (NodeCapacity::default(), None)
         } else {
             match measured_node_capacity(&capacity_dir, capacity_runtime.stats()) {
-                Ok((capacity, placement)) => (capacity, Some(placement)),
+                Ok((mut capacity, placement)) => {
+                    // A persistent follower store permits fenced recovery claims.
+                    // Zero advertised follower bytes still prevents recruitment
+                    // until follower-backed serving has a tested recovery path.
+                    if recovery_capable {
+                        capacity.log_protocol = NODE_LOG_PROTOCOL_VERSION;
+                    }
+                    (capacity, Some(placement))
+                }
                 Err(error) => {
                     // Observation failure disables placement, not the serving lease.
                     // Never renew a stale sample with the next advertisement's time.
@@ -241,7 +297,8 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
     })
     .publish()
     .await?;
-    node.install_node_lease_for_startup(published.guard())?;
+    let follower_guard = published.guard();
+    node.install_node_lease_for_startup(follower_guard.clone())?;
     // Publication during drain still needs the node lease. The host cancels
     // lease maintenance only after the runtime and its durable log close.
     tasks.spawn_lease_maintenance(async move { published.run(&node_shutdown).await })?;
@@ -256,6 +313,7 @@ async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> S
         directory.clone(),
         application,
         session,
+        follower_guard,
         tls,
         peer_listener,
         public_listener,
@@ -291,6 +349,7 @@ async fn serve_ready(
     directory: NodeDirectory,
     application: Arc<cellule_app::CompiledApplication>,
     session: SessionId,
+    follower_guard: NodeLeaseGuard,
     tls: LoadedPeerTls,
     peer_listener: TcpListener,
     public_listener: TcpListener,
@@ -298,25 +357,37 @@ async fn serve_ready(
     encryption_key: [u8; 32],
     bootstrap_secret: Option<Zeroizing<String>>,
 ) -> ServerResult<()> {
-    let peers = Arc::new(BeyonddbPeers::new(
-        node,
+    let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
+    let mut recovery_transport = None;
+    if let Some(store) = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT) {
+        let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
+        recovery_transport = Some(Arc::new(
+            PeerNodeLogTransport::new(
+                directory.clone(),
+                tls.client_identity(),
+                session,
+                node_id,
+                follower_guard.clone(),
+            )
+            .with_local_follower_store(store.clone()),
+        ));
+        peers = peers.with_follower_store(node_id, store, follower_guard);
+    }
+    let peers = Arc::new(peers);
+    let mut provisioner = CellInitialPartitionProvisioner::new(
+        node.runtime(),
+        application,
         layout.clone(),
-        directory.clone(),
         session,
-        &tls,
-    )?);
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            node.runtime(),
-            application,
-            layout.clone(),
-            session,
-            config.peer_endpoint.clone(),
-            session_dir,
-        )?
-        .with_initial_partition_count(config.initial_partitions)?
-        .with_peers(peers.clone()),
-    );
+        config.peer_endpoint.clone(),
+        session_dir,
+    )?
+    .with_initial_partition_count(config.initial_partitions)?
+    .with_peers(peers.clone());
+    if let Some(transport) = recovery_transport {
+        provisioner = provisioner.with_node_log_recovery(transport)?;
+    }
+    let provisioner = Arc::new(provisioner);
     for account_id in &config.owned_accounts {
         provisioner
             .recover_configured_account(account_id, &directory)
@@ -327,7 +398,7 @@ async fn serve_ready(
             .recover_owned_credential(key_id, &directory)
             .await?;
     }
-    let client = peers.client(provisioner.clone());
+    let client = peers.client_with_cache(provisioner.clone(), config.auth_cache_enabled);
     if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
         let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
         CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)

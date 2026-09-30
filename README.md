@@ -64,6 +64,12 @@ stream intent commit in one Cell command. The successful response follows
 durable publication. [PNG version](diagram/beyonddb-architecture/durable-write@2x.png) ·
 [Detailed architecture and recovery design](docs/architecture.md)
 
+The serving binary currently waits for object-store publication on each
+durable write. Cellule's follower-log mode is not enabled in BeyondDB. An
+opt-in persistent follower store and authenticated peer transport exist, but
+the durability provider is not installed in serving and successor recovery
+is unfinished. See the [follower durability design](docs/follower-durability.md).
+
 ## Current capability boundary
 
 | Area | Current state |

@@ -440,13 +440,38 @@ impl CellInitialPartitionProvisioner {
         storage: &CellStorage,
         nodes: &NodeDirectory,
     ) -> Result<(), StorageError> {
-        let admission = self
-            .recover_registered_partitions(account_id, client, nodes)
+        for attempt in 0..3 {
+            // A takeover can complete its authority transition before the
+            // previous actor's worker state has settled. Recheck the account
+            // owner and repeat the idempotent recovery scan on a transient
+            // startup failure, rather than exiting with half the scan done.
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
+            }
+            let result = async {
+                if attempt > 0 {
+                    self.recover_configured_account(account_id, nodes).await?;
+                }
+                let admission = self
+                    .recover_registered_partitions(account_id, client, nodes)
+                    .await;
+                let resolution = self
+                    .recover_registered_coordinators(account_id, client, storage, nodes)
+                    .await;
+                admission.and(resolution)
+            }
             .await;
-        let resolution = self
-            .recover_registered_coordinators(account_id, client, storage, nodes)
-            .await;
-        admission.and(resolution)
+            match result {
+                Ok(()) => return Ok(()),
+                Err(StorageError::Transient(error)) if attempt < 2 => {
+                    tracing::warn!(account_id, attempt = attempt + 1, %error, "registered account recovery retrying");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StorageError::Internal(
+            "registered account recovery exhausted attempts without a result".into(),
+        ))
     }
 
     /// Recover idle or expired registered coordinators for a configured account.

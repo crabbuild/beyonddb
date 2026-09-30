@@ -37,7 +37,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 7] = [
+static COMMANDS: [OperationDescriptor; 10] = [
     operation(1),
     crate::participant::phase_operation(2),
     operation(3),
@@ -45,6 +45,21 @@ static COMMANDS: [OperationDescriptor; 7] = [
     crate::transaction_transport::upload_operation(5),
     crate::participant::phase_operation(6),
     crate::participant::phase_operation(7),
+    OperationDescriptor {
+        input_limit: 64 * 1024,
+        output_limit: 64 * 1024,
+        ..operation(8)
+    },
+    OperationDescriptor {
+        input_limit: 64 * 1024,
+        output_limit: 64 * 1024,
+        ..operation(9)
+    },
+    OperationDescriptor {
+        input_limit: 64 * 1024,
+        output_limit: 64 * 1024,
+        ..operation(10)
+    },
 ];
 static QUERIES: [OperationDescriptor; 6] = [
     OperationDescriptor {
@@ -120,10 +135,13 @@ impl cellule_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_command::<crate::UploadTransactionPayload<BeginCrossCellTransaction>>()?;
         registry.bind_command::<BeginCrossCellTransaction>()?;
         registry.bind_command::<RecordParticipantPrepare>()?;
+        registry.bind_command::<RecordParticipantPrepares>()?;
         registry.bind_command::<DecideCrossCellTransaction>()?;
         registry.bind_command::<RecordParticipantResolution>()?;
+        registry.bind_command::<RecordParticipantResolutions>()?;
         registry.bind_command::<BeginReadResultRelease>()?;
         registry.bind_command::<RecordReadResultRelease>()?;
+        registry.bind_command::<RecordReadResultReleases>()?;
         registry.bind_query::<ReadCrossCellTransaction>()?;
         registry.bind_query::<ReadCoordinatorParticipant>()?;
         registry.bind_query::<ReadPendingCrossCellTransactions>()?;
@@ -235,7 +253,7 @@ impl Command for BeginCrossCellTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<crate::TransactionPayloadRef>;
+    type Input = Json<crate::TransactionCommandInput<BeginCrossCellTransactionInput>>;
     type Output = Json<BeginCrossCellTransactionOutcome>;
 
     fn execute(

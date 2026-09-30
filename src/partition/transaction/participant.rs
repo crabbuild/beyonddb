@@ -44,7 +44,7 @@ impl Command for PreparePartitionTransaction {
     const MODULE: &'static str = DATA_MODULE;
     const ID: u32 = 12;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<crate::TransactionPayloadRef>;
+    type Input = Json<crate::TransactionCommandInput<PreparePartitionTransactionInput>>;
     type Output = Json<PrepareTransactionOutcome>;
 
     fn execute(

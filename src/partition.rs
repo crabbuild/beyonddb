@@ -53,7 +53,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 20] = [
+static COMMANDS: [OperationDescriptor; 25] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -65,7 +65,7 @@ static COMMANDS: [OperationDescriptor; 20] = [
     operation(6),
     operation(7),
     operation(8),
-    operation(9),
+    crate::transaction_write_operation(9),
     operation(10),
     operation(11),
     operation(12),
@@ -80,8 +80,16 @@ static COMMANDS: [OperationDescriptor; 20] = [
     operation(18),
     operation(19),
     operation(20),
+    no_return_operation(21),
+    no_return_operation(22),
+    operation(23),
+    crate::no_return_transaction_operation(24),
+    OperationDescriptor {
+        codec_version: 2,
+        ..no_return_operation(52)
+    },
 ];
-static QUERIES: [OperationDescriptor; 17] = [
+static QUERIES: [OperationDescriptor; 18] = [
     operation(1),
     operation(2),
     operation(3),
@@ -99,6 +107,7 @@ static QUERIES: [OperationDescriptor; 17] = [
     operation(16),
     operation(17),
     operation(18),
+    operation(19),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -109,6 +118,17 @@ const fn operation(id: u32) -> OperationDescriptor {
         schema_max: 1,
         input_limit: OPERATION_BYTES,
         output_limit: OPERATION_BYTES,
+    }
+}
+
+const fn no_return_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: 1024 * 1024,
+        output_limit: 64 * 1024,
     }
 }
 
@@ -173,13 +193,19 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_query::<ReadPartitionIndexes>()?;
         registry.bind_command::<InstallPartition>()?;
         registry.bind_command::<PartitionPut>()?;
+        registry.bind_command::<PartitionPutNoReturn>()?;
         registry.bind_command::<PartitionDelete>()?;
+        registry.bind_command::<PartitionDeleteNoReturn>()?;
         registry.bind_command::<PartitionUpdate>()?;
+        registry.bind_command::<PartitionUpdateNoReturn>()?;
         registry.bind_command::<SealPartition>()?;
         registry.bind_command::<ImportPartitionItem>()?;
         registry.bind_command::<ActivateImportedPartition>()?;
         registry.bind_command::<OpenPartition>()?;
         registry.bind_command::<PartitionTransactWrite>()?;
+        registry.bind_command::<PartitionTransactWriteNoReturn>()?;
+        registry.bind_command::<PartitionTransactRead>()?;
+        registry.bind_query::<PartitionTransactReadQuery>()?;
         registry.bind_command::<ConfigurePartitionTtl>()?;
         registry.bind_command::<BackfillPartitionTtl>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
@@ -941,76 +967,107 @@ impl Command for PartitionPut {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(spec) = indexes::command_spec(context)? else {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionPutOutcome::NotInstalled,
-            )));
-        };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionPutOutcome::StaleRoute,
-            )));
-        }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => {
-                return Ok(CommandResult::Rejected(Json(PartitionPutOutcome::Sealed)));
-            }
-            AccessState::Importing => {
-                return Ok(CommandResult::Rejected(Json(PartitionPutOutcome::NotReady)));
-            }
-        }
-        if !valid_item(&input.item, &spec.table) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionPutOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.item, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
-            &spec.table.id,
-            &input.item,
-            &spec.table.key_schema,
-        )?) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionPutOutcome::WrongPartition,
-            )));
-        }
-        if transaction::key_locked(context, &key)? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionPutOutcome::TransactionConflict,
-            )));
-        }
-        let old = command_item(context, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionPutOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionPutOutcome::InvalidExpression(message),
-                    )));
-                }
-            }
-        }
-        write_item(context, key, &input.item, &spec.table, Some(spec.epoch))?;
-        crate::stream_journal::append(
-            context,
-            &spec.table.id,
-            &spec.table.key_schema,
-            spec.table.stream.as_ref(),
-            old.as_ref(),
-            Some(&input.item),
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
-            old,
-        ))))
+        execute_partition_put(context, input, true)
     }
+}
+
+/// Replace one item without returning its previous image.
+pub struct PartitionPutNoReturn;
+
+impl Command for PartitionPutNoReturn {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 21;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PartitionPutInput>;
+    type Output = Json<PartitionPutOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_partition_put(context, input, false)
+    }
+}
+
+fn execute_partition_put(
+    context: &mut CommandContext<'_, '_>,
+    input: PartitionPutInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<PartitionPutOutcome>>> {
+    let Some(spec) = indexes::command_spec(context)? else {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionPutOutcome::NotInstalled,
+        )));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionPutOutcome::StaleRoute,
+        )));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => {
+            return Ok(CommandResult::Rejected(Json(PartitionPutOutcome::Sealed)));
+        }
+        AccessState::Importing => {
+            return Ok(CommandResult::Rejected(Json(PartitionPutOutcome::NotReady)));
+        }
+    }
+    if !valid_item(&input.item, &spec.table) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionPutOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.item, &spec.table.key_schema)?;
+    if !spec.contains(data_key_hash(
+        &spec.table.id,
+        &input.item,
+        &spec.table.key_schema,
+    )?) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionPutOutcome::WrongPartition,
+        )));
+    }
+    if transaction::key_locked(context, &key)? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionPutOutcome::TransactionConflict,
+        )));
+    }
+    let needs_old = return_old || input.condition.is_some() || spec.table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionPutOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionPutOutcome::InvalidExpression(message),
+                )));
+            }
+        }
+    }
+    write_item(context, key, &input.item, &spec.table, Some(spec.epoch))?;
+    crate::stream_journal::append(
+        context,
+        &spec.table.id,
+        &spec.table.key_schema,
+        spec.table.stream.as_ref(),
+        old.as_ref(),
+        Some(&input.item),
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(PartitionPutOutcome::Applied(
+        if return_old { old } else { None },
+    ))))
 }
 
 /// Delete one item under a verified data Cell epoch.
@@ -1069,95 +1126,128 @@ impl Command for PartitionDelete {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(spec) = indexes::command_spec(context)? else {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::NotInstalled,
-            )));
-        };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::StaleRoute,
-            )));
-        }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionDeleteOutcome::Sealed,
-                )));
-            }
-            AccessState::Importing => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionDeleteOutcome::NotReady,
-                )));
-            }
-        }
-        if !valid_key(&input.key, &spec.table) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::InvalidKey,
-            )));
-        }
-        let key = item_key(&input.key, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
-            &spec.table.id,
-            &input.key,
-            &spec.table.key_schema,
-        )?) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::WrongPartition,
-            )));
-        }
-        if transaction::key_locked(context, &key)? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::TransactionConflict,
-            )));
-        }
-        let old = command_item(context, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionDeleteOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionDeleteOutcome::InvalidExpression(message),
-                    )));
-                }
-            }
-        }
-        if input.ttl && !ttl::expired_for_configured_ttl(context, old.as_ref())? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionDeleteOutcome::ConditionFailed(old),
-            )));
-        }
-        delete_item(context, &spec.table, &key, spec.epoch)?;
-        if input.ttl {
-            crate::stream_journal::append_ttl_delete(
-                context,
-                &spec.table.id,
-                &spec.table.key_schema,
-                spec.table.stream.as_ref(),
-                old.as_ref(),
-            )?;
-        } else {
-            crate::stream_journal::append(
-                context,
-                &spec.table.id,
-                &spec.table.key_schema,
-                spec.table.stream.as_ref(),
-                old.as_ref(),
-                None,
-                0,
-            )?;
-        }
-        Ok(CommandResult::Success(Json(
-            PartitionDeleteOutcome::Applied(if input.return_old { old } else { None }),
-        )))
+        let return_old = input.return_old;
+        execute_partition_delete(context, input, return_old)
     }
+}
+
+/// Delete a partition item without reserving an item-sized result envelope.
+pub struct PartitionDeleteNoReturn;
+
+impl Command for PartitionDeleteNoReturn {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 52;
+    const CODEC_VERSION: u32 = 2;
+    type Input = Json<PartitionDeleteInput>;
+    type Output = Json<PartitionDeleteOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_partition_delete(context, input, false)
+    }
+}
+
+fn execute_partition_delete(
+    context: &mut CommandContext<'_, '_>,
+    input: PartitionDeleteInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<PartitionDeleteOutcome>>> {
+    let Some(spec) = indexes::command_spec(context)? else {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::NotInstalled,
+        )));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::StaleRoute,
+        )));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::Sealed,
+            )));
+        }
+        AccessState::Importing => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionDeleteOutcome::NotReady,
+            )));
+        }
+    }
+    if !valid_key(&input.key, &spec.table) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::InvalidKey,
+        )));
+    }
+    let key = item_key(&input.key, &spec.table.key_schema)?;
+    if !spec.contains(data_key_hash(
+        &spec.table.id,
+        &input.key,
+        &spec.table.key_schema,
+    )?) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::WrongPartition,
+        )));
+    }
+    if transaction::key_locked(context, &key)? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::TransactionConflict,
+        )));
+    }
+    let needs_old =
+        return_old || input.condition.is_some() || input.ttl || spec.table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionDeleteOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionDeleteOutcome::InvalidExpression(message),
+                )));
+            }
+        }
+    }
+    if input.ttl && !ttl::expired_for_configured_ttl(context, old.as_ref())? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionDeleteOutcome::ConditionFailed(old),
+        )));
+    }
+    delete_item(context, &spec.table, &key, spec.epoch)?;
+    if input.ttl {
+        crate::stream_journal::append_ttl_delete(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+        )?;
+    } else {
+        crate::stream_journal::append(
+            context,
+            &spec.table.id,
+            &spec.table.key_schema,
+            spec.table.stream.as_ref(),
+            old.as_ref(),
+            None,
+            0,
+        )?;
+    }
+    Ok(CommandResult::Success(Json(
+        PartitionDeleteOutcome::Applied(if return_old { old } else { None }),
+    )))
 }
 
 /// Update one item under a verified data Cell epoch.
@@ -1198,6 +1288,8 @@ impl PartitionUpdateInput {
 pub enum PartitionUpdateOutcome {
     /// The update committed with both item images.
     Applied { old: Option<Item>, new: Item },
+    /// The update committed without returning either item image.
+    AppliedNoReturn,
     /// No partition contract is installed.
     NotInstalled,
     /// The table ID or data Cell epoch is stale.
@@ -1232,94 +1324,126 @@ impl Command for PartitionUpdate {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(spec) = indexes::command_spec(context)? else {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::NotInstalled,
-            )));
-        };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::StaleRoute,
-            )));
-        }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionUpdateOutcome::Sealed,
-                )));
-            }
-            AccessState::Importing => {
-                return Ok(CommandResult::Rejected(Json(
-                    PartitionUpdateOutcome::NotReady,
-                )));
-            }
-        }
-        if !valid_key(&input.key, &spec.table) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.key, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
-            &spec.table.id,
-            &input.key,
-            &spec.table.key_schema,
-        )?) {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::WrongPartition,
-            )));
-        }
-        if transaction::key_locked(context, &key)? {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::TransactionConflict,
-            )));
-        }
-        let old = command_item(context, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionUpdateOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        PartitionUpdateOutcome::InvalidExpression(message),
-                    )));
-                }
-            }
-        }
-        let mut new = old.clone().unwrap_or_else(|| input.key.clone());
-        if let Err(message) = input
-            .update
-            .apply(&mut new, &spec.table.attribute_definitions)
-        {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::InvalidExpression(message),
-            )));
-        }
-        if !valid_item(&new, &spec.table) || item_key(&new, &spec.table.key_schema)? != key {
-            return Ok(CommandResult::Rejected(Json(
-                PartitionUpdateOutcome::InvalidItem,
-            )));
-        }
-        write_item(context, key, &new, &spec.table, Some(spec.epoch))?;
-        crate::stream_journal::append(
-            context,
-            &spec.table.id,
-            &spec.table.key_schema,
-            spec.table.stream.as_ref(),
-            old.as_ref(),
-            Some(&new),
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(
-            PartitionUpdateOutcome::Applied { old, new },
-        )))
+        execute_partition_update(context, input, true)
     }
+}
+
+/// Apply one update without returning either item image.
+pub struct PartitionUpdateNoReturn;
+
+impl Command for PartitionUpdateNoReturn {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 22;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PartitionUpdateInput>;
+    type Output = Json<PartitionUpdateOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_partition_update(context, input, false)
+    }
+}
+
+fn execute_partition_update(
+    context: &mut CommandContext<'_, '_>,
+    input: PartitionUpdateInput,
+    return_images: bool,
+) -> Result<CommandResult<Json<PartitionUpdateOutcome>>> {
+    let Some(spec) = indexes::command_spec(context)? else {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::NotInstalled,
+        )));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::StaleRoute,
+        )));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionUpdateOutcome::Sealed,
+            )));
+        }
+        AccessState::Importing => {
+            return Ok(CommandResult::Rejected(Json(
+                PartitionUpdateOutcome::NotReady,
+            )));
+        }
+    }
+    if !valid_key(&input.key, &spec.table) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.key, &spec.table.key_schema)?;
+    if !spec.contains(data_key_hash(
+        &spec.table.id,
+        &input.key,
+        &spec.table.key_schema,
+    )?) {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::WrongPartition,
+        )));
+    }
+    if transaction::key_locked(context, &key)? {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::TransactionConflict,
+        )));
+    }
+    let mut old = command_item(context, &key)?;
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionUpdateOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    PartitionUpdateOutcome::InvalidExpression(message),
+                )));
+            }
+        }
+    }
+    let mut new = if return_images || spec.table.stream.is_some() {
+        old.clone().unwrap_or_else(|| input.key.clone())
+    } else {
+        old.take().unwrap_or_else(|| input.key.clone())
+    };
+    if let Err(message) = input
+        .update
+        .apply(&mut new, &spec.table.attribute_definitions)
+    {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::InvalidExpression(message),
+        )));
+    }
+    if !valid_item(&new, &spec.table) || item_key(&new, &spec.table.key_schema)? != key {
+        return Ok(CommandResult::Rejected(Json(
+            PartitionUpdateOutcome::InvalidItem,
+        )));
+    }
+    write_item(context, key, &new, &spec.table, Some(spec.epoch))?;
+    crate::stream_journal::append(
+        context,
+        &spec.table.id,
+        &spec.table.key_schema,
+        spec.table.stream.as_ref(),
+        old.as_ref(),
+        Some(&new),
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(if return_images {
+        PartitionUpdateOutcome::Applied { old, new }
+    } else {
+        PartitionUpdateOutcome::AppliedNoReturn
+    })))
 }
 
 /// Read one item from a routed partition.
@@ -1491,12 +1615,14 @@ fn write_item(
         let old = command_item(context, &key)?;
         crate::global_index::outbox::enqueue(context, table, &key, epoch, old, Some(item.clone()))?;
     }
+    let bytes = serde_json::to_vec(item)?;
+    let inline = bytes.len() <= crate::item_storage::CHUNK_BYTES;
     let (partition_key, sort_key) = index_key(item, &table.key_schema)?;
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
          (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch, logical_bytes) \
-         VALUES (?1, ?2, ?3, X'', ?4, ?5, ?6) ON CONFLICT(item_key) DO UPDATE SET \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(item_key) DO UPDATE SET \
          partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
          item = excluded.item, ttl_generation = excluded.ttl_generation, \
          ttl_epoch = excluded.ttl_epoch, logical_bytes = excluded.logical_bytes",
@@ -1504,12 +1630,15 @@ fn write_item(
             SqlValue::Blob(key.clone()),
             SqlValue::Blob(partition_key),
             SqlValue::Blob(sort_key),
+            SqlValue::Blob(if inline { bytes } else { Vec::new() }),
             ttl_generation,
             ttl_epoch,
             SqlValue::Integer(crate::statistics::item_bytes(item)?),
         ],
     ))?;
-    crate::item_storage::StoredValue::Partition(&key).write(context, item)?;
+    if !inline {
+        crate::item_storage::StoredValue::Partition(&key).write(context, item)?;
+    }
     crate::secondary_index::write(context, table, &key, item)
 }
 

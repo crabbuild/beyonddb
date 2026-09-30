@@ -1,8 +1,10 @@
 //! ExtendDB table operations routed to account Cells.
 
 mod admission;
+mod batch;
 mod data;
 mod global_index;
+mod metadata_cache;
 mod recovery;
 mod remaining;
 mod statistics;
@@ -14,11 +16,17 @@ mod transaction_read;
 mod transaction_transport;
 
 use std::{
-    collections::HashSet,
-    sync::Arc,
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use super::{
+    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
+    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
+    PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
+    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
+};
 use cellule_runtime::client::{CellClient, InvocationError, ReadPolicy};
 use cellule_runtime::identity::{CellTarget, RequestId, TenantId};
 use cellule_runtime::{MutationIdentity, partition_for_shard};
@@ -31,14 +39,9 @@ use extenddb_core::types::{
 };
 use extenddb_storage::error::StorageError;
 use extenddb_storage::{BoxedFuture, TableEngine};
-use tokio::sync::RwLock;
 
-use super::{
-    APPLICATION, CreateTable, CreateTableOutcome, DeleteTable, DeleteTableOutcome, DescribeTable,
-    DescribeTableById, Json, ListTables, ListTablesInput, ListTablesOutcome, NAMESPACE,
-    PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
-    TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
-};
+use batch::NoReturnBatcher;
+use metadata_cache::MetadataCache;
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -86,11 +89,28 @@ pub trait CoordinatorProvisioner: Send + Sync {
 /// ExtendDB table backend over already-provisioned and routable account Cells.
 pub struct CellStorage {
     client: CellClient,
+    no_return_batcher: Arc<NoReturnBatcher>,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
-    account_placement_cache: Arc<RwLock<HashSet<String>>>,
+    route_cache: Arc<RwLock<RouteCacheState>>,
+    route_cache_enabled: bool,
+    metadata_cache: MetadataCache,
 }
+
+#[derive(Clone)]
+struct CachedRoute {
+    partitions: Vec<crate::RoutePagePartition>,
+}
+
+struct RouteCacheState {
+    account_placement: HashSet<String>,
+    routes: HashMap<(String, String), Vec<CachedRoute>>,
+}
+
+// Keep a bounded set of directory leaf pages for large routed tables. A stale
+// epoch still fences the data Cell and invalidates the complete table entry.
+const MAX_CACHED_ROUTE_PAGES: usize = 64;
 
 impl CellStorage {
     pub(crate) fn client(&self) -> &CellClient {
@@ -103,12 +123,19 @@ impl CellStorage {
     /// its requests through this backend. All reads use the current owner so
     /// transaction decisions and prepared intents cannot come from stale snapshots.
     pub fn new(client: CellClient, region: impl Into<String>) -> Self {
+        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         Self {
-            client: client.with_read_policy(ReadPolicy::CurrentOwner),
+            no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
+            client,
             region: region.into(),
             initial_partitions: None,
             coordinators: None,
-            account_placement_cache: Arc::new(RwLock::new(HashSet::new())),
+            route_cache: Arc::new(RwLock::new(RouteCacheState {
+                account_placement: HashSet::new(),
+                routes: HashMap::new(),
+            })),
+            route_cache_enabled: false,
+            metadata_cache: MetadataCache::default(),
         }
     }
 
@@ -131,6 +158,119 @@ impl CellStorage {
         self.initial_partitions = Some(provisioner);
         self
     }
+
+    /// Enables process-local route pages and short-lived metadata responses.
+    ///
+    /// A stale cached route is rejected by the data Cell and invalidated; the
+    /// next request reads the current directory. Metadata responses expire
+    /// after 500 ms and local table changes invalidate them. Keep this opt-in
+    /// alongside other explicitly stale-tolerant serving caches.
+    #[must_use]
+    pub fn with_route_cache(mut self, enabled: bool) -> Self {
+        self.route_cache_enabled = enabled;
+        self
+    }
+
+    pub(super) fn invalidate_route_cache(&self, account_id: &str, table_id: &str) {
+        let key = (account_id.to_owned(), table_id.to_owned());
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache.routes.remove(&key);
+                cache.account_placement.remove(table_id);
+            }
+            Err(poisoned) => {
+                let mut cache = poisoned.into_inner();
+                cache.routes.remove(&key);
+                cache.account_placement.remove(table_id);
+            }
+        }
+    }
+
+    pub(super) fn account_placement_cached(&self, table_id: &str) -> bool {
+        match self.route_cache.read() {
+            Ok(cache) => cache.account_placement.contains(table_id),
+            Err(poisoned) => poisoned.into_inner().account_placement.contains(table_id),
+        }
+    }
+
+    pub(super) fn cached_route(
+        &self,
+        key: &(String, String),
+        hash: [u8; 16],
+    ) -> Option<([u8; 16], u64)> {
+        let lookup = |cache: &RouteCacheState| {
+            cache.routes.get(key).and_then(|pages| {
+                pages.iter().find_map(|page| {
+                    page.partitions
+                        .iter()
+                        .find(|partition| {
+                            hash >= partition.lower
+                                && partition.upper.is_none_or(|upper| hash < upper)
+                        })
+                        .map(|partition| (partition.partition_id, partition.epoch))
+                })
+            })
+        };
+        match self.route_cache.read() {
+            Ok(cache) => lookup(&cache),
+            Err(poisoned) => lookup(&poisoned.into_inner()),
+        }
+    }
+
+    pub(super) fn cache_account_placement(&self, table_id: String) {
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache.account_placement.insert(table_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().account_placement.insert(table_id);
+            }
+        }
+    }
+
+    pub(super) fn cache_route(
+        &self,
+        key: (String, String),
+        partitions: Vec<crate::RoutePagePartition>,
+        complete: bool,
+    ) {
+        match self.route_cache.write() {
+            Ok(mut cache) => {
+                cache_route_pages(&mut cache, key, partitions, complete);
+            }
+            Err(poisoned) => {
+                cache_route_pages(&mut poisoned.into_inner(), key, partitions, complete);
+            }
+        }
+    }
+}
+
+fn cache_route_pages(
+    cache: &mut RouteCacheState,
+    key: (String, String),
+    partitions: Vec<crate::RoutePagePartition>,
+    complete: bool,
+) {
+    let pages = cache.routes.entry(key).or_default();
+    if complete {
+        pages.clear();
+        pages.push(CachedRoute { partitions });
+        return;
+    }
+    let Some(first_lower) = partitions.first().map(|partition| partition.lower) else {
+        return;
+    };
+    if let Some(page) = pages
+        .iter_mut()
+        .find(|page| page.partitions.first().map(|partition| partition.lower) == Some(first_lower))
+    {
+        page.partitions = partitions;
+        return;
+    }
+    if pages.len() >= MAX_CACHED_ROUTE_PAGES {
+        pages.remove(0);
+    }
+    pages.push(CachedRoute { partitions });
 }
 
 impl TableEngine for CellStorage {
@@ -256,6 +396,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.metadata_cache.invalidate();
             if let Some(provisioner) = &self.initial_partitions {
                 table_creation::publish_initial_routes(
                     provisioner.as_ref(),
@@ -330,10 +471,8 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
-            self.account_placement_cache
-                .write()
-                .await
-                .remove(&previous.id);
+            self.metadata_cache.invalidate();
+            self.invalidate_route_cache(&account_id, &previous.id);
             // A concurrent delete/recreate can change the name's generation.
             // Never attach the previous table's sample to the newly deleted one.
             let same_generation = record.id == previous.id;
@@ -352,6 +491,15 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<TableDescription, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
+            let name = input.table_name.clone();
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.description(&account_id, &name)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let (record, status) = match self.lifecycle(&account_id, &input.table_name).await? {
                 crate::TableLifecycle::Missing => {
                     return Err(StorageError::TableNotFound(input.table_name));
@@ -368,7 +516,16 @@ impl TableEngine for CellStorage {
                     (record, status)
                 }
             };
-            self.table_description(record, &account_id, status).await
+            let description = self.table_description(record, &account_id, status).await?;
+            if let Some(generation) = generation {
+                self.metadata_cache.insert_description(
+                    &account_id,
+                    name,
+                    generation,
+                    description.clone(),
+                );
+            }
+            Ok(description)
         })
     }
 
@@ -379,6 +536,16 @@ impl TableEngine for CellStorage {
     ) -> BoxedFuture<'_, Result<ListTablesOutput, StorageError>> {
         let account_id = account_id.to_owned();
         Box::pin(async move {
+            let limit = i64::from(input.limit.unwrap_or(100));
+            let start = input.exclusive_start_table_name;
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.listing(&account_id, limit, &start)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let target = target(&account_id)?;
             let output = self
                 .client
@@ -386,18 +553,30 @@ impl TableEngine for CellStorage {
                     &target,
                     None,
                     Json(ListTablesInput {
-                        limit: i64::from(input.limit.unwrap_or(100)),
-                        exclusive_start: input.exclusive_start_table_name,
+                        limit,
+                        exclusive_start: start.clone(),
                         live_only: false,
                     }),
                 )
                 .await
                 .map_err(cell_error)?;
             match output.output.0 {
-                ListTablesOutcome::Page(page) => Ok(ListTablesOutput {
-                    table_names: page.names,
-                    last_evaluated_table_name: page.last_evaluated,
-                }),
+                ListTablesOutcome::Page(page) => {
+                    let listing = ListTablesOutput {
+                        table_names: page.names,
+                        last_evaluated_table_name: page.last_evaluated,
+                    };
+                    if let Some(generation) = generation {
+                        self.metadata_cache.insert_listing(
+                            &account_id,
+                            limit,
+                            start,
+                            generation,
+                            listing.clone(),
+                        );
+                    }
+                    Ok(listing)
+                }
                 ListTablesOutcome::InvalidLimit => Err(StorageError::Validation(
                     "table listing limit must be 1..=100".into(),
                 )),
@@ -476,6 +655,7 @@ impl TableEngine for CellStorage {
                 },
                 Err(error) => return Err(cell_error(error)),
             };
+            self.metadata_cache.invalidate();
             self.table_description(record, &account_id, TableStatus::Active)
                 .await
         })

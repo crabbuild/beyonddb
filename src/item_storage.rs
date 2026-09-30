@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, Result, SqlBatch, SqlResultSet, SqlValue, table::statement};
 
-const CHUNK_BYTES: usize = 256 * 1024;
+pub(crate) const CHUNK_BYTES: usize = 256 * 1024;
 
 pub(crate) enum StoredValue<'a> {
     Account {
@@ -98,6 +98,14 @@ impl StoredValue<'_> {
     ) -> Result<()> {
         let (table, predicate, mut parameters) = self.address();
         let bytes = serde_json::to_vec(item)?;
+        if bytes.len() <= CHUNK_BYTES {
+            parameters[0] = SqlValue::Blob(bytes);
+            context.sql(&statement(
+                &format!("UPDATE {table} SET item = ?1 WHERE {predicate}"),
+                parameters,
+            ))?;
+            return Ok(());
+        }
         parameters[0] = SqlValue::Integer(
             i64::try_from(bytes.len()).map_err(|_| Error::Command("item size overflow"))?,
         );

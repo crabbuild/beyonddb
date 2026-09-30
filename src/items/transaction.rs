@@ -185,6 +185,146 @@ pub(super) fn write(
     Ok(TransactionOutcome::Applied)
 }
 
+pub(super) fn write_without_old_images(
+    context: &mut CommandContext<'_, '_>,
+    operations: Vec<TransactionOperation>,
+) -> Result<TransactionOutcome> {
+    Ok(match write(context, operations)? {
+        TransactionOutcome::Applied => TransactionOutcome::Applied,
+        TransactionOutcome::Rejected { index, reason } => TransactionOutcome::Rejected {
+            index,
+            reason: without_old_image(reason),
+        },
+    })
+}
+
+pub(super) fn without_old_image(reason: TransactionFailure) -> TransactionFailure {
+    match reason {
+        TransactionFailure::ConditionFailed(_) => TransactionFailure::ConditionFailed(None),
+        reason => reason,
+    }
+}
+
+/// Result of an atomic read batch confined to one account Cell.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TransactionReadOutcome {
+    /// Every requested image was read from one Cell snapshot.
+    Applied(Vec<Option<Item>>),
+    /// No image was returned because one operation failed validation or locking.
+    Rejected {
+        /// Position of the failing read.
+        index: usize,
+        /// Validation or transaction conflict reason.
+        reason: TransactionFailure,
+    },
+}
+
+/// Read a transaction batch atomically when every item belongs to one account Cell.
+pub struct TransactRead;
+
+impl Command for TransactRead {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 52;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactWriteInput>;
+    type Output = Json<TransactionReadOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let staged = match stage(context, input.operations)? {
+            Ok(staged) => staged,
+            Err((index, reason)) => {
+                return Ok(CommandResult::Rejected(Json(
+                    TransactionReadOutcome::Rejected { index, reason },
+                )));
+            }
+        };
+        let images = staged.into_iter().map(|image| image.image).collect();
+        Ok(CommandResult::Success(Json(
+            TransactionReadOutcome::Applied(images),
+        )))
+    }
+}
+
+/// Read a transaction batch through Cellule's read-only query path.
+///
+/// The query callback runs on the Cell worker, so all item and lock reads are
+/// serialized with commands while avoiding a durable mutation publication.
+pub struct TransactReadQuery;
+
+impl Query for TransactReadQuery {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 54;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactWriteInput>;
+    type Output = Json<TransactionReadOutcome>;
+
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        let images = match query_stage(context, input.operations)? {
+            Ok(images) => images,
+            Err((index, reason)) => {
+                return Ok(Json(TransactionReadOutcome::Rejected { index, reason }));
+            }
+        };
+        Ok(Json(TransactionReadOutcome::Applied(images)))
+    }
+}
+
+type ReadStage = std::result::Result<Vec<Option<Item>>, (usize, TransactionFailure)>;
+
+fn query_stage(
+    context: &mut QueryContext<'_>,
+    operations: Vec<TransactionOperation>,
+) -> Result<ReadStage> {
+    if operations.is_empty() || operations.len() > 100 {
+        return Ok(Err((
+            0,
+            TransactionFailure::Validation("transaction operation count is outside 1..=100".into()),
+        )));
+    }
+    let mut images = Vec::with_capacity(operations.len());
+    let mut read_bytes = 0;
+    for (index, operation) in operations.into_iter().enumerate() {
+        let TransactionOperation::Read(input) = operation else {
+            return Ok(Err((
+                index,
+                TransactionFailure::Validation(
+                    "read-only transaction contains a non-read operation".into(),
+                ),
+            )));
+        };
+        let invalid = |message: &str| (index, TransactionFailure::Validation(message.into()));
+        let Some(table) = query_unrouted_table(context, &input.table_name)? else {
+            return Ok(Err(invalid("table does not exist or has a data route")));
+        };
+        if table.id != input.table_id {
+            return Ok(Err(invalid("table identity is stale")));
+        }
+        if !valid_key(&input.key, &table) {
+            return Ok(Err(invalid("item violates table schema")));
+        }
+        let key = item_key(&input.key, &table.key_schema)?;
+        if read_key_conflict(context, &table.id, &key)?.is_some() {
+            return Ok(Err((index, TransactionFailure::Conflict)));
+        }
+        let image = crate::item_storage::StoredValue::Account {
+            table_id: &table.id,
+            key: &key,
+        }
+        .read(|batch| context.sql(batch))?;
+        read_bytes += image
+            .as_ref()
+            .map_or(0, extenddb_core::types::item_size_bytes);
+        if read_bytes > 4 * 1024 * 1024 {
+            return Ok(Err(invalid("transaction read exceeds 4 MiB")));
+        }
+        images.push(image);
+    }
+    Ok(Ok(images))
+}
+
 /// Prepare read or write operations on unrouted tables in one account Cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrepareAccountTransactionInput {
@@ -206,7 +346,7 @@ impl Command for PrepareAccountTransaction {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 21;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<crate::TransactionPayloadRef>;
+    type Input = Json<crate::TransactionCommandInput<PrepareAccountTransactionInput>>;
     type Output = Json<PrepareTransactionOutcome>;
 
     fn execute(

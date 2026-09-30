@@ -47,56 +47,87 @@ impl Command for PutItem {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_unrouted_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        };
-        if table.id != input.table_id {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        }
-        if !valid_item(&input.item, &table) {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.item, &table.key_schema)?;
-        if transaction::key_locked(context, &table.id, &key)? {
-            return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
-        }
-        let old = command_item(context, &table.id, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::InvalidExpression(message),
-                    )));
-                }
+        execute_put_item(context, input, true)
+    }
+}
+
+/// Replace an item without returning its previous image.
+pub struct PutItemNoReturn;
+
+impl Command for PutItemNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 50;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PutItemInput>;
+    type Output = Json<ItemMutationOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_put_item(context, input, false)
+    }
+}
+
+fn execute_put_item(
+    context: &mut CommandContext<'_, '_>,
+    input: PutItemInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<ItemMutationOutcome>>> {
+    let Some(table) = command_unrouted_table(context, &input.table_name)? else {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    };
+    if table.id != input.table_id {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    }
+    if !valid_item(&input.item, &table) {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.item, &table.key_schema)?;
+    if transaction::key_locked(context, &table.id, &key)? {
+        return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
+    }
+    let needs_old = return_old || input.condition.is_some() || table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &table.id, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::InvalidExpression(message),
+                )));
             }
         }
-        write_item(context, &table, &key, &input.item)?;
-        crate::stream_journal::append(
-            context,
-            &table.id,
-            &table.key_schema,
-            table.stream.as_ref(),
-            old.as_ref(),
-            Some(&input.item),
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
-            old,
-        ))))
     }
+    write_item(context, &table, &key, &input.item)?;
+    crate::stream_journal::append(
+        context,
+        &table.id,
+        &table.key_schema,
+        table.stream.as_ref(),
+        old.as_ref(),
+        Some(&input.item),
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
+        if return_old { old } else { None },
+    ))))
 }
 
 /// One item deletion in a named table.
@@ -128,56 +159,88 @@ impl Command for DeleteItem {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_unrouted_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        };
-        if table.id != input.table_id {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::TableNotFound,
-            )));
-        }
-        if !valid_key(&input.key, &table) {
-            return Ok(CommandResult::Rejected(Json(
-                ItemMutationOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.key, &table.key_schema)?;
-        if transaction::key_locked(context, &table.id, &key)? {
-            return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
-        }
-        let old = command_item(context, &table.id, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        ItemMutationOutcome::InvalidExpression(message),
-                    )));
-                }
+        let return_old = input.return_old;
+        execute_delete_item(context, input, return_old)
+    }
+}
+
+/// Delete an item without reserving an item-sized result envelope.
+pub struct DeleteItemNoReturn;
+
+impl Command for DeleteItemNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 55;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<DeleteItemInput>;
+    type Output = Json<ItemMutationOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_delete_item(context, input, false)
+    }
+}
+
+fn execute_delete_item(
+    context: &mut CommandContext<'_, '_>,
+    input: DeleteItemInput,
+    return_old: bool,
+) -> Result<CommandResult<Json<ItemMutationOutcome>>> {
+    let Some(table) = command_unrouted_table(context, &input.table_name)? else {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    };
+    if table.id != input.table_id {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::TableNotFound,
+        )));
+    }
+    if !valid_key(&input.key, &table) {
+        return Ok(CommandResult::Rejected(Json(
+            ItemMutationOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.key, &table.key_schema)?;
+    if transaction::key_locked(context, &table.id, &key)? {
+        return Ok(CommandResult::Rejected(Json(ItemMutationOutcome::Conflict)));
+    }
+    let needs_old = return_old || input.condition.is_some() || table.stream.is_some();
+    let old = if needs_old {
+        command_item(context, &table.id, &key)?
+    } else {
+        None
+    };
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    ItemMutationOutcome::InvalidExpression(message),
+                )));
             }
         }
-        delete_item(context, &table, &key)?;
-        crate::stream_journal::append(
-            context,
-            &table.id,
-            &table.key_schema,
-            table.stream.as_ref(),
-            old.as_ref(),
-            None,
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
-            if input.return_old { old } else { None },
-        ))))
     }
+    delete_item(context, &table, &key)?;
+    crate::stream_journal::append(
+        context,
+        &table.id,
+        &table.key_schema,
+        table.stream.as_ref(),
+        old.as_ref(),
+        None,
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(ItemMutationOutcome::Applied(
+        if return_old { old } else { None },
+    ))))
 }
 
 /// One atomic item update in a named table.
@@ -200,6 +263,8 @@ pub enum UpdateItemOutcome {
     Conflict,
     /// The update committed with both item images.
     Applied { old: Option<Item>, new: Item },
+    /// The update committed without returning either item image.
+    AppliedNoReturn,
     /// The table does not exist.
     TableNotFound,
     /// The key or resulting item violates the table contract.
@@ -224,68 +289,99 @@ impl Command for UpdateItem {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        let Some(table) = command_unrouted_table(context, &input.table_name)? else {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateItemOutcome::TableNotFound,
-            )));
-        };
-        if table.id != input.table_id {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateItemOutcome::TableNotFound,
-            )));
-        }
-        if !valid_key(&input.key, &table) {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateItemOutcome::InvalidItem,
-            )));
-        }
-        let key = item_key(&input.key, &table.key_schema)?;
-        if transaction::key_locked(context, &table.id, &key)? {
-            return Ok(CommandResult::Rejected(Json(UpdateItemOutcome::Conflict)));
-        }
-        let old = command_item(context, &table.id, &key)?;
-        if let Some(condition) = input.condition {
-            let empty = Item::new();
-            match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        UpdateItemOutcome::ConditionFailed(old),
-                    )));
-                }
-                Err(message) => {
-                    return Ok(CommandResult::Rejected(Json(
-                        UpdateItemOutcome::InvalidExpression(message),
-                    )));
-                }
+        execute_update_item(context, input, true)
+    }
+}
+
+/// Apply an update without returning either item image.
+pub struct UpdateItemNoReturn;
+
+impl Command for UpdateItemNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 51;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<UpdateItemInput>;
+    type Output = Json<UpdateItemOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        execute_update_item(context, input, false)
+    }
+}
+
+fn execute_update_item(
+    context: &mut CommandContext<'_, '_>,
+    input: UpdateItemInput,
+    return_images: bool,
+) -> Result<CommandResult<Json<UpdateItemOutcome>>> {
+    let Some(table) = command_unrouted_table(context, &input.table_name)? else {
+        return Ok(CommandResult::Rejected(Json(
+            UpdateItemOutcome::TableNotFound,
+        )));
+    };
+    if table.id != input.table_id {
+        return Ok(CommandResult::Rejected(Json(
+            UpdateItemOutcome::TableNotFound,
+        )));
+    }
+    if !valid_key(&input.key, &table) {
+        return Ok(CommandResult::Rejected(Json(
+            UpdateItemOutcome::InvalidItem,
+        )));
+    }
+    let key = item_key(&input.key, &table.key_schema)?;
+    if transaction::key_locked(context, &table.id, &key)? {
+        return Ok(CommandResult::Rejected(Json(UpdateItemOutcome::Conflict)));
+    }
+    let mut old = command_item(context, &table.id, &key)?;
+    if let Some(condition) = input.condition {
+        let empty = Item::new();
+        match condition.evaluate(old.as_ref().unwrap_or(&empty)) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateItemOutcome::ConditionFailed(old),
+                )));
+            }
+            Err(message) => {
+                return Ok(CommandResult::Rejected(Json(
+                    UpdateItemOutcome::InvalidExpression(message),
+                )));
             }
         }
-        let mut new = old.clone().unwrap_or_else(|| input.key.clone());
-        if let Err(message) = input.update.apply(&mut new, &table.attribute_definitions) {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateItemOutcome::InvalidExpression(message),
-            )));
-        }
-        if !valid_item(&new, &table) || item_key(&new, &table.key_schema)? != key {
-            return Ok(CommandResult::Rejected(Json(
-                UpdateItemOutcome::InvalidItem,
-            )));
-        }
-        write_item(context, &table, &key, &new)?;
-        crate::stream_journal::append(
-            context,
-            &table.id,
-            &table.key_schema,
-            table.stream.as_ref(),
-            old.as_ref(),
-            Some(&new),
-            0,
-        )?;
-        Ok(CommandResult::Success(Json(UpdateItemOutcome::Applied {
-            old,
-            new,
-        })))
     }
+    let mut new = if return_images || table.stream.is_some() {
+        old.clone().unwrap_or_else(|| input.key.clone())
+    } else {
+        old.take().unwrap_or_else(|| input.key.clone())
+    };
+    if let Err(message) = input.update.apply(&mut new, &table.attribute_definitions) {
+        return Ok(CommandResult::Rejected(Json(
+            UpdateItemOutcome::InvalidExpression(message),
+        )));
+    }
+    if !valid_item(&new, &table) || item_key(&new, &table.key_schema)? != key {
+        return Ok(CommandResult::Rejected(Json(
+            UpdateItemOutcome::InvalidItem,
+        )));
+    }
+    write_item(context, &table, &key, &new)?;
+    crate::stream_journal::append(
+        context,
+        &table.id,
+        &table.key_schema,
+        table.stream.as_ref(),
+        old.as_ref(),
+        Some(&new),
+        0,
+    )?;
+    Ok(CommandResult::Success(Json(if return_images {
+        UpdateItemOutcome::Applied { old, new }
+    } else {
+        UpdateItemOutcome::AppliedNoReturn
+    })))
 }
 
 /// One keyed item read in a named table.
@@ -456,10 +552,33 @@ impl Command for TransactWrite {
     }
 }
 
+/// Account-local transactional writes that do not return condition-failure images.
+pub struct TransactWriteNoReturn;
+
+impl Command for TransactWriteNoReturn {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 53;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<TransactWriteInput>;
+    type Output = Json<TransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let outcome = transaction::write_without_old_images(context, input.operations)?;
+        if outcome != TransactionOutcome::Applied {
+            return Ok(CommandResult::Rejected(Json(outcome)));
+        }
+        Ok(CommandResult::Success(Json(TransactionOutcome::Applied)))
+    }
+}
+
 pub(crate) mod transaction;
 pub use transaction::{
     PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
     ReadAccountTransactionResult, ReleaseAccountTransactionReads, ResolveAccountTransaction,
+    TransactRead, TransactReadQuery, TransactionReadOutcome,
 };
 
 mod scan;
@@ -500,17 +619,22 @@ fn write_item(
         let old = command_item(context, table_id, key)?;
         crate::global_index::outbox::enqueue(context, table, key, 0, old, Some(item.clone()))?;
     }
+    let bytes = serde_json::to_vec(item)?;
+    let inline = bytes.len() <= crate::item_storage::CHUNK_BYTES;
     context.sql(&statement(
-        "INSERT INTO ddb_items (table_id, item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, X'', ?5) ON CONFLICT(table_id, item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
+        "INSERT INTO ddb_items (table_id, item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(table_id, item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
         vec![
             SqlValue::Text(table_id.into()),
             SqlValue::Blob(key.to_vec()),
             SqlValue::Blob(crate::partition::key::partition_key_bytes(item, &table.key_schema)?),
             SqlValue::Blob(crate::partition::key::index_key(item, &table.key_schema)?.1),
+            SqlValue::Blob(if inline { bytes } else { Vec::new() }),
             SqlValue::Integer(crate::statistics::item_bytes(item)?),
         ],
     ))?;
-    crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
+    if !inline {
+        crate::item_storage::StoredValue::Account { table_id, key }.write(context, item)?;
+    }
     crate::secondary_index::write(context, table, key, item)
 }
 

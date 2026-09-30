@@ -1,6 +1,7 @@
 //! Durable acknowledgement and recovery of consumed transactional read images.
 
 use cellule_runtime::registry::{Command, CommandContext, CommandResult};
+use serde::{Deserialize, Serialize};
 
 use super::phase::phase_identity;
 use super::{
@@ -71,75 +72,145 @@ impl Command for RecordReadResultRelease {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        phase_identity(context, &input.account_id, &input.routing_key)?;
-        if input.sequence == 0 || input.sequence > i64::MAX as u64 {
-            return Err(Error::Command("invalid read release sequence"));
-        }
-        let rows = context.sql(&statement(
-            "SELECT p.cell_id, p.operation_chunks, p.retain_operations, p.resolved_sequence, \
+        record_read_result_release(context, input)
+    }
+}
+
+fn record_read_result_release(
+    context: &mut CommandContext<'_, '_>,
+    input: CoordinatorPhaseInput,
+) -> Result<CommandResult<Json<CoordinatorPhaseOutcome>>> {
+    phase_identity(context, &input.account_id, &input.routing_key)?;
+    if input.sequence == 0 || input.sequence > i64::MAX as u64 {
+        return Err(Error::Command("invalid read release sequence"));
+    }
+    let rows = context.sql(&statement(
+        "SELECT p.cell_id, p.operation_chunks, p.retain_operations, p.resolved_sequence, \
              t.state, t.unresolved_count, t.read_release_count FROM ddb_coordinator_participants p \
              JOIN ddb_coordinator_transactions t ON t.transaction_id = p.transaction_id \
              WHERE p.transaction_id = ?1 AND p.position = ?2 AND t.account_id = ?3",
-            vec![
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-                SqlValue::Text(input.account_id),
-            ],
-        ))?;
-        let Some(row) = rows[0].rows.first() else {
-            return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::Missing,
-            )));
-        };
-        let [
-            SqlValue::Blob(cell),
-            chunks,
-            SqlValue::Integer(retain),
-            resolved,
-            SqlValue::Integer(state),
-            SqlValue::Integer(unresolved),
-            SqlValue::Integer(releases),
-        ] = row.as_slice()
-        else {
-            return Err(Error::Command("invalid read release record"));
-        };
-        if cell.as_slice() != input.participant_cell {
-            return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::WrongParticipant,
-            )));
-        }
-        if *state != 1 || *unresolved != 0 || *retain != 1 || *resolved == SqlValue::Null {
-            return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::WrongDecision,
-            )));
-        }
-        if *chunks == SqlValue::Null {
-            return Ok(CommandResult::Success(Json(
-                CoordinatorPhaseOutcome::Replay,
-            )));
-        }
-        if *releases == 0 {
-            return Ok(CommandResult::Rejected(Json(
-                CoordinatorPhaseOutcome::WrongDecision,
-            )));
-        }
-        context.sql(&statement(
-            "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2",
-            vec![
-                SqlValue::Blob(input.transaction_id.to_vec()),
-                SqlValue::Integer(i64::from(input.position)),
-            ],
-        ))?;
-        context.sql(&statement(
+        vec![
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+            SqlValue::Text(input.account_id),
+        ],
+    ))?;
+    let Some(row) = rows[0].rows.first() else {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::Missing,
+        )));
+    };
+    let [
+        SqlValue::Blob(cell),
+        chunks,
+        SqlValue::Integer(retain),
+        resolved,
+        SqlValue::Integer(state),
+        SqlValue::Integer(unresolved),
+        SqlValue::Integer(releases),
+    ] = row.as_slice()
+    else {
+        return Err(Error::Command("invalid read release record"));
+    };
+    if cell.as_slice() != input.participant_cell {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::WrongParticipant,
+        )));
+    }
+    if *state != 1 || *unresolved != 0 || *retain != 1 || *resolved == SqlValue::Null {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::WrongDecision,
+        )));
+    }
+    if *chunks == SqlValue::Null {
+        return Ok(CommandResult::Success(Json(
+            CoordinatorPhaseOutcome::Replay,
+        )));
+    }
+    if *releases == 0 {
+        return Ok(CommandResult::Rejected(Json(
+            CoordinatorPhaseOutcome::WrongDecision,
+        )));
+    }
+    context.sql(&statement(
+        "DELETE FROM ddb_transaction_payloads WHERE transaction_id = ?1 AND position = ?2",
+        vec![
+            SqlValue::Blob(input.transaction_id.to_vec()),
+            SqlValue::Integer(i64::from(input.position)),
+        ],
+    ))?;
+    context.sql(&statement(
             "UPDATE ddb_coordinator_participants SET operation_chunks = NULL WHERE transaction_id = ?1 AND position = ?2",
             vec![SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(input.position))],
         ))?;
-        context.sql(&statement(
+    context.sql(&statement(
             "UPDATE ddb_coordinator_transactions SET read_release_count = read_release_count - 1 WHERE transaction_id = ?1",
             vec![SqlValue::Blob(input.transaction_id.to_vec())],
         ))?;
-        Ok(CommandResult::Success(Json(
-            CoordinatorPhaseOutcome::Recorded,
-        )))
+    Ok(CommandResult::Success(Json(
+        CoordinatorPhaseOutcome::Recorded,
+    )))
+}
+
+/// One participant release receipt recorded after its immutable read images are removed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReadResultRelease {
+    pub position: u8,
+    pub participant_cell: [u8; 32],
+    pub sequence: u64,
+}
+
+/// Batch coordinator evidence for a read result release.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecordReadResultReleasesInput {
+    pub account_id: String,
+    pub transaction_id: [u8; 16],
+    pub routing_key: Vec<u8>,
+    pub releases: Vec<ReadResultRelease>,
+}
+
+/// Record several participant cleanup receipts in one coordinator Cell command.
+pub struct RecordReadResultReleases;
+
+impl Command for RecordReadResultReleases {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 8;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<RecordReadResultReleasesInput>;
+    type Output = Json<Vec<CoordinatorPhaseOutcome>>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        if input.releases.is_empty() || input.releases.len() > 100 {
+            return Err(Error::Command("read release batch is outside 1..=100"));
+        }
+        let results = input
+            .releases
+            .into_iter()
+            .map(|release| {
+                record_read_result_release(
+                    context,
+                    CoordinatorPhaseInput {
+                        account_id: input.account_id.clone(),
+                        transaction_id: input.transaction_id,
+                        routing_key: input.routing_key.clone(),
+                        position: release.position,
+                        participant_cell: release.participant_cell,
+                        sequence: release.sequence,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let outcomes = results
+            .into_iter()
+            .map(|result| match result {
+                CommandResult::Success(Json(outcome)) | CommandResult::Rejected(Json(outcome)) => {
+                    outcome
+                }
+            })
+            .collect();
+        Ok(CommandResult::Success(Json(outcomes)))
     }
 }

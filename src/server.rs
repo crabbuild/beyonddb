@@ -2,11 +2,20 @@
 
 mod capacity;
 mod node_lease;
+mod node_log_authority;
+mod node_log_provider;
+mod node_log_receiver;
+mod node_log_recovery;
+mod node_log_sender;
 mod peer_receiver;
 mod placement;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
+pub use node_log_authority::PublishedNodeLogAuthority;
+pub use node_log_provider::PeerNodeDurabilityProvider;
+pub use node_log_recovery::recover_fenced_node_log;
+pub use node_log_sender::PeerNodeLogTransport;
 
 use std::sync::Arc;
 
@@ -14,7 +23,8 @@ use cellule_host::CellNode;
 use cellule_peer_http::{LoadedPeerTls, PeerHttpRoundTrip, PeerTargetScope};
 use cellule_runtime::client::CellClient;
 use cellule_runtime::control::authority::CellAuthority;
-use cellule_runtime::identity::{CellTarget, SessionId};
+use cellule_runtime::follower::FollowerStore;
+use cellule_runtime::identity::{CellTarget, NodeId, SessionId};
 use cellule_runtime::ltx::CellStorageLayout;
 use cellule_runtime::node::NodeDirectory;
 use cellule_runtime::peer::PeerSigner;
@@ -95,6 +105,7 @@ pub struct BeyonddbPeers {
     layout: CellStorageLayout,
     registry: Arc<cellule_runtime::registry::Registry>,
     placement: Arc<placement::RangePlacement>,
+    follower: Option<node_log_receiver::FollowerEndpoint>,
 }
 
 impl BeyonddbPeers {
@@ -135,11 +146,45 @@ impl BeyonddbPeers {
                 signer,
                 round_trip,
             }),
+            follower: None,
         })
+    }
+
+    /// Add a persistent follower lane to the private mTLS listener.
+    ///
+    /// This does not advertise follower capacity or enable fleet durability.
+    #[must_use]
+    pub fn with_follower_store(
+        mut self,
+        node: NodeId,
+        store: Arc<FollowerStore>,
+        guard: cellule_runtime::NodeLeaseGuard,
+    ) -> Self {
+        self.follower = Some(node_log_receiver::FollowerEndpoint::new(
+            self.placement.directory.clone(),
+            self.runtime.clone(),
+            node,
+            store,
+            guard,
+        ));
+        self
     }
 
     /// Build a client that places idle ranges/directories and recovers expired owners.
     pub fn client(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> CellClient {
+        self.client_with_cache(provisioner, false)
+    }
+
+    /// Build a client with the opt-in short-lived local owner cache.
+    ///
+    /// The cache keeps resident handles for 500 ms while the Cell handle still
+    /// fences drained owners. Authority is re-read after expiry, so ownership
+    /// changes remain bounded by the cache window.
+    pub fn client_with_cache(
+        &self,
+        provisioner: Arc<CellInitialPartitionProvisioner>,
+        handle_cache_enabled: bool,
+    ) -> CellClient {
         let principal =
             peer_receiver::peer_principal(self.placement.directory.fleet(), self.placement.session);
         CellClient::peer(
@@ -149,14 +194,22 @@ impl BeyonddbPeers {
             self.placement.round_trip.clone(),
         )
         .with_local_resolver(Arc::new(
-            peer_receiver::LocalResolver::serving(self, provisioner)
-                .with_placement(self.placement.clone()),
+            peer_receiver::LocalResolver::serving_with_cache(
+                self,
+                provisioner,
+                handle_cache_enabled,
+            )
+            .with_placement(self.placement.clone()),
         ))
     }
 
     /// Build the authenticated peer route; mount only on this identity's mTLS listener.
     pub fn router(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> axum::Router {
-        peer_receiver::peer_router(self, provisioner)
+        let router = peer_receiver::peer_router(self, provisioner);
+        match &self.follower {
+            Some(follower) => router.merge(node_log_receiver::router(follower.clone())),
+            None => router,
+        }
     }
 
     pub(crate) fn directory(&self) -> &NodeDirectory {
@@ -257,7 +310,8 @@ pub fn build_http_state_with_cache(
     let storage: Arc<dyn StorageEngine> = Arc::new(
         CellStorage::new(client.clone(), region)
             .with_transaction_coordinators(provisioner.clone())
-            .with_initial_partitions(provisioner),
+            .with_initial_partitions(provisioner)
+            .with_route_cache(cache_enabled),
     );
     let credentials: Arc<dyn extenddb_auth::CredentialStore> = Arc::new(CellCredentialStore::new(
         client.clone(),

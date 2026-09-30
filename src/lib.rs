@@ -40,8 +40,10 @@ pub use partition::*;
 pub use provision::*;
 pub use routing::*;
 pub use server::{
-    BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PublishedNodeLease, build_http_state,
-    build_http_state_with_cache, measured_node_capacity, shutdown_serving_node,
+    BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PeerNodeDurabilityProvider,
+    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, build_http_state,
+    build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
+    shutdown_serving_node,
 };
 pub use split::*;
 pub use stream_journal::{
@@ -58,8 +60,8 @@ pub use table::*;
 pub use transaction_coordinator::*;
 pub use transaction_token::TransactionToken;
 pub use transaction_transport::{
-    MultipartTransactionCommand, TransactionPayloadChunk, TransactionPayloadRef,
-    UploadTransactionPayload,
+    MultipartTransactionCommand, TransactionCommandInput, TransactionPayloadChunk,
+    TransactionPayloadRef, UploadTransactionPayload,
 };
 pub use ttl::*;
 
@@ -107,6 +109,15 @@ static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     )
 });
 const OPERATION_BYTES: u32 = 4 * 1024 * 1024 + 64 * 1024;
+// Unconditional no-return mutations do not carry item images in their result.
+// Keep their mailbox reservation small so concurrent writes are not limited by
+// the generic 4 MiB command envelope.
+const NO_RETURN_INPUT_BYTES: u32 = 1024 * 1024;
+const NO_RETURN_OUTPUT_BYTES: u32 = 64 * 1024;
+// A transaction write can return one failed item's old image, but never a
+// successful item list. Keep the result envelope below the generic operation
+// bound while retaining the full 4 MiB input budget for up to 100 operations.
+const TRANSACTION_WRITE_OUTPUT_BYTES: u32 = 1024 * 1024;
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NAMESPACE,
@@ -128,11 +139,44 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 28] = [
+const fn no_return_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: NO_RETURN_INPUT_BYTES,
+        output_limit: NO_RETURN_OUTPUT_BYTES,
+    }
+}
+
+const fn transaction_write_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: OPERATION_BYTES,
+        output_limit: TRANSACTION_WRITE_OUTPUT_BYTES,
+    }
+}
+
+const fn no_return_transaction_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit: OPERATION_BYTES,
+        output_limit: NO_RETURN_OUTPUT_BYTES,
+    }
+}
+
+static COMMANDS: [OperationDescriptor; 33] = [
     operation(1),
     operation(2),
     operation(3),
-    operation(5),
+    transaction_write_operation(5),
     operation(7),
     operation(8),
     operation(9),
@@ -176,8 +220,13 @@ static COMMANDS: [OperationDescriptor; 28] = [
     operation(43),
     operation(44),
     operation(45),
+    no_return_operation(50),
+    no_return_operation(51),
+    operation(52),
+    no_return_transaction_operation(53),
+    no_return_operation(55),
 ];
-static QUERIES: [OperationDescriptor; 31] = [
+static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -227,6 +276,7 @@ static QUERIES: [OperationDescriptor; 31] = [
     operation(47),
     operation(48),
     operation(49),
+    operation(54),
 ];
 
 /// Statically linked account application.
@@ -401,8 +451,11 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<statistics::ReadTableStatistics>()?;
         registry.bind_command::<CreateTable>()?;
         registry.bind_command::<PutItem>()?;
+        registry.bind_command::<PutItemNoReturn>()?;
         registry.bind_command::<DeleteItem>()?;
+        registry.bind_command::<DeleteItemNoReturn>()?;
         registry.bind_command::<TransactWrite>()?;
+        registry.bind_command::<TransactWriteNoReturn>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
         registry.bind_command::<PrepareAccountTransaction>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
@@ -414,6 +467,9 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<ReadTableLifecycle>()?;
         registry.bind_command::<UpdateTable>()?;
         registry.bind_command::<UpdateItem>()?;
+        registry.bind_command::<UpdateItemNoReturn>()?;
+        registry.bind_command::<TransactRead>()?;
+        registry.bind_query::<TransactReadQuery>()?;
         registry.bind_command::<ActivateTableRoute>()?;
         registry.bind_command::<authorization::PutPrincipalPolicy>()?;
         registry.bind_command::<authorization::DeletePrincipalPolicy>()?;

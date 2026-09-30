@@ -12,6 +12,14 @@ use aws_sdk_dynamodb::{
 const TABLE: &str = "ProcessLocalIndex";
 const INDEX: &str = "ByScore";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
+async fn segmented_local_index_scan_advances_empty_pages() {
+    let mut fixture = crate::process_fixture(4).await;
+    create(&fixture.sdk).await;
+    crate::stop(&mut fixture.child, &fixture.log);
+}
+
 fn key(pk: &str, sk: &str) -> HashMap<String, AttributeValue> {
     HashMap::from([
         ("pk".into(), AttributeValue::S(pk.into())),

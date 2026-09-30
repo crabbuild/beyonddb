@@ -4,6 +4,7 @@ use cellule_runtime::client::{InvocationError, Receipt};
 use cellule_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
+use std::time::Duration;
 
 use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
@@ -14,8 +15,8 @@ use crate::{
     ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCrossCellTransaction, ReadCrossCellTransactionInput,
-    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepare,
-    TransactionFailure, account_target, coordinator_target, data_target,
+    ReadTransactionInput, ReadUnresolvedCoordinatorParticipants, RecordParticipantPrepares,
+    TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -30,6 +31,18 @@ impl CellStorage {
         routing_key: &[u8],
         transaction_id: [u8; 16],
     ) -> Result<CoordinatorDecision, StorageError> {
+        Ok(self
+            .resume_cross_cell_transaction_status(account_id, routing_key, transaction_id)
+            .await?
+            .decision)
+    }
+
+    pub(super) async fn resume_cross_cell_transaction_status(
+        &self,
+        account_id: &str,
+        routing_key: &[u8],
+        transaction_id: [u8; 16],
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let coordinator = coordinator_target(account_id, routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
         let read = ReadCrossCellTransactionInput {
@@ -126,7 +139,21 @@ impl CellStorage {
         // capacity outcomes retain the prior participant order.
         let mut prepared = stream::iter(attempts.into_iter().map(
             |(position, payload, target, input)| async move {
-                let result = self.prepare_transaction_participant(&target, input).await;
+                let mut admission_retries = 0;
+                let result = loop {
+                    let result = self
+                        .prepare_transaction_participant(&target, input.clone())
+                        .await;
+                    match result {
+                        Err(PhaseError::Capacity(cellule_runtime::Error::Capacity(_)))
+                            if admission_retries < 4 =>
+                        {
+                            admission_retries += 1;
+                            tokio::time::sleep(Duration::from_millis(2 << admission_retries)).await;
+                        }
+                        other => break other,
+                    }
+                };
                 (position, payload, target, result)
             },
         ))
@@ -193,54 +220,51 @@ impl CellStorage {
             evidence.push((position, target, receipt));
         }
 
-        // Evidence records are independent CAS updates on the coordinator.
-        // Publish them concurrently after all participant prepares succeed;
-        // durable ordering is carried by each participant position.
-        let recorded = stream::iter(evidence.into_iter().map(|(position, target, receipt)| {
-            let coordinator = coordinator.clone();
-            let read = read.clone();
-            async move {
-                let result = self
-                    .client
-                    .command::<RecordParticipantPrepare>(
-                        &coordinator,
-                        mutation_identity()?,
-                        Json(CoordinatorPhaseInput {
-                            account_id: read.account_id,
-                            transaction_id,
-                            routing_key: read.routing_key,
-                            position,
-                            participant_cell: *target.cell_id().as_bytes(),
-                            sequence: receipt.commit_sequence,
-                        }),
-                    )
-                    .await;
-                Ok::<_, StorageError>(result)
-            }
-        }))
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
-        for result in recorded {
-            let recorded = result?;
-            match recorded {
-                Ok(result)
-                    if matches!(
-                        result.output.0,
+        // Participant prepares already ran concurrently. Record their receipts
+        // in one coordinator command so the coordinator publishes one durable
+        // evidence update instead of one round trip per participant.
+        let phases: Vec<_> = evidence
+            .into_iter()
+            .map(|(position, target, receipt)| CoordinatorPhaseInput {
+                account_id: read.account_id.clone(),
+                transaction_id,
+                routing_key: read.routing_key.clone(),
+                position,
+                participant_cell: *target.cell_id().as_bytes(),
+                sequence: receipt.commit_sequence,
+            })
+            .collect();
+        if phases.is_empty() {
+            return self
+                .decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
+                .await;
+        }
+        let recorded = self
+            .client
+            .command::<RecordParticipantPrepares>(&coordinator, mutation_identity()?, Json(phases))
+            .await;
+        match recorded {
+            Ok(result)
+                if result.output.0.iter().all(|outcome| {
+                    matches!(
+                        outcome,
                         CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                    ) => {}
-                Err(InvocationError::Rejected(result))
-                    if result.output.0 == CoordinatorPhaseOutcome::WrongDecision =>
-                {
-                    return self.finish_transaction(&coordinator, &read).await;
-                }
-                Ok(_) | Err(InvocationError::Rejected(_)) => {
-                    return Err(StorageError::Internal(
-                        "coordinator refused prepare evidence".into(),
-                    ));
-                }
-                Err(error) => return Err(cell_error(error)),
+                    )
+                }) => {}
+            Ok(result)
+                if result
+                    .output
+                    .0
+                    .contains(&CoordinatorPhaseOutcome::WrongDecision) =>
+            {
+                return self.finish_transaction(&coordinator, &read).await;
             }
+            Ok(_) | Err(InvocationError::Rejected(_)) => {
+                return Err(StorageError::Internal(
+                    "coordinator refused prepare evidence".into(),
+                ));
+            }
+            Err(error) => return Err(cell_error(error)),
         }
         self.decide_transaction(&coordinator, &read, CoordinatorDecision::Commit)
             .await
@@ -264,20 +288,16 @@ impl CellStorage {
         &self,
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
-    ) -> Result<CoordinatorDecision, StorageError> {
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let status = self.transaction_status(coordinator, read).await?;
         if status.decision == CoordinatorDecision::Begin {
             return Err(StorageError::Transient(
                 "transaction decision remains pending".into(),
             ));
         }
-        self.finish_decided_cross_cell_transaction(
-            &read.account_id,
-            &read.routing_key,
-            read.transaction_id,
-        )
-        .await?;
-        Ok(status.decision)
+        self.finish_decided_cross_cell_transaction_from_status(coordinator, read, status.clone())
+            .await?;
+        Ok(status)
     }
 
     async fn decide_transaction(
@@ -285,7 +305,7 @@ impl CellStorage {
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
         decision: CoordinatorDecision,
-    ) -> Result<CoordinatorDecision, StorageError> {
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
         let result = self
             .client
             .command::<DecideCrossCellTransaction>(
@@ -338,22 +358,57 @@ impl CellStorage {
         // the participant Cell. Avoid a separate state query on the normal
         // first-attempt path; only an ambiguous reply needs a follow-up read.
         let identity = mutation_identity()?;
+        let inline = match &input {
+            ParticipantPrepare::Account(input) => serde_json::to_vec(input),
+            ParticipantPrepare::Data(input) => serde_json::to_vec(input),
+        }
+        .map_err(|error| StorageError::Internal(error.to_string()))?
+        .len()
+            <= crate::transaction_transport::INLINE_BYTES;
         let result = match input {
             ParticipantPrepare::Account(input) => {
-                let reference = self
-                    .upload_transaction::<PrepareAccountTransaction>(target, identity, &input)
-                    .await?;
-                self.client
-                    .command::<PrepareAccountTransaction>(target, identity, Json(reference))
-                    .await
+                if inline {
+                    self.client
+                        .command::<PrepareAccountTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Inline(input)),
+                        )
+                        .await
+                } else {
+                    let reference = self
+                        .upload_transaction::<PrepareAccountTransaction>(target, identity, &input)
+                        .await?;
+                    self.client
+                        .command::<PrepareAccountTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Reference(reference)),
+                        )
+                        .await
+                }
             }
             ParticipantPrepare::Data(input) => {
-                let reference = self
-                    .upload_transaction::<PreparePartitionTransaction>(target, identity, &input)
-                    .await?;
-                self.client
-                    .command::<PreparePartitionTransaction>(target, identity, Json(reference))
-                    .await
+                if inline {
+                    self.client
+                        .command::<PreparePartitionTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Inline(input)),
+                        )
+                        .await
+                } else {
+                    let reference = self
+                        .upload_transaction::<PreparePartitionTransaction>(target, identity, &input)
+                        .await?;
+                    self.client
+                        .command::<PreparePartitionTransaction>(
+                            target,
+                            identity,
+                            Json(TransactionCommandInput::Reference(reference)),
+                        )
+                        .await
+                }
             }
         };
         match result {
@@ -382,6 +437,7 @@ impl CellStorage {
     }
 }
 
+#[derive(Clone)]
 enum ParticipantPrepare {
     Account(PrepareAccountTransactionInput),
     Data(PreparePartitionTransactionInput),

@@ -1,0 +1,24 @@
+{
+  "server_commit": "7eaa89b437feed0af0f05883d3f1493f86c6fc6d",
+  "binary_sha256": "dfc9cd868d2bc06b71fa9fbc460a074dca330cb8ceffaebf62d8d54bdb485e38",
+  "host_load_start": [
+    18.75244140625,
+    20.5693359375,
+    21.23828125
+  ],
+  "logical_cpus": 12,
+  "boto3_version": "1.43.105",
+  "fixture": {
+    "sqlite_file": "/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/extenddb-perf-current-kgusnjz2/data.sqlite",
+    "dev_mode_open_auth": true
+  },
+  "endpoint": "http://127.0.0.1:63533",
+  "started_at_unix": 1790737549.836853,
+  "host_load_end": [
+    23.40478515625,
+    21.1689453125,
+    21.34765625
+  ],
+  "ended_at_unix": 1790737671.039475,
+  "bench_exit_code": 0
+}

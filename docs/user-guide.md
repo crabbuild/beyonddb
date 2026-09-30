@@ -47,7 +47,7 @@ aws dynamodb describe-table \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only.
+The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only. The node's `max_active_cells` budget must include those data Cells plus account, coordinator, and management Cells; if the budget is too small, provisioning remains pending until capacity is available. `sql_workers` is an optional override for the SQL worker count (maximum sixteen); the default follows host parallelism. Use it for multi-partition workloads after measuring CPU and memory headroom. It improves independent Cell scheduling, while a single hot Cell remains serialized for ordering and durable publication.
 
 ## Write and read an item
 

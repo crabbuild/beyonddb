@@ -14,6 +14,7 @@ use crate::{Error, Json, Result, SqlValue};
 // spend the fixed transfer lifetime on additional durable round trips.
 pub(crate) const CHUNK_BYTES: usize = 768 * 1024;
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const INLINE_BYTES: usize = CHUNK_BYTES - 4096;
 // Runtime mutation and peer authorization permit five minutes of sender skew.
 // Add that tolerance to the adapter's one-minute absolute upload deadline.
 const MAX_FUTURE_EXPIRY_MS: i64 = 6 * 60_000;
@@ -101,8 +102,19 @@ impl WireValue for TransactionPayloadChunk {
     }
 }
 
+/// Transaction phase input carried inline when it fits in one bounded command.
+/// Larger inputs continue to use the durable multipart upload path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TransactionCommandInput<T> {
+    Inline(T),
+    Reference(TransactionPayloadRef),
+}
+
 /// Transaction phase whose input is assembled atomically from uploaded pieces.
-pub trait MultipartTransactionCommand: Command<Input = Json<TransactionPayloadRef>> {
+pub trait MultipartTransactionCommand:
+    Command<Input = Json<TransactionCommandInput<Self::Payload>>>
+{
     type Payload: Serialize + DeserializeOwned;
     const UPLOAD_COMMAND_ID: u32;
 }
@@ -183,8 +195,12 @@ impl<C: MultipartTransactionCommand> Command for UploadTransactionPayload<C> {
 
 pub(crate) fn consume<C: MultipartTransactionCommand>(
     context: &CommandContext<'_, '_>,
-    reference: TransactionPayloadRef,
+    input: TransactionCommandInput<C::Payload>,
 ) -> Result<C::Payload> {
+    let reference = match input {
+        TransactionCommandInput::Inline(input) => return Ok(input),
+        TransactionCommandInput::Reference(reference) => reference,
+    };
     reference.validate(context.now_ms())?;
     let mut bytes = Vec::with_capacity(reference.bytes as usize);
     for chunk in 0..(reference.bytes as usize).div_ceil(CHUNK_BYTES) {
