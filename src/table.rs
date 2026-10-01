@@ -38,8 +38,26 @@ impl TryFrom<&str> for TableClass {
 pub enum TablePlacement {
     /// Items are stored directly in the account Cell.
     Account,
+    /// One dedicated base data Cell, with automatic and manual base splits disabled.
+    Single,
     /// Base and index directories start with this many ranges each.
     Routed { initial_partitions: u16 },
+}
+
+impl TablePlacement {
+    /// Initial base and global-index range count; account-local tables have no ranges.
+    pub const fn initial_partitions(self) -> Option<u16> {
+        match self {
+            Self::Account => None,
+            Self::Single => Some(1),
+            Self::Routed { initial_partitions } => Some(initial_partitions),
+        }
+    }
+
+    /// Whether data lives outside the account metadata Cell.
+    pub const fn is_routed(self) -> bool {
+        self.initial_partitions().is_some()
+    }
 }
 
 /// An ExtendDB table's key contract stored in the account Cell.
@@ -237,7 +255,7 @@ impl Command for CreateTable {
                 ],
             ))?;
         }
-        if matches!(record.placement, TablePlacement::Routed { .. }) {
+        if record.placement.is_routed() {
             // Persist lifecycle ownership before provisioning independent roots.
             // Deletion must fence even an installer that never publishes its copy.
             for id in std::iter::once(&record.id).chain(
@@ -371,7 +389,7 @@ impl Command for UpdateTable {
         };
         // Initial owners persist this record verbatim. Keep it immutable until
         // route publication so a retry cannot conflict with installed owners.
-        if matches!(table.placement, TablePlacement::Routed { .. })
+        if table.placement.is_routed()
             && context.sql(&statement(
                 "SELECT 1 FROM ddb_directory_roots WHERE table_id = ?1 AND initial_fingerprint IS NOT NULL",
                 vec![SqlValue::Text(table.id.clone())],

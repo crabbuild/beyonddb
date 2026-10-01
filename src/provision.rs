@@ -1070,7 +1070,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+            let Some(initial_partitions) = table.placement.initial_partitions() else {
                 return Err(StorageError::Validation(
                     "account-local table has no initial ranges".into(),
                 ));
@@ -1119,7 +1119,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+            let Some(initial_partitions) = table.placement.initial_partitions() else {
                 return Err(StorageError::Validation(
                     "account-local table has no initial ranges".into(),
                 ));

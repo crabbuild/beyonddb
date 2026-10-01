@@ -2,6 +2,29 @@
 
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: by default an item write waits for Cellule to publish committed state to object storage. Experimental follower durability can acknowledge a durable follower receipt while object tiering continues.
 
+## Why writes and transactions cost more than SQLite
+
+The pinned ExtendDB SQLite backend uses WAL with `synchronous=NORMAL`. SQLite documents that this mode does not synchronize the WAL after every commit; `FULL` adds a synchronization for each commit. BeyondDB waits for object-store publication or a durable follower receipt before acknowledging a mutation. The benchmark therefore compares different durability paths. [SQLite durability reference](https://www.sqlite.org/pragma.html#pragma_synchronous)
+
+```text
+ExtendDB SQLite                  BeyondDB follower mode
+request                          request
+   |                                |
+SQLite transaction               owning Cell command
+   |                                |
+WAL commit                       follower append + fsync
+   |                                |
+response                         durable receipt -> response
+                                    |
+                                 async object tiering
+```
+
+The latest native-volume sample measured SQL commands at 0.542 ms on average, versus 12.447 ms for fresh follower enrollment and 17.620 ms for durable append. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+
+Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
+
+[Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
+
 ## Latest release verification
 
 The [native-volume release pair](../benchmarks/2026-10-01-native-volume-release/README.md)

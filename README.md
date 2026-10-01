@@ -55,6 +55,10 @@ partition-key ranges. A GSI is maintained asynchronously from a journal
 committed with the base item. Cross-Cell transactions use a durable
 coordinator decision and idempotent participant resolution.
 
+### Choose placement per table
+
+Set the `CreateTable` tag `beyonddb:cell-model` to `single`, `auto`, or `partitioned`. Keep one base data Cell for a table that fits its resource budgets, start at one and permit growth, or provision multiple ranges immediately. Omitting the tag preserves `initial_partitions`. GSIs use separate Cells; changing the tag later does not migrate the table. See [Cell model selection](docs/scaling.md#choose-a-tables-cell-model) and the [AWS CLI example](docs/user-guide.md#create-a-table-and-wait-for-it).
+
 ### When a write becomes durable
 
 ![Sequence of a signed PutItem: ExtendDB validates, BeyondDB routes, Cellule commits and publishes LTX, then the response returns](diagram/beyonddb-architecture/durable-write.svg)

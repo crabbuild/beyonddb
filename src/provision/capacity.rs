@@ -206,6 +206,9 @@ impl CellInitialPartitionProvisioner {
         let Some(partition) = partition else {
             return Ok(false);
         };
+        if index_record.is_none() && table.placement == crate::TablePlacement::Single {
+            return Ok(false);
+        }
         if let Some(index) = index_record {
             self.split_global_index_if_over_database_bytes(
                 account_id,
@@ -432,6 +435,15 @@ impl CellInitialPartitionProvisioner {
         if usage.database_bytes <= max_database_bytes {
             return Ok(None);
         }
+        let state = client
+            .query::<ReadPartitionState>(&target, None, Json(()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0;
+        if state.is_some_and(|state| state.spec.table.placement == crate::TablePlacement::Single) {
+            return Ok(None);
+        }
         self.split_partition(
             account_id,
             client.clone(),
@@ -509,6 +521,11 @@ impl CellInitialPartitionProvisioner {
             {
                 return Err(StorageError::Transient(
                     "split source contract changed".into(),
+                ));
+            }
+            if source.table.placement == crate::TablePlacement::Single {
+                return Err(StorageError::Validation(
+                    "single-Cell tables cannot split their base data Cell".into(),
                 ));
             }
             let directory = self

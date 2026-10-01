@@ -630,7 +630,7 @@ impl Command for SealPartition {
                 SealPartitionOutcome::StaleRoute,
             )));
         }
-        if !seal.valid_for(&source) {
+        if source.table.placement == crate::TablePlacement::Single || !seal.valid_for(&source) {
             return Ok(CommandResult::Rejected(Json(
                 SealPartitionOutcome::InvalidSeal,
             )));

@@ -1,3 +1,4 @@
+mod cell_models;
 mod codec;
 mod coordinator_admission;
 mod coordinator_discovery;

@@ -425,7 +425,7 @@ impl CellStorage {
         });
         let account_target = target(account)?;
         let page = async {
-            if matches!(table.placement, crate::TablePlacement::Routed { .. }) {
+            if table.placement.is_routed() {
                 provisioner
                     .recover_route_directory_path(
                         &self.client,

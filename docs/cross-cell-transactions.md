@@ -80,6 +80,9 @@ and [commit assertions](../tests/elastic_cells/transaction_commit.rs) cover
 partial/wrong receipts, one coordinator commit, replay, coordinator restoration,
 competing drivers, and lost replies.
 
+### One Cell and multiple Cell requests
+
+A table created with `beyonddb:cell-model=single` keeps its base items in one dedicated Cell. Small transaction reads whose operations all resolve to that Cell use one atomic query. Cross-table requests and reads requiring saved images can still need coordination. GSIs remain asynchronous and separate.
 
 Two write keys in the same Cell share one prepare and one resolution. Without a
 client token, a write whose operations all route to one Cell uses one atomic
