@@ -20,6 +20,7 @@ mod recovery;
 mod splits;
 mod statistics;
 mod table_class;
+mod update_batch;
 mod usage;
 
 use crate::*;

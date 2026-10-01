@@ -14,6 +14,7 @@ pub(crate) mod table_creation;
 mod transaction;
 mod transaction_read;
 mod transaction_transport;
+mod update_batch;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -42,6 +43,7 @@ use extenddb_storage::{BoxedFuture, TableEngine};
 
 use batch::NoReturnBatcher;
 use metadata_cache::MetadataCache;
+use update_batch::UpdateBatcher;
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -90,6 +92,7 @@ pub trait CoordinatorProvisioner: Send + Sync {
 pub struct CellStorage {
     client: CellClient,
     no_return_batcher: Arc<NoReturnBatcher>,
+    update_batcher: Arc<UpdateBatcher>,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
@@ -126,6 +129,7 @@ impl CellStorage {
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         Self {
             no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
+            update_batcher: Arc::new(UpdateBatcher::new(client.clone())),
             client,
             region: region.into(),
             initial_partitions: None,

@@ -1,4 +1,4 @@
-//! Bounded coalescing for idempotent routed mutations.
+//! Coalescing for routed mutations that need no returned item images.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
@@ -21,7 +21,7 @@ use crate::{
 const BATCH_WINDOW: Duration = Duration::from_millis(2);
 const MAX_BATCH_OPERATIONS: usize = 16;
 
-/// An unconditional mutation that can be replayed safely as part of a batch.
+/// An unconditional mutation committed with the batch's mutation identity.
 #[derive(Clone)]
 pub(crate) struct NoReturnMutation {
     /// Table generation checked by the partition command.
@@ -45,7 +45,7 @@ struct Slot {
     scheduled: AtomicBool,
 }
 
-/// Coalesces a small number of idempotent writes before one durable command.
+/// Coalesces independent writes before one durable command.
 pub(crate) struct NoReturnBatcher {
     client: cellule_runtime::CellClient,
     slots: Mutex<HashMap<[u8; 32], Weak<Slot>>>,

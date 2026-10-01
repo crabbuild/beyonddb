@@ -70,10 +70,15 @@ pub(crate) fn images_size(images: &[Option<Item>]) -> Result<usize> {
 pub(crate) fn encode_images(images: &[Option<Item>], encoder: &mut BoundedEncoder) -> Result<()> {
     encoder.write_count(images.len())?;
     for item in images {
-        encoder.write_bool(item.is_some())?;
-        if let Some(item) = item {
-            encode_map(item, encoder, 0)?;
-        }
+        encode_image(item.as_ref(), encoder)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn encode_image(item: Option<&Item>, encoder: &mut BoundedEncoder) -> Result<()> {
+    encoder.write_bool(item.is_some())?;
+    if let Some(item) = item {
+        encode_map(item, encoder, 0)?;
     }
     Ok(())
 }

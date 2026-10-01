@@ -8,12 +8,12 @@ repository = "https://github.com/crabbuild/beyonddb"
 rust-version = "1.97"
 
 [workspace.dependencies]
-cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
-cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
-cellule-peer-http = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
-cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
-cellule-store = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
-cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "e07670e2348231ed401cc7280a47e3ab97596ffe" }
+cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
+cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
+cellule-peer-http = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
+cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
+cellule-store = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
+cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "a4500add51764fa0415791aefbfa561db6ada203" }
 async-trait = "0.1"
 blake3 = "1.8"
 futures-util = "0.3"

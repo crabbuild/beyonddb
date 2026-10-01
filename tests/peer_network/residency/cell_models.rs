@@ -7,6 +7,166 @@ use extenddb_storage::StreamEngine;
 const ACCOUNT: &str = "123456789012";
 
 #[derive(Default)]
+struct DataCommands(std::sync::atomic::AtomicU64);
+
+impl cellule_runtime::fleet::telemetry::CellTelemetry for DataCommands {
+    fn primitive_operation(
+        &self,
+        module: &'static str,
+        kind: cellule_runtime::fleet::telemetry::PrimitiveOperationKind,
+        _: cellule_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        _: std::time::Duration,
+    ) {
+        if module == "beyonddb-data"
+            && kind == cellule_runtime::fleet::telemetry::PrimitiveOperationKind::Command
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sdk_returned_updates_coalesce_and_survive_owner_restore() {
+    let commands = Arc::new(DataCommands::default());
+    let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(
+        1,
+        Arc::new(InMemory::new()),
+        16,
+        false,
+        std::convert::identity,
+        Some(commands.clone()),
+    )
+    .await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = build_http_state(
+        &fixture.node,
+        remote.client(&fixture),
+        fixture.layout.clone(),
+        fixture.provisioner.clone(),
+        [38; 32],
+        "us-east-1",
+        endpoint.clone(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        extenddb_server::start_server(listener, state, None, None)
+            .await
+            .unwrap();
+    });
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk_without_retries(&fixture)
+            .config()
+            .to_builder()
+            .endpoint_url(endpoint)
+            .build(),
+    );
+    // Warm the directory/auth paths before measuring data commands. Every
+    // update below uses a distinct key and requests its committed new image.
+    sdk.get_item()
+        .table_name("Residency")
+        .key("id", AwsAttributeValue::S("returned-warmup".into()))
+        .send()
+        .await
+        .unwrap();
+    commands.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let mut requests = tokio::task::JoinSet::new();
+    let start = Arc::new(tokio::sync::Barrier::new(65));
+    for index in 0..64 {
+        let sdk = sdk.clone();
+        let start = start.clone();
+        requests.spawn(async move {
+            start.wait().await;
+            let item = sdk
+                .update_item()
+                .table_name("Residency")
+                .key("id", AwsAttributeValue::S(format!("returned-{index}")))
+                .update_expression("ADD #value :one")
+                .expression_attribute_names("#value", "value")
+                .expression_attribute_values(":one", AwsAttributeValue::N("1".into()))
+                .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+                .send()
+                .await
+                .unwrap();
+            let attributes = item.attributes.unwrap();
+            assert_eq!(attributes["value"], AwsAttributeValue::N("1".into()));
+            assert_eq!(
+                attributes["id"],
+                AwsAttributeValue::S(format!("returned-{index}"))
+            );
+        });
+    }
+    start.wait().await;
+    while let Some(result) = requests.join_next().await {
+        result.unwrap();
+    }
+    let count = commands.0.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("64 returned SDK updates used {count} durable data commands");
+    assert!(count < 64, "returned updates should share durable commands");
+    // Concurrent requests for one key must be deferred into separate commands
+    // and retain each ADD's own committed result.
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let sdk = sdk.clone();
+        requests.spawn(async move {
+            sdk.update_item()
+                .table_name("Residency")
+                .key("id", AwsAttributeValue::S("returned-repeated".into()))
+                .update_expression("ADD #value :one")
+                .expression_attribute_names("#value", "value")
+                .expression_attribute_values(":one", AwsAttributeValue::N("1".into()))
+                .return_values(aws_sdk_dynamodb::types::ReturnValue::AllNew)
+                .send()
+                .await
+                .unwrap()
+                .attributes
+                .unwrap()["value"]
+                .as_n()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        });
+    }
+    let mut values = std::collections::BTreeSet::new();
+    while let Some(result) = requests.join_next().await {
+        values.insert(result.unwrap());
+    }
+    assert_eq!(values, (1..=8).collect());
+    let id = table_id(&fixture, "Residency").await;
+    let range = ranges(&fixture, "Residency").await.remove(0);
+    fixture
+        .provisioner
+        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    fixture
+        .provisioner
+        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+        .await
+        .unwrap();
+    for index in 0..64 {
+        let item = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", AwsAttributeValue::S(format!("returned-{index}")))
+            .send()
+            .await
+            .unwrap()
+            .item
+            .unwrap();
+        assert_eq!(item["value"], AwsAttributeValue::N("1".into()));
+    }
+    server.abort();
+    let _ = server.await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+}
+
+#[derive(Default)]
 struct CoordinatorQueries(std::sync::atomic::AtomicU64);
 
 impl cellule_runtime::fleet::telemetry::CellTelemetry for CoordinatorQueries {
@@ -172,7 +332,7 @@ fn model_tag(value: &str) -> Tag {
         .unwrap()
 }
 
-async fn ranges(fixture: &Fixture, table: &str) -> Vec<beyonddb::RoutePagePartition> {
+pub(super) async fn ranges(fixture: &Fixture, table: &str) -> Vec<beyonddb::RoutePagePartition> {
     let id = table_id(fixture, table).await;
     let page = beyonddb::read_route_page(
         &fixture.client,

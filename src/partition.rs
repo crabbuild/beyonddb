@@ -6,6 +6,7 @@ pub(crate) mod query;
 mod scan;
 mod transaction;
 mod ttl;
+mod update_batch;
 
 pub use indexes::*;
 pub use key::data_key_hash;
@@ -13,6 +14,7 @@ pub use query::*;
 pub use scan::*;
 pub use transaction::*;
 pub use ttl::*;
+pub use update_batch::*;
 
 use std::sync::OnceLock;
 
@@ -53,7 +55,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 25] = [
+static COMMANDS: [OperationDescriptor; 27] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -84,6 +86,8 @@ static COMMANDS: [OperationDescriptor; 25] = [
     no_return_operation(22),
     operation(23),
     crate::no_return_transaction_operation(24),
+    update_batch::batch_operation(25),
+    operation(26),
     OperationDescriptor {
         codec_version: 2,
         ..no_return_operation(52)
@@ -159,6 +163,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/transaction.rs"));
                 source.update(include_bytes!("partition/transaction/participant.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
+                source.update(include_bytes!("partition/update_batch.rs"));
+                source.update(include_bytes!("item_wire.rs"));
                 source.update(include_bytes!("partition/indexes.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("item_storage.rs"));
@@ -201,6 +207,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionDeleteNoReturn>()?;
         registry.bind_command::<PartitionUpdate>()?;
         registry.bind_command::<PartitionUpdateNoReturn>()?;
+        registry.bind_command::<PartitionUpdateBatch>()?;
+        registry.bind_command::<PartitionUpdateIndividual>()?;
         registry.bind_command::<SealPartition>()?;
         registry.bind_command::<ImportPartitionItem>()?;
         registry.bind_command::<ActivateImportedPartition>()?;
@@ -1327,7 +1335,7 @@ impl Command for PartitionUpdate {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        execute_partition_update(context, input, true)
+        execute_partition_update(context, input, true, 0)
     }
 }
 
@@ -1345,7 +1353,7 @@ impl Command for PartitionUpdateNoReturn {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        execute_partition_update(context, input, false)
+        execute_partition_update(context, input, false, 0)
     }
 }
 
@@ -1353,6 +1361,7 @@ fn execute_partition_update(
     context: &mut CommandContext<'_, '_>,
     input: PartitionUpdateInput,
     return_images: bool,
+    ordinal: usize,
 ) -> Result<CommandResult<Json<PartitionUpdateOutcome>>> {
     let Some(spec) = indexes::command_spec(context)? else {
         return Ok(CommandResult::Rejected(Json(
@@ -1440,7 +1449,7 @@ fn execute_partition_update(
         spec.table.stream.as_ref(),
         old.as_ref(),
         Some(&new),
-        0,
+        ordinal,
     )?;
     Ok(CommandResult::Success(Json(if return_images {
         PartitionUpdateOutcome::Applied { old, new }

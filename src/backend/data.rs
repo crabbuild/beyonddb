@@ -35,12 +35,11 @@ use crate::{
     PartitionPutInput, PartitionPutOutcome, PartitionQuery, PartitionQueryInput,
     PartitionQueryOutcome, PartitionTransactReadOutcome, PartitionTransactReadQuery,
     PartitionTransactWrite, PartitionTransactWriteInput, PartitionTransactWriteNoReturn,
-    PartitionTransactWriteOutcome, PartitionUpdate, PartitionUpdateInput, PartitionUpdateOutcome,
-    PutItem, PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome,
-    SortComparison, SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput,
-    TransactWriteNoReturn, TransactionFailure, TransactionOperation, TransactionOutcome,
-    TransactionReadOutcome, UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome,
-    data_key_hash,
+    PartitionTransactWriteOutcome, PartitionUpdateInput, PartitionUpdateOutcome, PutItem,
+    PutItemInput, PutItemNoReturn, ScanItems, ScanItemsInput, ScanItemsOutcome, SortComparison,
+    SortPredicate, TransactReadQuery, TransactWrite, TransactWriteInput, TransactWriteNoReturn,
+    TransactionFailure, TransactionOperation, TransactionOutcome, TransactionReadOutcome,
+    UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
 };
 use cellule_runtime::client::InvocationError;
 use cellule_runtime::identity::CellTarget;
@@ -566,45 +565,24 @@ impl DataEngine for CellStorage {
                     update,
                     condition,
                 };
-                let (old, new) = if return_old || return_new {
-                    match self
-                        .client
-                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
-                        .await
-                    {
-                        Ok(committed) => match committed.output.0 {
-                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
-                            _ => {
-                                return Err(StorageError::Internal(
-                                    "unexpected partition update".into(),
-                                ));
-                            }
+                let dedup_key = crate::item_key(&input.key, &key_info.base_key_schema)
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let outcome = self
+                    .submit_update(
+                        partition,
+                        dedup_key,
+                        crate::BatchedPartitionUpdate {
+                            input,
+                            return_old,
+                            return_new,
                         },
-                        Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
-                            return Err(partition_update_rejection(committed.output.0));
-                        }
-                        Err(error) => return Err(cell_error(error)),
-                    }
-                } else {
-                    match self
-                        .client
-                        .command::<PartitionUpdate>(&partition, mutation_identity()?, Json(input))
-                        .await
-                    {
-                        Ok(committed) => match committed.output.0 {
-                            PartitionUpdateOutcome::Applied { old, new } => (old, new),
-                            _ => {
-                                return Err(StorageError::Internal(
-                                    "unexpected partition update result".into(),
-                                ));
-                            }
-                        },
-                        Err(InvocationError::Rejected(committed)) => {
-                            self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
-                            return Err(partition_update_rejection(committed.output.0));
-                        }
-                        Err(error) => return Err(cell_error(error)),
+                    )
+                    .await?;
+                let (old, new) = match outcome {
+                    PartitionUpdateOutcome::Applied { old, new } => (old, new),
+                    other => {
+                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
+                        return Err(partition_update_rejection(other));
                     }
                 };
                 return Ok((
