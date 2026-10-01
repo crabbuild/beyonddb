@@ -17,6 +17,8 @@ use crate::{
     TransactionOperation, TransactionToken, coordinator_target,
 };
 
+const ACKNOWLEDGED_BEGIN_BYTES: usize = 32 * 1024;
+
 pub(super) struct AdmittedTransaction {
     pub identity: ReadCrossCellTransactionInput,
     pub decision: CoordinatorDecision,
@@ -156,10 +158,15 @@ impl CellStorage {
             participants: participants.into_values().collect(),
         };
         let identity = mutation_identity()?;
-        let inline = serde_json::to_vec(&input)
+        let input_bytes = serde_json::to_vec(&input)
             .map_err(|error| StorageError::Internal(error.to_string()))?
-            .len()
-            <= crate::transaction_transport::INLINE_BYTES;
+            .len();
+        let inline = input_bytes <= crate::transaction_transport::INLINE_BYTES;
+        // Retain only a bounded first-attempt payload. BEGIN's acknowledged
+        // Begun outcome proves that this exact ordered participant set committed.
+        // Existing identities and ambiguous replies must read durable state.
+        let acknowledged_participants =
+            (input_bytes <= ACKNOWLEDGED_BEGIN_BYTES).then(|| input.participants.clone());
         let result = if inline {
             self.client
                 .command::<BeginCrossCellTransaction>(
@@ -183,6 +190,22 @@ impl CellStorage {
         let (transaction_id, prior) = match result {
             Ok(result) => match result.output.0 {
                 BeginCrossCellTransactionOutcome::Begun => {
+                    if let Some(participants) = acknowledged_participants {
+                        let identity = ReadCrossCellTransactionInput {
+                            account_id: account_id.into(),
+                            transaction_id: proposed_id,
+                            routing_key,
+                        };
+                        let status = self
+                            .drive_acknowledged_transaction(&coordinator, &identity, participants)
+                            .await?;
+                        return Ok(AdmittedTransaction {
+                            identity,
+                            decision: status.decision,
+                            participant_count: status.participant_count,
+                            replay: false,
+                        });
+                    }
                     (proposed_id, CoordinatorDecision::Begin)
                 }
                 BeginCrossCellTransactionOutcome::Existing {

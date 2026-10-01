@@ -95,6 +95,25 @@ impl Fixture {
         peer_cache: bool,
         wrap: impl FnOnce(axum::Router) -> axum::Router,
     ) -> Self {
+        Self::with_store_capacity_cache_router_and_telemetry(
+            partitions,
+            store,
+            cell_capacity,
+            peer_cache,
+            wrap,
+            None,
+        )
+        .await
+    }
+
+    async fn with_store_capacity_cache_router_and_telemetry(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+        telemetry: Option<Arc<dyn cellule_runtime::fleet::telemetry::CellTelemetry>>,
+    ) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
         let diagnostics = tracing_subscriber::filter::Targets::new()
@@ -147,6 +166,9 @@ impl Fixture {
             lease.clone(),
         )
         .await;
+        if let Some(telemetry) = telemetry {
+            node.install_telemetry(telemetry).unwrap();
+        }
         let peers = Arc::new(
             BeyonddbPeers::new(&node, layout.clone(), directory.clone(), session, &tls).unwrap(),
         );

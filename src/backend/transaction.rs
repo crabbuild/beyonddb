@@ -10,10 +10,10 @@ use super::transaction_transport::PhaseError;
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
     CommitPreparedTransaction, CommitPreparedTransactionInput, CommitPreparedTransactionOutcome,
-    CoordinatorDecision, CoordinatorParticipantTarget, CoordinatorPhaseOutcome,
-    CoordinatorPrepareReceipt, CrossCellTransactionStatus, DecideCrossCellTransaction,
-    DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome, Json,
-    ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
+    CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
+    CoordinatorPhaseOutcome, CoordinatorPrepareReceipt, CrossCellTransactionStatus,
+    DecideCrossCellTransaction, DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome,
+    Json, ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCoordinatorResume, ReadCrossCellTransaction,
     ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
@@ -115,10 +115,44 @@ impl CellStorage {
             .collect::<Vec<_>>()
             .await
         };
+        self.prepare_and_commit_transaction(&coordinator, &read, payloads)
+            .await
+    }
+
+    /// Drive only the exact bounded payload of an acknowledged fresh BEGIN.
+    /// Retries and recovery enter through the durable coordinator snapshot path.
+    pub(super) async fn drive_acknowledged_transaction(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        participants: Vec<CoordinatorParticipant>,
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
+        let payloads = participants
+            .into_iter()
+            .enumerate()
+            .map(|(position, participant)| {
+                let position = u8::try_from(position).map_err(|_| {
+                    StorageError::Internal("invalid acknowledged participant position".into())
+                })?;
+                Ok((position, Some(participant)))
+            })
+            .collect();
+        self.prepare_and_commit_transaction(coordinator, read, payloads)
+            .await
+    }
+
+    async fn prepare_and_commit_transaction(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        payloads: Vec<Result<(u8, Option<CoordinatorParticipant>), StorageError>>,
+    ) -> Result<CrossCellTransactionStatus, StorageError> {
+        let account_id = read.account_id.as_str();
+        let transaction_id = read.transaction_id;
         let mut attempts = Vec::new();
         for payload in payloads {
             let (position, Some(payload)) = payload? else {
-                return self.finish_transaction(&coordinator, &read).await;
+                return self.finish_transaction(coordinator, read).await;
             };
             let operations = payload
                 .operations
@@ -197,8 +231,8 @@ impl CellStorage {
                     // decides, and all resolutions finish before cancellation returns.
                     return self
                         .decide_transaction(
-                            &coordinator,
-                            &read,
+                            coordinator,
+                            read,
                             CoordinatorDecision::Abort {
                                 index: Some(operation.index),
                                 reason: Some(TransactionFailure::Throttled),
@@ -221,7 +255,7 @@ impl CellStorage {
                 PrepareTransactionOutcome::Committed | PrepareTransactionOutcome::Aborted => {
                     // A concurrent driver/recovery owner may have finished. Only
                     // the coordinator can decide which terminal outcome to return.
-                    return self.finish_transaction(&coordinator, &read).await;
+                    return self.finish_transaction(coordinator, read).await;
                 }
                 PrepareTransactionOutcome::Mismatch => {
                     return Err(StorageError::Internal(
@@ -237,7 +271,7 @@ impl CellStorage {
                     index: Some(operation.index),
                     reason: Some(reason),
                 };
-                return self.decide_transaction(&coordinator, &read, decision).await;
+                return self.decide_transaction(coordinator, read, decision).await;
             }
             evidence.push((position, target, receipt));
         }
@@ -256,7 +290,7 @@ impl CellStorage {
         let result = self
             .client
             .command::<CommitPreparedTransaction>(
-                &coordinator,
+                coordinator,
                 mutation_identity()?,
                 Json(CommitPreparedTransactionInput {
                     transaction: read.clone(),
@@ -270,7 +304,7 @@ impl CellStorage {
             // An absent reply cannot distinguish a durable decision from an
             // unfinished command. Read authoritative state before resolving.
             Err(InvocationError::Pending(_)) => {
-                return self.finish_transaction(&coordinator, &read).await;
+                return self.finish_transaction(coordinator, read).await;
             }
             Err(error) => return Err(cell_error(error)),
         };
@@ -278,13 +312,13 @@ impl CellStorage {
             CommitPreparedTransactionOutcome::Decision(
                 DecideCrossCellTransactionOutcome::Decided(_)
                 | DecideCrossCellTransactionOutcome::DecisionConflict,
-            ) => self.finish_transaction(&coordinator, &read).await,
+            ) => self.finish_transaction(coordinator, read).await,
             CommitPreparedTransactionOutcome::EvidenceRejected(outcomes)
                 if outcomes.contains(&CoordinatorPhaseOutcome::WrongDecision) =>
             {
                 // A competing driver may have committed or aborted while the
                 // prepares were in flight. Its durable decision is authoritative.
-                self.finish_transaction(&coordinator, &read).await
+                self.finish_transaction(coordinator, read).await
             }
             _ => Err(StorageError::Internal(
                 "coordinator refused prepared transaction commit".into(),

@@ -6,6 +6,164 @@ use extenddb_storage::StreamEngine;
 
 const ACCOUNT: &str = "123456789012";
 
+#[derive(Default)]
+struct CoordinatorQueries(std::sync::atomic::AtomicU64);
+
+impl cellule_runtime::fleet::telemetry::CellTelemetry for CoordinatorQueries {
+    fn primitive_operation(
+        &self,
+        module: &'static str,
+        kind: cellule_runtime::fleet::telemetry::PrimitiveOperationKind,
+        _: cellule_runtime::fleet::telemetry::PrimitiveOperationOutcome,
+        _: std::time::Duration,
+    ) {
+        if module == "beyonddb-coordinator"
+            && kind == cellule_runtime::fleet::telemetry::PrimitiveOperationKind::Query
+        {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_fresh_transaction_reuses_acknowledged_begin_payload() {
+    let queries = Arc::new(CoordinatorQueries::default());
+    let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(
+        1,
+        Arc::new(InMemory::new()),
+        16,
+        false,
+        std::convert::identity,
+        Some(queries.clone()),
+    )
+    .await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    beyonddb::CoordinatorProvisioner::ensure(
+        fixture.provisioner.as_ref(),
+        &fixture.client,
+        ACCOUNT,
+        b"fresh-begin-payload",
+    )
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = build_http_state(
+        &fixture.node,
+        remote.client(&fixture),
+        fixture.layout.clone(),
+        fixture.provisioner.clone(),
+        [38; 32],
+        "us-east-1",
+        endpoint.clone(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        extenddb_server::start_server(listener, state, None, None)
+            .await
+            .unwrap();
+    });
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk_without_retries(&fixture)
+            .config()
+            .to_builder()
+            .endpoint_url(endpoint)
+            .build(),
+    );
+    queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let write = sdk
+        .transact_write_items()
+        .client_request_token("fresh-begin-payload")
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("Residency")
+                        .item("id", AwsAttributeValue::S("fresh-begin".into()))
+                        .item("value", AwsAttributeValue::N("7".into()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+    write.clone().send().await.unwrap();
+    assert_eq!(
+        queries.0.load(std::sync::atomic::Ordering::Relaxed),
+        4,
+        "fresh BEGIN needs token lookup, decision and resolution checks, but no payload readback"
+    );
+    sdk.put_item()
+        .table_name("Residency")
+        .item("id", AwsAttributeValue::S("fresh-begin".into()))
+        .item("value", AwsAttributeValue::N("8".into()))
+        .send()
+        .await
+        .unwrap();
+    queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    write.send().await.unwrap();
+    assert_eq!(
+        queries.0.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "token replay must read durable coordinator state"
+    );
+    let item = sdk
+        .get_item()
+        .table_name("Residency")
+        .key("id", AwsAttributeValue::S("fresh-begin".into()))
+        .send()
+        .await
+        .unwrap()
+        .item
+        .unwrap();
+    assert_eq!(item["value"], AwsAttributeValue::N("8".into()));
+    beyonddb::CoordinatorProvisioner::ensure(
+        fixture.provisioner.as_ref(),
+        &fixture.client,
+        ACCOUNT,
+        b"large-begin-payload",
+    )
+    .await
+    .unwrap();
+    queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let padding = "\0".repeat(6_000);
+    sdk.transact_write_items()
+        .client_request_token("large-begin-payload")
+        .transact_items(
+            TransactWriteItem::builder()
+                .put(
+                    Put::builder()
+                        .table_name("Residency")
+                        .item("id", AwsAttributeValue::S("large-begin".into()))
+                        .item("padding", AwsAttributeValue::S(padding.clone()))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        queries.0.load(std::sync::atomic::Ordering::Relaxed),
+        7,
+        "escaped inputs beyond the reuse bound retain durable chunk discovery"
+    );
+    let large_item = sdk
+        .get_item()
+        .table_name("Residency")
+        .key("id", AwsAttributeValue::S("large-begin".into()))
+        .send()
+        .await
+        .unwrap()
+        .item
+        .unwrap();
+    assert_eq!(large_item["padding"], AwsAttributeValue::S(padding));
+    server.abort();
+    let _ = server.await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+}
+
 fn model_tag(value: &str) -> Tag {
     Tag::builder()
         .key("beyonddb:cell-model")
