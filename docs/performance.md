@@ -27,6 +27,26 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 
 ## Latest release verification
 
+The [acknowledged-completion release comparison](../benchmarks/2026-10-01-acknowledged-completion-release/README.md) measures committed source `daa73a8`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite performance parity remains unmet; every eight-client API is slower than SQLite in this run.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 404.23 | 568.23 | 1323.04 |
+| PutItem | 116.46 | 66.84 | 1210.74 |
+| UpdateItem | 113.94 | 73.94 | 968.88 |
+| TransactGetItems | 329.42 | 5.92 | 1177.13 |
+| TransactWriteItems | 9.58 | 7.48 | 977.79 |
+
+Transaction-write p95 is 1074.01/1283.80 ms for single/four Cells, versus SQLite's 13.97 ms. Calls contain two items. The full report includes every API, client count, percentile and completed-request count.
+
+The [signed regression](../benchmarks/2026-10-01-acknowledged-completion-verification/README.md) proves fresh small transaction writes use **one coordinator query instead of four**. After an acknowledged fresh BEGIN and COMMIT, the adapter uses the exact accepted participant set and durably records every resolution receipt before success. Token replay, uncertain decisions, larger inputs and read-image cleanup retain authoritative readback. Lost participant replies require observed committed state; lost coordinator receipts return a transient error until replay confirms completion. Two-Cell values survive owner restoration.
+
+This reduces coordinator work but **does not demonstrate an end-to-end speedup**. The previous sample measured 10.76/10.15 transaction writes/s; this run measures 9.58/7.48. The ordinary read/write paths are unchanged and their rates also vary. Host load is 16.60→17.98 for single mode, 16.69→25.86 for four Cells and 25.63→14.56 for SQLite, on 12 logical CPUs. No task-local build, test or provider probe overlaps measurement. SQL handler means are 0.869/0.532 ms; durable follower append means are 14.657/17.394 ms. These overlapping background-inclusive populations are not additive request timings.
+
+Formatting, strict Clippy, 28 library tests, signed restoration and completion-fault cases pass. The full native run passes 47/48; the remaining new fixture's incorrect GetItem key is corrected and its focused rerun passes. All 48 pass across those two invocations. Full peer/process CI and older-root upgrades remain unqualified; the previous head's full signed SDK CI is still running at report time. Three background WARN lines occur during measurement: two mailbox-capacity deferrals and one incomplete-resolution deferral. All seven fixture PIDs and both containers are absent, without forced BeyondDB cleanup. Zero SDK errors does not establish maintenance convergence or sustained capacity.
+
+### Previous returned-update release verification
+
 The [returned-update release refresh](../benchmarks/2026-10-01-returned-update-release/README.md) measures committed source `a07acaf`, Cellule `a4500ad` and ExtendDB `7eaa89b`. It completes **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. **SQLite write and transaction parity remains unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
