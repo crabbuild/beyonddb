@@ -4,6 +4,50 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [native-volume release pair](../benchmarks/2026-10-01-native-volume-release/README.md)
+reuses source `7cf8f46` and the exact binary from the preceding host-bind run,
+with Cellule `e07670e` and ExtendDB `7eaa89b`. RustFS stores data in a named
+volume inside Colima. All 24 cases completed per backend with **zero SDK errors**.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 470.78 | 999.19 | 31.08 ms |
+| PutItem | 61.89 | 760.40 | 221.77 ms |
+| TransactGetItems | 5.22 | 771.38 | 2084.94 ms |
+| TransactWriteItems | 8.01 | 544.07 | 1291.82 ms |
+
+Only DescribeTable exceeded SQLite at one/eight clients. Item operations and
+transactions remain slower; the all-API performance objective is unmet. These
+are five-second samples: eight-client transaction reads/writes completed 31/46
+requests, and do not establish a sustained capacity or production target.
+
+The prior host-bind pair measured PutItem at 22.27 requests/s and transaction
+writes at 0.61 with five timeouts. This pair changed storage placement while
+reusing the binary, but host load and fresh owner placement also changed.
+BeyondDB host load was 25.33→27.14; SQLite ran afterward at 27.34→22.96.
+No task-local build/test overlapped either measurement. The comparison cannot
+isolate a code or storage speedup. All fixture processes/container are absent;
+the named volume and server scratch data remain available for inspection.
+
+A [direct S3 diagnostic](../benchmarks/2026-09-30-rustfs-storage-probe/README.md)
+completed 48 cases without errors, using opposite storage orders. Native-volume
+1-KiB conditional replacements reached 226–238 requests/s at eight clients,
+versus 71–77 on binds. GET throughput was lower in those native samples while
+load varied. Keep provider storage placement explicit in benchmark results.
+The [deployment example](deployment.md#local-object-store-fixture) already uses
+a named volume.
+
+Runtime means were SQL command 0.542 ms, provider GET/PUT 6.492/27.109 ms,
+and publication total 146.625 ms. Across 3,610 samples per follower phase,
+lookup averaged 6.140 ms, round trip 30.778 ms, fresh enrollment 12.447 ms,
+and durable append 17.620 ms. These scopes overlap and include background work;
+they must not be summed into SDK latency or treated as a causal decomposition.
+The full record retains every API, counts, phases, source/binary hashes and host
+snapshots. Full signed SDK recovery CI failed on this source: native 48/48
+passed, peers 57/59 and process 7/8 failed. Full recovery remains unqualified.
+
+### Previous bounded-snapshot host-bind release pair
+
 The [bounded coordinator snapshot release pair](../benchmarks/2026-09-30-coordinator-snapshot-release/README.md)
 measures source `7cf8f46`, Cellule `e07670e`, and ExtendDB `7eaa89b`.
 All 24 cases completed per backend. BeyondDB recorded **five SDK timeouts**,
@@ -36,7 +80,9 @@ contract; older-root upgrades remain unqualified.
 Local gates pass: 12 transaction cases, restart read cleanup, seven signed
 coordinator SDK cases, 27 library tests, formatting and strict all-target Clippy.
 The focused count regression overlaps the transaction selection. Source Rust CI
-passed; full SDK CI is in progress at report time. Prior-source SDK CI on the
+passed; full SDK CI subsequently failed: native 48/48 passed, peers 57/59 and
+process 7/8 failed. The additional large remote read root assertion remains
+unqualified. Prior-source SDK CI on the
 same Cellule pin failed the global-index owner and graceful-stop assertions:
 native 47/47 passed, peers 58/59 and process 7/8 failed. Full recovery is open.
 

@@ -63,6 +63,13 @@ Wait for RustFS to accept S3 requests before creating the bucket. Keep its
 named volume for restart testing; removing it removes this fixture's data.
 Use a service with qualified conditional writes for any nonlocal deployment.
 
+On macOS with Colima, this named volume keeps provider data inside the VM.
+A [direct S3 diagnostic](../benchmarks/2026-09-30-rustfs-storage-probe/README.md)
+measured faster 1-KiB conditional writes on native volumes than host file
+sharing in both repetitions. GET results and host load differed; this is a
+local fixture observation, not a production capacity guarantee. Record the
+storage mount when comparing performance.
+
 ## Prepare keys, policy, and configuration
 
 The example uses `/etc/beyonddb` for secrets and `/srv/beyonddb` for scratch files. Run the provisioning commands with an account that can write those paths, and run the server with read access to the key and certificate files. For a local account without that access, change every path in the commands and JSON to directories it owns.
