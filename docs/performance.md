@@ -27,6 +27,30 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 
 ## Latest release verification
 
+The [returned-update release refresh](../benchmarks/2026-10-01-returned-update-release/README.md) measures committed source `a07acaf`, Cellule `a4500ad` and ExtendDB `7eaa89b`. It completes **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. **SQLite write and transaction parity remains unmet.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 506.27 | 724.07 | 1630.70 |
+| PutItem | 103.43 | 111.20 | 1287.67 |
+| UpdateItem | 116.05 | 110.98 | 1067.54 |
+| TransactGetItems | 412.00 | 7.39 | 1489.57 |
+| TransactWriteItems | 10.76 | 10.15 | 868.46 |
+
+UpdateItem p95 is 97.97/112.52 ms for single/four Cells, versus SQLite's 17.56 ms. Transaction-write p95 is 977.59/919.62 ms, versus 18.65 ms. Transactions contain two items per call. The full report retains all APIs, client counts, completed requests and tail latency.
+
+**These are contended workstation samples.** The 12-core host's load falls from 39.26→25.84 during single mode, 25.35→22.68 for four Cells and 21.75→20.65 for SQLite. No task-local build, test or provider probe overlaps measurement. Read and transaction paths are unchanged, yet their rates rise too; the rate changes do not isolate a source speedup. SQL handler means are 0.876/0.609 ms, while follower durable append means are 16.368/20.103 ms. These overlapping populations include background work and must not be added into a request latency.
+
+The [returned-update verification](../benchmarks/2026-10-01-returned-update-verification/README.md) proves **64 concurrent signed updates use 24 durable commands instead of 64**. The pinned ExtendDB UpdateItem handler always requests the new image for capacity calculation, including `ReturnValues=NONE`; this previously bypassed the no-return batcher. Routed updates now coalesce distinct keys and return compact individual results. Conditions retain their own failures, successful writes retain individual stream ordinals, and repeated keys are deferred. The per-Cell queue has 64 permits, with batches capped at 16 updates, 1 MiB input and 128 KiB reply. A 2 ms partial-queue window trades a small single-client delay for sharing durable work.
+
+Large replies fall back to separate commands only after a confirmed rejected receipt proves that items, indexes and stream records rolled back. An ambiguous invocation is never retried internally. Signed tests verify same-key ADD results, condition-failure images, stream replay, owner restoration and 390,000-byte escaped item images. The same returned-image cases match the pinned SQLite server. Formatting, strict Clippy, 28 library tests, 48 native cases and three focused update tests pass.
+
+Cellule `a4500ad` contains website/documentation changes with identical Rust code to the previous pin. It does not fix runtime recovery or performance. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36810977455) fails: native 48/48, peers 67/68, process 7/8. Coordinator ownership during restart and graceful shutdown after an owner kill remain open qualification gaps; the earlier post-drain replay failure does not recur in that run, without a claimed fix. The new source has not completed full peer/process qualification or old-root upgrade checks. Matching compiled peers are required.
+
+All seven fixture PIDs and both containers are absent. Neither BeyondDB fixture requires forced process cleanup; SQLite exits 0. Four-Cell logs retain two deferred transaction-resolution warnings during measurement. Zero SDK errors does not qualify maintenance convergence. A separate [Cellule EOF guard proposal](../benchmarks/2026-10-01-returned-update-verification/proposals/README.md) is unapplied and awaits the dependency approval required by AGENTS.md.
+
+### Previous acknowledged-BEGIN release comparison
+
 The [acknowledged-BEGIN release refresh](../benchmarks/2026-10-01-acknowledged-begin-release/README.md) measures committed source `d46f6f9`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. SQLite write and transaction parity remains unmet.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
@@ -42,7 +66,7 @@ Transaction-write p95 was 1990.78/1227.48 ms for single/four Cells, versus SQLit
 
 The [signed SDK regression](../benchmarks/2026-10-01-acknowledged-begin-verification/README.md) verifies fresh transaction coordinator queries fall from five to four. After a confirmed fresh BEGIN, the adapter reuses its exact accepted participants for inputs at most 32 KiB. Existing tokens, ambiguous replies, larger inputs and recovery still read durable coordinator state. All durable prepare, decision, resolution and completion checks remain.
 
-The full 48-case native suite, four signed Cell-model tests, formatting and strict all-target Clippy pass. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36806586859) failed: native 48/48, peers 65/67 and process 7/8. Post-drain token replay, GSI ownership and graceful-shutdown failures remain open. The new source has not completed full SDK/process qualification; older-root upgrades remain unqualified. All seven benchmark fixture PIDs and both containers are absent.
+The full 48-case native suite, four signed Cell-model tests, formatting and strict all-target Clippy pass for this source. Its production-equivalent `bbe1803` [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36810977455) subsequently fails: native 48/48, peers 67/68 and process 7/8. Coordinator ownership during restart and graceful shutdown remain open. An earlier run also failed post-drain token replay and GSI ownership; no fix is claimed from their absence in this run. Older-root upgrades remain unqualified. All seven benchmark fixture PIDs and both containers are absent.
 
 ### Previous coordinator-admission release comparison
 
