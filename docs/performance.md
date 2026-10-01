@@ -46,7 +46,6 @@ The [placement verification](../benchmarks/2026-10-01-cell-model-verification/RE
 
 ### Previous native-volume release pair
 
-
 The [native-volume release pair](../benchmarks/2026-10-01-native-volume-release/README.md)
 reuses source `7cf8f46` and the exact binary from the preceding host-bind run,
 with Cellule `e07670e` and ExtendDB `7eaa89b`. RustFS stores data in a named
