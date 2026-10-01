@@ -186,10 +186,10 @@ impl cellule_runtime::fleet::telemetry::CellTelemetry for CoordinatorQueries {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sdk_fresh_transaction_reuses_acknowledged_begin_payload() {
+async fn sdk_fresh_transaction_reuses_acknowledged_write_completion() {
     let queries = Arc::new(CoordinatorQueries::default());
     let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(
-        1,
+        2,
         Arc::new(InMemory::new()),
         16,
         false,
@@ -231,30 +231,100 @@ async fn sdk_fresh_transaction_reuses_acknowledged_begin_payload() {
             .build(),
     );
     queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let keys = fixture
+        .data
+        .iter()
+        .map(|(_, item)| item["id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys.len(),
+        2,
+        "the write must reach two distinct data Cells"
+    );
     let write = sdk
         .transact_write_items()
         .client_request_token("fresh-begin-payload")
-        .transact_items(
-            TransactWriteItem::builder()
-                .put(
-                    Put::builder()
-                        .table_name("Residency")
-                        .item("id", AwsAttributeValue::S("fresh-begin".into()))
-                        .item("value", AwsAttributeValue::N("7".into()))
+        .set_transact_items(Some(
+            keys.iter()
+                .map(|key| {
+                    TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name("Residency")
+                                .item("id", key.clone())
+                                .item("value", AwsAttributeValue::N("7".into()))
+                                .build()
+                                .unwrap(),
+                        )
                         .build()
-                        .unwrap(),
-                )
-                .build(),
-        );
+                })
+                .collect(),
+        ));
     write.clone().send().await.unwrap();
     assert_eq!(
         queries.0.load(std::sync::atomic::Ordering::Relaxed),
-        4,
-        "fresh BEGIN needs token lookup, decision and resolution checks, but no payload readback"
+        1,
+        "fresh write needs token lookup; acknowledged BEGIN, decision and resolution receipts prove completion"
     );
+    let coordinator = beyonddb::coordinator_target(ACCOUNT, b"fresh-begin-payload").unwrap();
+    let pending = fixture
+        .client
+        .query::<beyonddb::ReadPendingCrossCellTransactions>(
+            &coordinator,
+            None,
+            beyonddb::Json(beyonddb::ReadPendingCrossCellTransactionsInput {
+                after: None,
+                limit: 100,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0;
+    assert!(
+        pending.is_empty(),
+        "successful SDK completion must durably record every resolution"
+    );
+    for (handle, _) in &fixture.data {
+        handle.drain().await.unwrap();
+    }
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, b"fresh-begin-payload")
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    fixture
+        .provisioner
+        .admit_coordinator(ACCOUNT, b"fresh-begin-payload")
+        .await
+        .unwrap();
+    let id = table_id(&fixture, "Residency").await;
+    for range in ranges(&fixture, "Residency").await {
+        fixture
+            .provisioner
+            .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+            .await
+            .unwrap();
+    }
+    for key in &keys {
+        let item = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", key.clone())
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap()
+            .item
+            .unwrap();
+        assert_eq!(item["value"], AwsAttributeValue::N("7".into()));
+    }
     sdk.put_item()
         .table_name("Residency")
-        .item("id", AwsAttributeValue::S("fresh-begin".into()))
+        .item("id", keys[0].clone())
         .item("value", AwsAttributeValue::N("8".into()))
         .send()
         .await
@@ -269,7 +339,7 @@ async fn sdk_fresh_transaction_reuses_acknowledged_begin_payload() {
     let item = sdk
         .get_item()
         .table_name("Residency")
-        .key("id", AwsAttributeValue::S("fresh-begin".into()))
+        .key("id", keys[0].clone())
         .send()
         .await
         .unwrap()

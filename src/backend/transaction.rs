@@ -17,7 +17,8 @@ use crate::{
     PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
     ReadCoordinatorParticipantInput, ReadCoordinatorResume, ReadCrossCellTransaction,
     ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
-    TransactionCommandInput, TransactionFailure, account_target, coordinator_target, data_target,
+    TransactionCommandInput, TransactionFailure, TransactionOperation,
+    UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
 };
 
 impl CellStorage {
@@ -115,7 +116,7 @@ impl CellStorage {
             .collect::<Vec<_>>()
             .await
         };
-        self.prepare_and_commit_transaction(&coordinator, &read, payloads)
+        self.prepare_and_commit_transaction(&coordinator, &read, payloads, None)
             .await
     }
 
@@ -127,6 +128,35 @@ impl CellStorage {
         read: &ReadCrossCellTransactionInput,
         participants: Vec<CoordinatorParticipant>,
     ) -> Result<CrossCellTransactionStatus, StorageError> {
+        // Only an acknowledged fresh BEGIN establishes this complete immutable
+        // participant set. Reads retain the durable read-image cleanup path.
+        let write_participants = if participants.iter().all(|participant| {
+            participant
+                .operations
+                .iter()
+                .all(|operation| !matches!(operation.operation, TransactionOperation::Read(_)))
+        }) {
+            Some(
+                participants
+                    .iter()
+                    .enumerate()
+                    .map(|(position, participant)| {
+                        Ok(UnresolvedCoordinatorParticipant {
+                            position: u8::try_from(position).map_err(|_| {
+                                StorageError::Internal(
+                                    "invalid acknowledged participant position".into(),
+                                )
+                            })?,
+                            target: participant.target.clone(),
+                            prepared: true,
+                            release_read_result: false,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, StorageError>>()?,
+            )
+        } else {
+            None
+        };
         let payloads = participants
             .into_iter()
             .enumerate()
@@ -137,7 +167,7 @@ impl CellStorage {
                 Ok((position, Some(participant)))
             })
             .collect();
-        self.prepare_and_commit_transaction(coordinator, read, payloads)
+        self.prepare_and_commit_transaction(coordinator, read, payloads, write_participants)
             .await
     }
 
@@ -146,6 +176,7 @@ impl CellStorage {
         coordinator: &CellTarget,
         read: &ReadCrossCellTransactionInput,
         payloads: Vec<Result<(u8, Option<CoordinatorParticipant>), StorageError>>,
+        write_participants: Option<Vec<UnresolvedCoordinatorParticipant>>,
     ) -> Result<CrossCellTransactionStatus, StorageError> {
         let account_id = read.account_id.as_str();
         let transaction_id = read.transaction_id;
@@ -299,7 +330,33 @@ impl CellStorage {
             )
             .await;
         let outcome = match result {
-            Ok(result) => result.output.0,
+            Ok(result) => {
+                if result.output.0
+                    == CommitPreparedTransactionOutcome::Decision(
+                        DecideCrossCellTransactionOutcome::Decided(CoordinatorDecision::Commit),
+                    )
+                    && let Some(participants) = write_participants
+                {
+                    let participant_count = u8::try_from(participants.len()).map_err(|_| {
+                        StorageError::Internal("invalid acknowledged participant count".into())
+                    })?;
+                    // The accepted COMMIT records every prepare receipt. The
+                    // exact fresh BEGIN set and acknowledged resolution records
+                    // then prove completion, without rediscovering that set or
+                    // polling coordinator status. Any uncertainty below returns
+                    // an error; retries use the normal durable snapshot path.
+                    self.finish_transaction_participants(coordinator, read, true, participants)
+                        .await?;
+                    return Ok(CrossCellTransactionStatus {
+                        decision: CoordinatorDecision::Commit,
+                        participant_count,
+                        prepared_count: participant_count,
+                        resolved_count: participant_count,
+                        unreleased_read_results: 0,
+                    });
+                }
+                result.output.0
+            }
             Err(InvocationError::Rejected(result)) => result.output.0,
             // An absent reply cannot distinguish a durable decision from an
             // unfinished command. Read authoritative state before resolving.

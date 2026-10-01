@@ -615,6 +615,9 @@ impl PeerRoundTrip for DropPhaseReplies {
                             1 => 4,
                             13 | 22 => 8,
                             5 => 16,
+                            // Separate bit lets fresh completion tests lose the
+                            // batched coordinator receipt without losing BEGIN.
+                            10 => 128,
                             14 => 32,
                             23 => 64,
                             _ => 0,
