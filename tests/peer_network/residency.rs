@@ -2,6 +2,7 @@ mod cell_models;
 mod codec;
 mod coordinator_admission;
 mod coordinator_discovery;
+mod coordinator_registration;
 mod creation;
 mod deletion;
 mod directories;

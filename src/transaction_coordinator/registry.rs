@@ -7,6 +7,8 @@ use super::SHARDS;
 use crate::table::statement;
 use crate::{Error, Json, MODULE, Result, SqlValue, account_target};
 
+pub(crate) const MAX_REGISTRATION_SHARDS: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegisterCoordinatorShardInput {
     pub account_id: String,
@@ -39,6 +41,47 @@ impl Command for RegisterCoordinatorShard {
             "INSERT OR IGNORE INTO ddb_coordinator_shards (shard) VALUES (?1)",
             vec![SqlValue::Integer(i64::from(input.shard))],
         ))?;
+        Ok(CommandResult::Success(Json(())))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegisterCoordinatorShardsInput {
+    pub account_id: String,
+    pub shards: Vec<u32>,
+}
+
+/// Publish several coordinator registrations in one durable account command.
+pub struct RegisterCoordinatorShards;
+
+impl Command for RegisterCoordinatorShards {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 56;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<RegisterCoordinatorShardsInput>;
+    type Output = Json<()>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        if account_target(&input.account_id)? != *context.target() {
+            return Err(Error::Identity(
+                "coordinator shards reached the wrong account",
+            ));
+        }
+        if input.shards.is_empty()
+            || input.shards.len() > MAX_REGISTRATION_SHARDS
+            || input.shards.iter().any(|shard| *shard >= SHARDS)
+        {
+            return Err(Error::Command("invalid coordinator registration batch"));
+        }
+        for shard in input.shards {
+            context.sql(&statement(
+                "INSERT OR IGNORE INTO ddb_coordinator_shards (shard) VALUES (?1)",
+                vec![SqlValue::Integer(i64::from(shard))],
+            ))?;
+        }
         Ok(CommandResult::Success(Json(())))
     }
 }

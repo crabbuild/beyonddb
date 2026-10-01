@@ -801,6 +801,7 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             // These reads use independent stores: the registration is in the
             // account Cell and the authority record is local node metadata.
             // Start them together so admission pays for the slower read once.
+            let missing_generation = self.coordinator_bootstrap.generation(&target);
             let ((registered, registration_receipt), observed) = tokio::try_join!(
                 async {
                     let registration = client
@@ -845,12 +846,17 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 }
             } else {
                 self.reclaim_retired_ranges(client, &account, None).await?;
-                self.admit_module(
-                    &target,
-                    crate::transaction_coordinator::MODULE,
-                    initialize_coordinator,
-                )
-                .await?;
+                if observed.is_none() {
+                    self.admit_missing_coordinator(&target, missing_generation)
+                        .await?;
+                } else {
+                    self.admit_module(
+                        &target,
+                        crate::transaction_coordinator::MODULE,
+                        initialize_coordinator,
+                    )
+                    .await?;
+                }
             }
             if registered {
                 // A query can observe a registration while publication is still
@@ -882,20 +888,12 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 }
                 return Ok(());
             }
-            let registration = client
-                .command::<crate::RegisterCoordinatorShard>(
-                    &account,
-                    crate::backend::mutation_identity()?,
-                    Json(input),
-                )
-                .await
-                .map_err(cell_error)?;
-            self.remember_coordinator_registration(
-                &account,
-                &target,
-                registration.receipt.incarnation,
-            )
-            .await?;
+            let account_incarnation = self
+                .coordinator_registrations
+                .register(client, &account, account_id, shard)
+                .await?;
+            self.remember_coordinator_registration(&account, &target, account_incarnation)
+                .await?;
             Ok(())
         })
     }

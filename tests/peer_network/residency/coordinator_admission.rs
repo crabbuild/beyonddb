@@ -450,3 +450,130 @@ async fn resident_coordinator_without_acknowledged_registration_is_not_cached() 
     );
     fixture.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_coordinator_authority_is_not_read_twice_before_creation_cas() {
+    let store = Arc::new(CountedAuthority::default());
+    let fixture = Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, true).await;
+    let key = b"fresh-admission-absence";
+    let coordinator = beyonddb::coordinator_target(ACCOUNT, key).unwrap();
+    *store.path.lock().unwrap() = Some(
+        fixture
+            .layout
+            .control_path(coordinator.cell_id().as_bytes()),
+    );
+    store.reads.store(0, Ordering::SeqCst);
+    fixture
+        .provisioner
+        .ensure(&fixture.client, ACCOUNT, key)
+        .await
+        .unwrap();
+    let reads = store.reads.load(Ordering::SeqCst);
+    println!("first coordinator admission authority reads={reads}");
+    assert_eq!(
+        reads, 1,
+        "the conditional creation must revalidate observed absence without another GET"
+    );
+    let account = account_target(ACCOUNT).unwrap();
+    let input = RegisterCoordinatorShardInput {
+        account_id: ACCOUNT.into(),
+        shard: u32::from_be_bytes(coordinator.partition().try_into().unwrap()),
+    };
+    assert!(
+        fixture
+            .client
+            .query::<ReadCoordinatorRegistration>(&account, None, Json(input))
+            .await
+            .unwrap()
+            .output
+            .0
+    );
+    *store.path.lock().unwrap() = None;
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_coordinator_observation_never_overwrites_a_competing_owner() {
+    let store = Arc::new(CountedAuthority::default());
+    let fixture = Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, true).await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    let key = b"fresh-admission-race";
+    let coordinator = beyonddb::coordinator_target(ACCOUNT, key).unwrap();
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    *store.creation_gate.lock().unwrap() = Some(super::forward_cache::CreationGate {
+        paths: [fixture
+            .layout
+            .control_path(coordinator.cell_id().as_bytes())]
+        .into_iter()
+        .collect(),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let local = {
+        let provisioner = fixture.provisioner.clone();
+        let client = fixture.client.clone();
+        tokio::spawn(async move { provisioner.ensure(&client, ACCOUNT, key).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    // The local request has observed absence and is waiting at creation CAS.
+    // Let a real peer create and publish the same Cell before releasing it.
+    *store.creation_gate.lock().unwrap() = None;
+    let foreign = remote
+        .provisioner
+        .recover_owned_coordinator(ACCOUNT, key, &fixture.directory)
+        .await
+        .unwrap();
+    release.add_permits(1);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(10), local)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+    let assert_foreign_owner = || async {
+        let current = CellAuthority::new(fixture.layout.clone())
+            .load(coordinator.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.value().incarnation, foreign.incarnation());
+        assert_eq!(
+            current.value().owner.as_ref().unwrap().session,
+            remote.session
+        );
+        assert!(current.value().root.is_some());
+    };
+    assert_foreign_owner().await;
+    // A retry discovers the published peer root and can register it locally.
+    fixture
+        .provisioner
+        .ensure(&fixture.client, ACCOUNT, key)
+        .await
+        .unwrap();
+    assert_foreign_owner().await;
+    let account = account_target(ACCOUNT).unwrap();
+    assert!(
+        fixture
+            .client
+            .query::<ReadCoordinatorRegistration>(
+                &account,
+                None,
+                Json(RegisterCoordinatorShardInput {
+                    account_id: ACCOUNT.into(),
+                    shard: u32::from_be_bytes(coordinator.partition().try_into().unwrap()),
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+    );
+    remote.shutdown().await;
+    fixture.shutdown().await;
+}

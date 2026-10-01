@@ -2,6 +2,7 @@
 
 mod capacity;
 mod coordinator_bootstrap;
+mod coordinator_registration;
 mod directory;
 mod global_indexes;
 mod ranges;
@@ -65,6 +66,7 @@ pub struct CellInitialPartitionProvisioner {
     transaction_recovery: transactions::CoordinatorRecovery,
     admission: tokio::sync::RwLock<()>,
     coordinator_bootstrap: coordinator_bootstrap::CoordinatorBootstrap,
+    coordinator_registrations: coordinator_registration::CoordinatorRegistrations,
     peers: Option<Arc<crate::BeyonddbPeers>>,
     recovery_transport: Option<Arc<dyn NodeLogTransport>>,
 }
@@ -95,6 +97,7 @@ impl CellInitialPartitionProvisioner {
             transaction_recovery: Default::default(),
             admission: Default::default(),
             coordinator_bootstrap: Default::default(),
+            coordinator_registrations: Default::default(),
             peers: None,
             recovery_transport: None,
         })
@@ -820,18 +823,26 @@ impl CellInitialPartitionProvisioner {
         module: &'static str,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
+        let proof = self.provision_module_catalog(target, module).await?;
+        self.admit_initialized(target, proof, initialize)
+            .await
+            .map_err(provision_error)
+    }
+
+    async fn provision_module_catalog(
+        &self,
+        target: &CellTarget,
+        module: &'static str,
+    ) -> Result<CatalogProof, StorageError> {
         let code = self
             .application
             .registry()
             .module_code(module)
             .ok_or_else(|| StorageError::Internal("Cell module is not compiled".into()))?;
-        let proof = CellCatalog::new(self.layout.clone(), target.tenant())
+        CellCatalog::new(self.layout.clone(), target.tenant())
             .provision(
                 CatalogEntry::new(target, CatalogRole::Sql, code, 1).map_err(provision_error)?,
             )
-            .await
-            .map_err(provision_error)?;
-        self.admit_initialized(target, proof, initialize)
             .await
             .map_err(provision_error)
     }
@@ -853,7 +864,12 @@ impl CellInitialPartitionProvisioner {
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> cellule_runtime::Result<CellHandle> {
         if let Some(handle) = self
-            .try_bootstrap_coordinator(target, proof.clone(), initialize)
+            .try_bootstrap_coordinator(
+                target,
+                proof.clone(),
+                initialize,
+                coordinator_bootstrap::AuthorityObservation::Read,
+            )
             .await?
         {
             return Ok(handle);

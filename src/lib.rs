@@ -140,6 +140,15 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
+const fn coordinator_registration_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        // Only an account ID (at most 128 bytes) and shard numbers; no images.
+        input_limit: 4096,
+        output_limit: 4096,
+        ..operation(id)
+    }
+}
+
 const fn no_return_operation(id: u32) -> OperationDescriptor {
     OperationDescriptor {
         id,
@@ -173,7 +182,7 @@ const fn no_return_transaction_operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 33] = [
+static COMMANDS: [OperationDescriptor; 34] = [
     operation(1),
     operation(2),
     operation(3),
@@ -191,7 +200,7 @@ static COMMANDS: [OperationDescriptor; 33] = [
     operation(17),
     operation(18),
     operation(19),
-    operation(20),
+    coordinator_registration_operation(20),
     operation(21),
     participant::phase_operation(22),
     crate::transaction_transport::upload_operation(23),
@@ -226,6 +235,7 @@ static COMMANDS: [OperationDescriptor; 33] = [
     operation(52),
     no_return_transaction_operation(53),
     no_return_operation(55),
+    coordinator_registration_operation(56),
 ];
 static QUERIES: [OperationDescriptor; 32] = [
     operation(4),
@@ -252,7 +262,7 @@ static QUERIES: [OperationDescriptor; 32] = [
         ..operation(24)
     },
     participant::phase_operation(25),
-    operation(26),
+    coordinator_registration_operation(26),
     operation(27),
     operation(28),
     OperationDescriptor {
@@ -483,6 +493,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
+        registry.bind_command::<RegisterCoordinatorShards>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
         registry.bind_command::<RecordAccountIndexDelivery>()?;

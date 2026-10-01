@@ -13,6 +13,7 @@ pub(super) struct CountedAuthority {
     pub(super) reads: AtomicUsize,
     pub(super) all_reads: AtomicUsize,
     pub(super) creation_gate: std::sync::Mutex<Option<CreationGate>>,
+    pub(super) publication_gate: std::sync::Mutex<Option<CreationGate>>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,9 +37,25 @@ impl object_store::ObjectStore for CountedAuthority {
         payload: object_store::PutPayload,
         options: object_store::PutOptions,
     ) -> object_store::Result<object_store::PutResult> {
-        let gate = self.creation_gate.lock().unwrap().clone().filter(|gate| {
-            matches!(options.mode, object_store::PutMode::Create) && gate.paths.contains(location)
-        });
+        let gate = self
+            .creation_gate
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|gate| {
+                matches!(options.mode, object_store::PutMode::Create)
+                    && gate.paths.contains(location)
+            })
+            .or_else(|| {
+                self.publication_gate
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .filter(|gate| {
+                        matches!(options.mode, object_store::PutMode::Update(_))
+                            && gate.paths.contains(location)
+                    })
+            });
         if let Some(gate) = gate {
             gate.entered.add_permits(1);
             gate.release.acquire().await.unwrap().forget();
