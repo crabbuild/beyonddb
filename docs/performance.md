@@ -19,13 +19,33 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The coordinator-admission refresh measured SQL commands at 0.769/1.001 ms on average in single/four-Cell fixtures, and publication at 43.499/88.004 ms. Follower append averaged 16.769/32.853 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+The latest refresh measured SQL commands at 0.801/0.461 ms on average in single/four-Cell fixtures. Durable follower append averaged 15.826/17.544 ms, enrollment reads 8.748/16.935 ms and fleet responses 49.801/92.671 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [cold catalog release comparison](../benchmarks/2026-10-01-cold-catalog-release/README.md) measures committed source `1e8765c`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite write and transaction parity remains unmet.** Single mode exceeds SQLite's request rate only for eight-client ListTables; four Cells exceed it only for single-client DescribeTable.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 257.50 | 475.01 | 1034.55 |
+| PutItem | 49.97 | 42.92 | 731.88 |
+| UpdateItem | 58.76 | 78.82 | 769.80 |
+| TransactGetItems | 122.41 | 4.76 | 565.82 |
+| TransactWriteItems | 6.14 | 3.06 | 515.66 |
+
+Transaction-write p95 is 1772.24/3469.94 ms for single/four Cells, versus SQLite's 36.97 ms. Completed requests are 35/19/2583; four-Cell single-client writes complete only three requests. Calls contain two items. The full report includes every API, client count, percentile and completed-request count.
+
+The [signed regression](../benchmarks/2026-10-01-cold-catalog-verification/README.md) proves cold coordinator catalog publication overlaps registration discovery and authority lookup. Bootstrap still requires the published catalog proof, and BEGIN still requires durable registration. Missing-generation checks, competing-owner fences, token identity and the resident fast path remain intact. Registration, incarnation restoration, token replay and the committed item are verified.
+
+**This sample does not establish an end-to-end speedup.** Transaction rates are below the preceding sample; ordinary writes and reads also vary. Host load is 28.64→30.53 for single mode, 30.45→52.43 for four Cells and 49.19→26.57 for SQLite, on 12 logical CPUs. Start snapshots report 31–33 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The old-release cold/warm diagnostic also shows substantial latency on warmed shards, but its sequential populations and changing host load do not isolate admission cost.
+
+Formatting, strict Clippy, 28 library tests and nine focused admission/registration cases pass. The native run passes 46/48; both failures pass individually without edits, and **the intermittent ownership/activity failures remain unresolved**. Preceding full SDK CI runs retain token replay, coordinator/GSI owner recovery and graceful shutdown failures, including the observed-stream EOF panic. Full peer/process CI and old-root upgrades remain unqualified. One incomplete-resolution WARN occurs during four-Cell measurement. All seven fixture PIDs and both containers are absent, without forced BeyondDB cleanup. Zero SDK errors does not establish maintenance convergence or sustained capacity.
+
+### Previous acknowledged-completion release verification
 
 The [acknowledged-completion release comparison](../benchmarks/2026-10-01-acknowledged-completion-release/README.md) measures committed source `daa73a8`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite performance parity remains unmet; every eight-client API is slower than SQLite in this run.**
 
