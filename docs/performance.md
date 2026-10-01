@@ -27,6 +27,26 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 
 ## Latest release verification
 
+The [single/four-Cell release comparison](../benchmarks/2026-10-01-cell-model-release/README.md) measures source `8ecd6d5`, Cellule `e07670e`, and ExtendDB `7eaa89b`. Both BeyondDB fixtures use the same binary and four configured initial partitions, with `single` or `partitioned` selected at creation. AWS CLI creates each table; signed boto3 measures the unchanged workload. All 24 cases per fixture completed: **72 cases, zero SDK errors** across two BeyondDB modes and SQLite.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 345.76 | 525.60 | 946.39 |
+| PutItem | 110.31 | 78.80 | 1106.55 |
+| TransactGetItems | 336.73 | 6.20 | 724.66 |
+| TransactWriteItems | 10.39 | 7.55 | 459.16 |
+
+Single-Cell transaction reads measured p95 33.14 ms, versus 1646.43 ms with four Cells. Single-Cell PutItem p95 was 97.21 ms, and transaction-write p95 was 920.8 ms; SQLite measured 15.27 and 47.44 ms. Tokenized writes still use the coordinator. The all-API SQLite objective remains unmet.
+
+Single mode returned 1,691 eight-client transaction reads, while the four-Cell sample returned 38; transaction writes completed 58/43. These short samples do not establish sustained capacity. One Cell also measured lower point-read throughput than four, so placement has workload tradeoffs. Host load, fresh owner placement, and provider latency differ between fixtures; the ratios do not isolate placement's service speedup.
+
+Host load was 17.93→16.75 for single, 17.46→23.30 for partitioned, and 24.15→26.65 for SQLite. No task-local build/test/provider probe overlapped measurement. Every new fixture PID/container is absent; volumes and scratch data are retained. Partitioned logs retain deferred recovery and mailbox-byte pressure in maintenance workers. Zero SDK errors does not qualify those workers' convergence.
+
+The [placement verification](../benchmarks/2026-10-01-cell-model-verification/README.md) passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. Source Rust CI passed; full SDK CI remains pending. Prior full recovery failures and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
+
+### Previous native-volume release pair
+
+
 The [native-volume release pair](../benchmarks/2026-10-01-native-volume-release/README.md)
 reuses source `7cf8f46` and the exact binary from the preceding host-bind run,
 with Cellule `e07670e` and ExtendDB `7eaa89b`. RustFS stores data in a named
