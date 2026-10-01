@@ -19,13 +19,34 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The latest native-volume sample measured SQL commands at 0.542 ms on average, versus 12.447 ms for fresh follower enrollment and 17.620 ms for durable append. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+The coordinator-admission refresh measured SQL commands at 0.769/1.001 ms on average in single/four-Cell fixtures, and publication at 43.499/88.004 ms. Follower append averaged 16.769/32.853 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [coordinator-admission release refresh](../benchmarks/2026-10-01-coordinator-registration-release/README.md) measures committed source `58ba0dd`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK errors** across fresh single-Cell, four-Cell and SQLite fixtures, using signed AWS CLI creation and the unchanged boto3 harness.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 237.59 | 679.86 | 786.23 |
+| PutItem | 130.73 | 49.19 | 796.17 |
+| TransactGetItems | 516.32 | 6.12 | 766.76 |
+| TransactWriteItems | 9.35 | 5.65 | 539.37 |
+
+Single-Cell transaction reads measured p95 20.54 ms, versus 1816.47 ms with four Cells and 21.73 ms with SQLite. Single-Cell transaction writes measured p95 1126.21 ms, versus SQLite's 37.02 ms. SQLite parity remains unmet.
+
+The [admission regression](../benchmarks/2026-10-01-cold-admission-verification/README.md) reduces fresh coordinator authority reads from two to one and four concurrent account registrations to one durable command. Metadata envelopes now reserve 4 KiB per input/result. Cancellation cannot acknowledge an unpublished registration, and acknowledged rows survive account owner restoration. Coordinator shard identities and token replay routing remain unchanged.
+
+This sample does **not** establish an end-to-end transaction-write speedup: the preceding record measured 10.39/7.55 requests/s, versus 9.35/5.65 here. Single-mode PutItem increased while four-Cell writes decreased. Fresh owner placement, I/O latency, host load and acknowledgment populations differ between fixtures. The count regression proves reduced admission work; the SDK samples do not isolate its throughput effect.
+
+Host load at SDK start/end was 15.37→13.67 for single, 13.34→14.53 for partitioned, and 14.89→23.91 for SQLite. No task-local build, test or provider probe overlapped measurement. All seven new server processes and both containers are absent. Four-Cell logs retain a deferred capacity sweep during measurement; single-mode follower-advertisement warnings occur during cleanup. Zero SDK errors does not qualify maintenance convergence or graceful shutdown.
+
+Focused checks, signed placement tests, 27 library tests, formatting and strict Clippy pass. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36799718797) failed: native 48/48 passed, peers 61/62 and process 7/8 passed. Coordinator ownership and graceful-shutdown failures remain open; the new source has not completed full qualification. Matching compiled peers are required, and older-root upgrades remain unqualified.
+
+### Previous placement release comparison
 
 The [single/four-Cell release comparison](../benchmarks/2026-10-01-cell-model-release/README.md) measures source `8ecd6d5`, Cellule `e07670e`, and ExtendDB `7eaa89b`. Both BeyondDB fixtures use the same binary and four configured initial partitions, with `single` or `partitioned` selected at creation. AWS CLI creates each table; signed boto3 measures the unchanged workload. All 24 cases per fixture completed: **72 cases, zero SDK errors** across two BeyondDB modes and SQLite.
 
@@ -42,7 +63,7 @@ Single mode returned 1,691 eight-client transaction reads, while the four-Cell s
 
 Host load was 17.93→16.75 for single, 17.46→23.30 for partitioned, and 24.15→26.65 for SQLite. No task-local build/test/provider probe overlapped measurement. Every new fixture PID/container is absent; volumes and scratch data are retained. Partitioned logs retain deferred recovery and mailbox-byte pressure in maintenance workers. Zero SDK errors does not qualify those workers' convergence.
 
-The [placement verification](../benchmarks/2026-10-01-cell-model-verification/README.md) passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. Source Rust CI passed; full SDK CI remains pending. Prior full recovery failures and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
+The [placement verification](../benchmarks/2026-10-01-cell-model-verification/README.md) passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. The original record captured Rust CI success and SDK CI pending. Subsequent production-equivalent SDK CI failed as described above; full recovery and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
 
 ### Previous native-volume release pair
 
