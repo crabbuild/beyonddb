@@ -798,11 +798,11 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             };
             // Registration is discovery, not residency. A released shard must
             // restore its published root before token lookup or a new BEGIN.
-            // These reads use independent stores: the registration is in the
-            // account Cell and the authority record is local node metadata.
-            // Start them together so admission pays for the slower read once.
+            // Registration, authority and immutable catalog publication are
+            // independent. Start them together; bootstrap still requires the
+            // published catalog proof, and BEGIN still waits for registration.
             let missing_generation = self.coordinator_bootstrap.generation(&target);
-            let ((registered, registration_receipt), observed) = tokio::try_join!(
+            let ((registered, registration_receipt), observed, proof) = tokio::try_join!(
                 async {
                     let registration = client
                         .query::<crate::ReadCoordinatorRegistration>(
@@ -820,6 +820,7 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                         .await
                         .map_err(provision_error)
                 },
+                self.provision_module_catalog(&target, crate::transaction_coordinator::MODULE),
             )?;
             if registered
                 && observed
@@ -833,10 +834,9 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             if observed.as_ref().is_some_and(|record| {
                 record.value().owner.is_some() && record.value().root.is_some()
             }) {
-                // Another node may have published this shard before registration.
+                // Catalog provision validates the exact immutable entry even
+                // when another node published this shard before registration.
                 // Keep its authority; the routed client will reach that owner.
-                self.cataloged(&target, crate::transaction_coordinator::MODULE)
-                    .await?;
                 if observed
                     .as_ref()
                     .and_then(|record| record.value().owner.as_ref())
@@ -847,15 +847,12 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             } else {
                 self.reclaim_retired_ranges(client, &account, None).await?;
                 if observed.is_none() {
-                    self.admit_missing_coordinator(&target, missing_generation)
+                    self.admit_missing_coordinator(&target, missing_generation, proof)
                         .await?;
                 } else {
-                    self.admit_module(
-                        &target,
-                        crate::transaction_coordinator::MODULE,
-                        initialize_coordinator,
-                    )
-                    .await?;
+                    self.admit_initialized(&target, proof, initialize_coordinator)
+                        .await
+                        .map_err(provision_error)?;
                 }
             }
             if registered {

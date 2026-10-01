@@ -94,10 +94,8 @@ impl CellInitialPartitionProvisioner {
         &self,
         target: &CellTarget,
         generation: u64,
+        proof: cellule_runtime::cell::catalog::CatalogProof,
     ) -> std::result::Result<CellHandle, extenddb_storage::error::StorageError> {
-        let proof = self
-            .provision_module_catalog(target, crate::transaction_coordinator::MODULE)
-            .await?;
         if let Some(handle) = self
             .try_bootstrap_coordinator(
                 target,
