@@ -69,7 +69,9 @@ items + LSIs + journal      hash range A    hash range B
 
 The choice persists in the table generation. Changing or removing the tag later changes tag metadata only; `TagResource`, `UntagResource`, and `UpdateTable` do not move data or change placement. Live conversion from `single` to a splitting model is not implemented. Choose `auto` if future growth is uncertain. Invalid values and duplicate selector tags are rejected before table creation.
 
-A size label alone cannot select the model. A large table with modest writes may fit one Cell, while a smaller table with heavy writes may need several. One Cell serializes mutations and remains subject to node admission, disk budgets, and recovery costs. `single` suppresses splitting; it does not remove resource limits. Hash-range splitting also does not solve every hot partition-key workload; see the delivery gates below.
+Table size and write load both matter. A smaller table with heavy writes may need several Cells. One Cell serializes mutations and remains subject to node admission, disk budgets, and recovery costs. `single` suppresses splitting; it does not remove resource limits. Hash-range splitting also does not solve every hot partition-key workload; see the delivery gates below.
+
+**Current sizing limit:** the compiled base data Cell has a **512 MiB SQLite database budget** and a **64 MiB capture budget**. The database budget includes items, local indexes, stream records, transaction state and other Cell metadata; usable item storage is smaller. The creation tag does not raise these limits. A table that will exceed this budget needs `auto` or `partitioned` in the current release. Configurable larger single-Cell budgets and live placement conversion are unfinished.
 
 Small same-Cell transaction reads can use one atomic query. Tokenized transaction writes still require the account-scoped coordinator, and cross-table transactions can span Cells. Placement therefore reduces some transaction work without establishing SQLite write parity. See [transaction execution paths](cross-cell-transactions.md#one-cell-and-multiple-cell-requests) and [measured performance](performance.md).
 

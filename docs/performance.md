@@ -27,6 +27,25 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 
 ## Latest release verification
 
+The [acknowledged-BEGIN release refresh](../benchmarks/2026-10-01-acknowledged-begin-release/README.md) measures committed source `d46f6f9`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. SQLite write and transaction parity remains unmet.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 125.36 | 324.92 | 1019.35 |
+| PutItem | 70.63 | 66.97 | 639.97 |
+| TransactGetItems | 85.82 | 5.43 | 913.05 |
+| TransactWriteItems | 4.79 | 7.72 | 557.23 |
+
+Transaction-write p95 was 1990.78/1227.48 ms for single/four Cells, versus SQLite's 31.91 ms. Calls contain two items, so transaction item throughput is twice the request rate.
+
+**This is a contended workstation sample.** The 12-core host's load changed from 15.86→34.83 during the single run, 38.78→28.02 for four Cells and 26.97→22.00 for SQLite. No task-local build, test or provider probe overlapped measurement. Four-Cell transaction writes are higher than the preceding sample, while single-Cell writes are lower; this experiment does not isolate a source speedup.
+
+The [signed SDK regression](../benchmarks/2026-10-01-acknowledged-begin-verification/README.md) verifies fresh transaction coordinator queries fall from five to four. After a confirmed fresh BEGIN, the adapter reuses its exact accepted participants for inputs at most 32 KiB. Existing tokens, ambiguous replies, larger inputs and recovery still read durable coordinator state. All durable prepare, decision, resolution and completion checks remain.
+
+The full 48-case native suite, four signed Cell-model tests, formatting and strict all-target Clippy pass. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36806586859) failed: native 48/48, peers 65/67 and process 7/8. Post-drain token replay, GSI ownership and graceful-shutdown failures remain open. The new source has not completed full SDK/process qualification; older-root upgrades remain unqualified. All seven benchmark fixture PIDs and both containers are absent.
+
+### Previous coordinator-admission release comparison
+
 The [coordinator-admission release refresh](../benchmarks/2026-10-01-coordinator-registration-release/README.md) measures committed source `58ba0dd`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK errors** across fresh single-Cell, four-Cell and SQLite fixtures, using signed AWS CLI creation and the unchanged boto3 harness.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
@@ -44,7 +63,7 @@ This sample does **not** establish an end-to-end transaction-write speedup: the 
 
 Host load at SDK start/end was 15.37→13.67 for single, 13.34→14.53 for partitioned, and 14.89→23.91 for SQLite. No task-local build, test or provider probe overlapped measurement. All seven new server processes and both containers are absent. Four-Cell logs retain a deferred capacity sweep during measurement; single-mode follower-advertisement warnings occur during cleanup. Zero SDK errors does not qualify maintenance convergence or graceful shutdown.
 
-Focused checks, signed placement tests, 27 library tests, formatting and strict Clippy pass. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36799718797) failed: native 48/48 passed, peers 61/62 and process 7/8 passed. Coordinator ownership and graceful-shutdown failures remain open; the new source has not completed full qualification. Matching compiled peers are required, and older-root upgrades remain unqualified.
+Focused checks, signed placement tests, 27 library tests, formatting and strict Clippy passed for this source. Subsequent [full SDK CI for production-equivalent `b9cbf50`](https://github.com/crabbuild/beyonddb/actions/runs/36806586859) failed: native 48/48, peers 65/67 and process 7/8. The latest qualification gaps are described above. Matching compiled peers are required, and older-root upgrades remain unqualified.
 
 ### Previous placement release comparison
 
