@@ -4,6 +4,52 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 ## Latest release verification
 
+The [bounded coordinator snapshot release pair](../benchmarks/2026-09-30-coordinator-snapshot-release/README.md)
+measures source `7cf8f46`, Cellule `e07670e`, and ExtendDB `7eaa89b`.
+All 24 cases completed per backend. BeyondDB recorded **five SDK timeouts**,
+all in eight-client TransactWriteItems; SQLite recorded zero.
+
+| API, eight clients | BeyondDB requests/s | SQLite requests/s | BeyondDB p95 |
+| --- | ---: | ---: | ---: |
+| GetItem | 323.31 | 745.57 | 62.65 ms |
+| PutItem | 22.27 | 723.85 | 711.47 ms |
+| TransactGetItems | 0.98 | 830.83 | 8614.57 ms |
+| TransactWriteItems | 0.61 | 990.81 | 6829.62 ms* |
+
+\* Nine transaction writes completed; five timeouts are excluded from the
+percentile. Only single-client ListTables exceeded SQLite. Every eight-client
+case remained slower; the all-API SQLite objective is unmet.
+
+Host load was 37.42→32.62 during BeyondDB, then 32.57→26.22 during SQLite on
+12 logical CPUs. No task-local build/test overlapped measurement. Fresh owner
+placement and provider costs also vary. This sample does not isolate the query
+fusion's throughput effect or establish production/fleet capacity. All fixture
+PIDs and the exact RustFS container are absent, with no forced PID cleanup.
+
+The [counted driver regression](../benchmarks/2026-09-30-coordinator-snapshot-verification/README.md)
+fails before the change with seven coordinator queries and passes after with
+four. One bounded query observes durable status and small immutable payloads;
+large inputs retain chunked retrieval. Durable preparation, decision, resolution
+and final-status checks remain. The new query changes the compiled coordinator
+contract; older-root upgrades remain unqualified.
+
+Local gates pass: 12 transaction cases, restart read cleanup, seven signed
+coordinator SDK cases, 27 library tests, formatting and strict all-target Clippy.
+The focused count regression overlaps the transaction selection. Source Rust CI
+passed; full SDK CI is in progress at report time. Prior-source SDK CI on the
+same Cellule pin failed the global-index owner and graceful-stop assertions:
+native 47/47 passed, peers 58/59 and process 7/8 failed. Full recovery is open.
+
+SQL command execution averaged 0.384 ms, provider GET/PUT 14.825/261.135 ms and
+publication total 1271.151 ms. Follower lookup averaged 82.857 ms across 1,488
+samples; HTTP round trip 49.520 ms, enrollment 33.808 ms and durable append
+15.005 ms each had 1,486 samples. These overlapping populations include
+background work and in-flight operations; counts need not match, and event
+times must not be added into SDK latency. The full record retains every API,
+sample count, failure, phase metric, source/binary hash and host snapshot.
+
+### Previous Cellule e07670e release pair
+
 The [Cellule e07670e release pair](../benchmarks/2026-09-30-cellule-e07670e-release/README.md)
 measures source `664e07a`, reviewed upstream Cellule `e07670e`, and ExtendDB
 `7eaa89b`. All 24 cases completed per backend. BeyondDB recorded **seven SDK
@@ -34,8 +80,8 @@ checks and serialized directory-cache index snapshots. The lockfile changes only
 seven Cellule Git sources. [Upgrade verification](../benchmarks/2026-09-30-cellule-e07670e-verification/README.md)
 passes 27 library tests, 58 residency/routing tests, formatting and strict Clippy;
 seven coordinator cases also pass and overlap residency. Upstream's four CI
-workflows and BeyondDB source Rust CI pass. Full signed recovery CI remains in
-progress at report time; earlier full runs failed. Recovery qualification is open.
+workflows and BeyondDB source Rust CI pass. The subsequent full signed recovery CI failed: native 47/47 passed, peers
+58/59 and process 7/8 failed. Recovery qualification remains open.
 
 Across 1,572 samples per follower phase, lookup averaged 85.002 ms, HTTP round
 trip 45.940 ms, fresh enrollment 29.041 ms and durable append 16.119 ms. SQL
