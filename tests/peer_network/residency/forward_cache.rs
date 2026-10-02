@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Default)]
 pub(super) struct CountedAuthority {
-    inner: InMemory,
+    inner: Arc<InMemory>,
+    get_paths: std::sync::Mutex<HashMap<object_store::path::Path, usize>>,
+    failed_get_paths: std::sync::Mutex<std::collections::HashSet<object_store::path::Path>>,
     pub(super) path: std::sync::Mutex<Option<object_store::path::Path>>,
     pub(super) reads: AtomicUsize,
     pub(super) all_reads: AtomicUsize,
@@ -77,6 +79,12 @@ impl object_store::ObjectStore for CountedAuthority {
         location: &object_store::path::Path,
         options: object_store::GetOptions,
     ) -> object_store::Result<object_store::GetResult> {
+        *self
+            .get_paths
+            .lock()
+            .unwrap()
+            .entry(location.clone())
+            .or_default() += 1;
         let gate = {
             let mut gate = self.read_gate.lock().unwrap();
             if gate
@@ -91,6 +99,12 @@ impl object_store::ObjectStore for CountedAuthority {
         if let Some(gate) = gate {
             gate.entered.add_permits(1);
             gate.release.acquire().await.unwrap().forget();
+        }
+        if self.failed_get_paths.lock().unwrap().contains(location) {
+            return Err(object_store::Error::Generic {
+                store: "CountedAuthority",
+                source: std::io::Error::other("injected fresh enrollment read failure").into(),
+            });
         }
         self.all_reads.fetch_add(1, Ordering::SeqCst);
         let counted = self.path.lock().unwrap().as_ref() == Some(location);
@@ -325,4 +339,175 @@ async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
         remote.shutdown().await;
         fixture.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_read_overlaps_fresh_authority_and_owner_enrollment() {
+    let store = Arc::new(CountedAuthority::default());
+    let fixture = Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, true).await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    // Only the sender uses this observer; owner heartbeats and receiver
+    // authorization use the original store and cannot satisfy the probe.
+    let sender_store = Arc::new(CountedAuthority {
+        inner: store.inner.clone(),
+        ..CountedAuthority::default()
+    });
+    let account = account_target("123456789012").unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(sender_store.clone()),
+        object_store::path::Path::from("beyonddb-residency"),
+        *account.application().as_bytes(),
+    );
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        fixture.directory.fleet(),
+        Digest::from_bytes([90; 32]),
+        fixture.application.registry().release_digest(),
+    );
+    let peers = BeyonddbPeers::new(
+        &remote.node,
+        layout.clone(),
+        directory,
+        remote.session,
+        &fixture.remote_tls,
+    )
+    .unwrap();
+    let client = peers.client_with_cache(remote.provisioner.clone(), true);
+    let handle = &fixture.data[0].0;
+    let entry = handle.catalog().entry();
+    let target = CellTarget::new(
+        account.tenant(),
+        beyonddb::APPLICATION_ID,
+        entry.namespace(),
+        entry.partition(),
+    )
+    .unwrap();
+    let expected = client
+        .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output;
+    let owner_path = layout.node_path(fixture.session.as_bytes());
+    let before = sender_store
+        .get_paths
+        .lock()
+        .unwrap()
+        .get(&owner_path)
+        .copied()
+        .unwrap_or_default();
+    let gate = CreationGate {
+        paths: std::collections::HashSet::from([layout.control_path(handle.cell_id().as_bytes())]),
+        entered: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    *sender_store.read_gate.lock().unwrap() = Some(gate.clone());
+    let read = tokio::spawn({
+        let client = client.clone();
+        let target = target.clone();
+        async move {
+            client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let overlap = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            if sender_store
+                .get_paths
+                .lock()
+                .unwrap()
+                .get(&owner_path)
+                .copied()
+                .unwrap_or_default()
+                > before
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    gate.release.add_permits(1);
+    let actual = read.await.unwrap().unwrap().output;
+    assert_eq!(actual, expected);
+    let after = sender_store
+        .get_paths
+        .lock()
+        .unwrap()
+        .get(&owner_path)
+        .copied()
+        .unwrap_or_default();
+    sender_store
+        .failed_get_paths
+        .lock()
+        .unwrap()
+        .insert(owner_path.clone());
+    let failed = client
+        .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+        .await;
+    assert!(
+        failed.is_err(),
+        "a current owner's fresh probe must fail closed"
+    );
+    let replacement =
+        super::provisioning::Remote::with_identity(&fixture, SessionId::from_bytes([97; 16]), 100)
+            .await;
+
+    // Keep the failed old-session probe, but change authority while its read
+    // is gated. The new remote owner must not inherit that obsolete failure.
+    *sender_store.read_gate.lock().unwrap() = Some(gate.clone());
+    let moved_read = tokio::spawn({
+        let client = client.clone();
+        let target = target.clone();
+        async move {
+            client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let spec = &expected.0.as_ref().unwrap().spec;
+    handle.drain().await.unwrap();
+    replacement
+        .provisioner
+        .admit_existing_partition("123456789012", &spec.table.id, &spec.partition_id)
+        .await
+        .unwrap();
+    gate.release.add_permits(1);
+    assert_eq!(moved_read.await.unwrap().unwrap().output, expected);
+    let owner = CellAuthority::new(fixture.layout.clone())
+        .load(handle.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.value().owner.as_ref().unwrap().session,
+        replacement.session
+    );
+    let item = super::provisioning::sdk_without_retries(&fixture)
+        .get_item()
+        .table_name("Residency")
+        .key("id", fixture.data[0].1["id"].clone())
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(item.item.as_ref(), Some(&fixture.data[0].1));
+    replacement.shutdown().await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+    println!(
+        "fresh owner enrollment entered during gated authority read={overlap}; sender owner GETs {before}->{after}"
+    );
+    assert!(overlap, "fresh owner enrollment waited for authority I/O");
 }

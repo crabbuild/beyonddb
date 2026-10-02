@@ -44,9 +44,25 @@ impl Remote {
         fixture: &Fixture,
         wrap: impl FnOnce(axum::Router) -> axum::Router,
     ) -> Self {
+        Self::with_router_identity(fixture, wrap, SessionId::from_bytes([96; 16]), 98).await
+    }
+
+    pub(super) async fn with_identity(
+        fixture: &Fixture,
+        session: SessionId,
+        node_byte: u8,
+    ) -> Self {
+        Self::with_router_identity(fixture, std::convert::identity, session, node_byte).await
+    }
+
+    async fn with_router_identity(
+        fixture: &Fixture,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+        session: SessionId,
+        node_byte: u8,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
-        let session = SessionId::from_bytes([96; 16]);
         let lease = CancellationToken::new();
         let (remote, _tasks) = start_node(
             fixture.application.clone(),
@@ -55,7 +71,7 @@ impl Remote {
             session,
             endpoint.clone(),
             &fixture.remote_tls,
-            98,
+            node_byte,
             lease.clone(),
         )
         .await;
@@ -76,7 +92,11 @@ impl Remote {
                 fixture.layout.clone(),
                 session,
                 endpoint.clone(),
-                fixture._files.path().join("remote-data"),
+                fixture._files.path().join(if node_byte == 98 {
+                    "remote-data".into()
+                } else {
+                    format!("remote-data-{node_byte}")
+                }),
             )
             .unwrap()
             .with_initial_partition_count(2)
