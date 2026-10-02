@@ -47,6 +47,28 @@ The [signed two-Cell regression](../benchmarks/2026-10-02-acknowledged-read-veri
 
 ## Latest release verification
 
+### Scoped transaction-read metadata release
+
+The [scoped-read release comparison](../benchmarks/2026-10-02-acknowledged-read-release/README.md) measures committed source `eda759e` with unchanged reviewed dependencies. All **72 cases complete with zero SDK errors**: single Cell 12,116 completions, four Cells 18,859, SQLite 52,086. **SQLite parity remains unmet.** No API exceeds SQLite's eight-client rate in both BeyondDB modes.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 83.75 | 308.51 | 785.56 |
+| PutItem | 45.46 | 54.13 | 506.17 |
+| UpdateItem | 62.02 | 41.04 | 495.30 |
+| TransactGetItems | 105.41 | 0.98 | 598.33 |
+| TransactWriteItems | 3.78 | 4.58 | 369.00 |
+
+Eight-client transaction writes complete 27/28/1,846 requests (single/four/SQLite), with successful p95 **2,338.10/2,472.83/81.39 ms**. Each call contains two items. The four-Cell read case completes only nine transactions in 9.14 seconds, with successful p95 **8,876.13 ms**. Low counts and short targets do not qualify sustained throughput or a tail distribution. [Complete tables](../benchmarks/2026-10-02-acknowledged-read-release/tables.md) retain all APIs, errors, completions and elapsed times.
+
+The scoped optimization reduces fresh two-Cell read coordinator queries from five to three and passes 35 focused/library tests, formatting and strict Clippy. An earlier broader shortcut fails mixed account/data recovery and is excluded; its failures and baseline comparison remain in the [verification record](../benchmarks/2026-10-02-acknowledged-read-verification/README.md). This is a reduction in coordinator work, not an isolated end-to-end speedup.
+
+Four-Cell SQL command primitives average 0.800 ms, while follower durability command responses average 101.332 ms and durable follower append 24.537 ms. These scopes overlap, include different populations, and cannot be added. During concurrent transaction reads, peer lookup and enrollment average 87.868 and 49.800 ms. Discovery, durability and batching need further work. Runtime warnings record two short directory-refresh session-change failures; no terminal fencing occurs, and the earlier endpoint loss remains unresolved.
+
+On 12 CPUs, SDK-window host load is single **25.74→31.39**, four Cells **27.65→22.49**, SQLite **22.29→21.43**, with about 36–37 GiB of swap. No task-local build, tests or provider probes overlap measurement. Changing contention prevents causal attribution. All seven owned PIDs and two containers are absent; no BeyondDB process requires forced cleanup and volumes remain retained. The preceding head's [full recovery CI](https://github.com/crabbuild/beyonddb/actions/runs/37050870335) still fails missing GSI ownership and observed-stream EOF shutdown. Zero errors in this fixture do not close full recovery, old-root upgrades, larger single-Cell budgets, live conversion or SQLite parity.
+
+### Previous independent heartbeat release
+
 The [independent heartbeat release attempt](../benchmarks/2026-10-02-independent-heartbeat-release/README.md) measures committed source `e1f7664` with unchanged reviewed dependencies. All **72 cases run**. Single-Cell BeyondDB and SQLite complete their 24 cases with zero SDK errors; four-Cell BeyondDB records **72 errors across 16 cases**, loses its endpoint and exits fenced. **SQLite parity and runtime qualification remain unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
