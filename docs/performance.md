@@ -79,6 +79,26 @@ The [signed two-Cell regression](../benchmarks/2026-10-02-acknowledged-read-veri
 
 ## Latest release verification
 
+### Coalesced prepares: release qualification fails
+
+The [prepare-batching release attempt](../benchmarks/2026-10-02-prepare-batching-release/README.md) measures source `2ebb948` with unchanged dependency pins and durability settings. **All 72 unique cases run**, including one declared unchanged single-Cell retry after the original trial fences during item seeding. The failed original trial remains in the report. The retry completes 6,117 requests with zero SDK errors; four Cells complete 170 requests with **77 errors across 17 cases**; SQLite completes 25,340 requests with zero errors. **SQLite parity and runtime qualification remain unmet.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 36.70 | 14.77 | 228.90 |
+| PutItem | 11.14 | 0.00* | 261.38 |
+| UpdateItem | 3.62 | 0.00* | 320.22 |
+| TransactGetItems | 30.68 | 0.07* | 648.64 |
+| TransactWriteItems | 0.84 | 0.00* | 203.80 |
+
+\* Cases contain errors; zero means no successful sample after owner/authorization failures, not healthy capacity. Single-Cell transaction writes complete eight calls in 9.49 seconds, p95 **8,378.14 ms**, versus SQLite's 1,022 calls and **118.60 ms**. Calls contain two items. Eight completions do not establish a tail distribution. [Full tables](../benchmarks/2026-10-02-prepare-batching-release/tables.md) retain all APIs, errors, counts and elapsed times.
+
+The [43-test verification](../benchmarks/2026-10-02-prepare-batching-verification/README.md) proves 32 independent signed SDK transaction writes use **38–40 data commands instead of 64**, including recovery from a batch reply lost after publication. Results survive owner restoration. Formatting and strict Clippy pass. This is reduced publication work; the release attempt does not establish a throughput gain.
+
+Single-Cell SQL commands average **1.857 ms**, while follower durability responses average **356.278 ms**, peer lookup **193.687 ms** and enrollment **61.573 ms**. These scopes overlap and cannot be added. The original single trial and four-Cell run fence after directory-refresh waits of about **12.0/12.3 seconds**; the cause inside that phase remains unisolated. Reliable renewal and coordinator admission remain priorities.
+
+On 12 CPUs, SDK-window load is single retry **94.87→34.83**, four Cells **40.72→59.68**, SQLite **57.61→47.50**, with about **39.6–43.5 GiB of swap**. No task-local builds, tests or provider probes overlap measurement. Varying contention and ordering prevent causal attribution. Ten owned processes and three containers stop without forced BeyondDB cleanup; volumes remain retained. Full recovery, larger single-Cell budgets, live conversion and fleet capacity remain unqualified.
+
 ### Scoped transaction-read metadata release
 
 The [scoped-read release comparison](../benchmarks/2026-10-02-acknowledged-read-release/README.md) measures committed source `eda759e` with unchanged reviewed dependencies. All **72 cases complete with zero SDK errors**: single Cell 12,116 completions, four Cells 18,859, SQLite 52,086. **SQLite parity remains unmet.** No API exceeds SQLite's eight-client rate in both BeyondDB modes.
