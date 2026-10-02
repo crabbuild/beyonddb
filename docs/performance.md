@@ -19,13 +19,33 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The latest refresh measured SQL commands at 0.833/0.745 ms on average in single/four-Cell fixtures. Durable follower append averaged 27.827/40.302 ms, enrollment reads 27.111/37.421 ms and fleet responses 159.179/233.072 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+The latest failed refresh measured SQL commands at 0.870/0.402 ms on average in single/four-Cell fixtures. Durable follower append averaged 33.381/16.565 ms, enrollment reads 30.796/81.417 ms and command responses with follower durability 161.873/377.837 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [bounded prepare release refresh](../benchmarks/2026-10-02-prepare-capacity-release/README.md) measures committed source `8b2f92e`. **Performance qualification fails:** the single/four-Cell fixtures lose their serving leases during measurement, record **26/71 request errors**, and complete no transaction writes. SQLite completes its 24 cases with zero errors after its missing release binary is rebuilt from the same pinned source. All **72 unique cases** run across the retained experiment and repaired SQLite invocation. **The all-API SQLite goal remains unmet.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 115.37 | 64.67 | 486.48 |
+| PutItem | 12.45 | 0.00* | 297.95 |
+| UpdateItem | 9.61 | 0.00* | 272.60 |
+| TransactGetItems | 13.23 | 0.09* | 391.10 |
+| TransactWriteItems | 0.00* | 0.00* | 239.73 |
+
+\* Cases contain errors. Zero means no request completed after endpoint loss, not healthy capacity. Four-Cell transaction reads complete one request and time out eight; its successful latency percentile cannot represent a latency distribution. The [full tables](../benchmarks/2026-10-02-prepare-capacity-release/tables.md) retain all APIs, client counts, p95 values, completions and errors; raw JSON retains actual elapsed times.
+
+The [held-publication regression](../benchmarks/2026-10-02-prepare-capacity-verification/README.md) proves **eight concurrent small prepares fit instead of three**. New account/data commands reserve 64 KiB replies for inputs up to 32 KiB; the prior roughly 4 MiB reply reservation exhausted the 16 MiB Cell mailbox. Complete failure images use the existing wide command only after a durable rejected receipt proves rollback. Reply loss retains authoritative recovery. Owner restoration, token reuse, mixed participants, capacity refusal, formatting, strict Clippy and 28 library cases pass. This is an admission improvement; the failed release run does not establish a transaction speedup.
+
+**This workstation sample does not isolate a source regression or speedup.** On 12 logical CPUs, SDK-window load rises 20.49→43.70 for single mode and 47.06→71.54 for four Cells; SQLite runs at 39.42→36.69. Swap is about 34.4–35.3 GiB for BeyondDB and 39 GiB for SQLite. No task-local build, test or provider probe overlaps measurement. The SQLite rebuild is separate and its new binary identity is recorded. All seven fixture PIDs and both containers are absent; volumes are retained.
+
+Owned BeyondDB logs end with `Fenced`; the immediate cause of delayed lease renewal is not isolated. Preceding-source full SDK CI also fails: native 48/48, peers 72/73, processes 7/8. Two-owner recovery, observed-stream EOF shutdown, full current-source recovery and old-root upgrades remain unqualified. Cellule stays at `a4500ad` for this measurement. Review of newer `origin/main` routing, TCP_NODELAY, compaction and member-expiry changes is preparatory; that upgrade is not qualified here.
+
+### Previous fresh remote routing release verification
 
 The [fresh remote routing release comparison](../benchmarks/2026-10-02-read-routing-release/README.md) measures committed source `b285dae`. All **72 cases ran**, with one Single transaction-write throttling cancellation, one four-Cell transaction-read timeout and zero SQLite request errors. **The all-API SQLite performance goal remains unmet.** Only ListTables exceeds SQLite's eight-client request rate in both BeyondDB modes.
 
