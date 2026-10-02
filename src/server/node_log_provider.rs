@@ -123,6 +123,21 @@ impl NodeDurabilityProvider for PeerNodeDurabilityProvider {
         })
     }
 
+    fn rotation_required(
+        self: Arc<Self>,
+        live_node_limit: usize,
+    ) -> Pin<Box<dyn Future<Output = FacilityResult<bool>> + Send>> {
+        Box::pin(async move {
+            // The host serializes recruitment, installation and rotation.
+            // A failed/incomplete epoch must not be reported as healthy by
+            // consulting a cached or newly selected candidate member set.
+            Ok(self
+                .authority
+                .rotation_required(self.next_epoch.load(Ordering::Acquire), live_node_limit)
+                .await?)
+        })
+    }
+
     fn rotation_event(&self, event: NodeDurabilityRotation) {
         tracing::debug!(?event, "node-log durability rotation");
         if event == NodeDurabilityRotation::Failed {

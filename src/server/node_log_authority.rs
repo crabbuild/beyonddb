@@ -115,6 +115,35 @@ impl PublishedNodeLogAuthority {
         ))
     }
 
+    /// Checks the exact current epoch's members before host-owned rotation.
+    ///
+    /// Read the canonical enrollment independently of the heartbeat mutex.
+    /// A slow membership scan must not prevent this node from renewing its
+    /// own lease. The result requests rotation; it grants no append authority.
+    pub async fn rotation_required(&self, log_epoch: u64, live_node_limit: usize) -> Result<bool> {
+        self.guard.check()?;
+        let current = self
+            .directory
+            .load(self.session, unix_time_ms()?)
+            .await?
+            .ok_or(Error::Fenced)?;
+        self.guard.check()?;
+        let members = exact_open_log(&current, log_epoch)?.members().to_vec();
+        let live = self
+            .directory
+            .live(unix_time_ms()?, live_node_limit)
+            .await?;
+        self.guard.check()?;
+        // Scan I/O can outlive a follower advertisement. Recheck expiry at
+        // completion rather than treating its pre-scan timestamp as fresh.
+        let now_ms = unix_time_ms()?;
+        Ok(!members.iter().all(|member| {
+            live.iter().any(|advertisement| {
+                advertisement.node() == *member && advertisement.expires_at_ms() > now_ms
+            })
+        }))
+    }
+
     async fn activate_epoch(&self, log_epoch: u64) -> Result<()> {
         let mut observed = self.observed.lock().await;
         let mut last_error = None;
