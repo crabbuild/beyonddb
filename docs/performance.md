@@ -19,13 +19,35 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The latest refresh measured SQL commands at 0.801/0.461 ms on average in single/four-Cell fixtures. Durable follower append averaged 15.826/17.544 ms, enrollment reads 8.748/16.935 ms and fleet responses 49.801/92.671 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+The latest refresh measured SQL commands at 1.271/0.640 ms on average in single/four-Cell fixtures. Durable follower append averaged 17.093/19.979 ms, enrollment reads 25.950/82.385 ms and fleet responses 108.108/366.078 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [follower discovery release comparison](../benchmarks/2026-10-01-follower-discovery-release/README.md) measures committed source `d88f580`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases ran**, but four-Cell TransactGetItems has **nine SDK read timeouts**. Single mode and SQLite have zero request errors. **SQLite parity remains unmet; every eight-client API is below SQLite's request rate in this sample.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 91.90 | 17.28 | 565.38 |
+| PutItem | 12.03 | 6.81 | 724.96 |
+| UpdateItem | 20.22 | 8.44 | 730.31 |
+| TransactGetItems | 19.04 | 0.07 | 437.19 |
+| TransactWriteItems | 5.40 | 1.16 | 496.07 |
+
+Transaction-write p95 is 1692.89/7442.14 ms for single/four Cells, versus SQLite's 36.88 ms. Completed requests are 32/9/2485; requests contain two items. Four-Cell transaction reads complete zero/one requests at one/eight clients, with one/eight timeouts. Latency percentiles cover successful requests only and exclude failures. The full report retains rates, counts, errors, tails and actual elapsed time for every case.
+
+The [transport regression](../benchmarks/2026-10-01-follower-discovery-verification/README.md) proves two concurrent cold or expired follower lookups perform one signed fleet scan instead of two. Each follower still performs fresh canonical mTLS-bound authorization and fsyncs. The shared discovery survives only its in-flight callers; existing peer cache and hard advertisement expiry bounds remain. Cancellation, duplicate identities, durable recovery and store reopen are checked. Formatting, strict Clippy and 28 library tests pass.
+
+**This sample does not isolate an end-to-end speedup or regression.** The host is heavily contended: SDK-window load is 56.19→34.77 for single mode, 41.61→156.51 for four Cells and 149.14→62.17 for SQLite, on 12 logical CPUs with 34–36 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The failed experiment is retained; deadlines and retries are unchanged. All seven fixture PIDs and both containers are absent, with no forced BeyondDB cleanup.
+
+Both measurements retain two mailbox-capacity warnings; four-Cell shutdown adds two follower-append warnings outside the SDK window. No background convergence is claimed for timed-out requests. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36826386923) is now terminal failure: native 48/48, peers 71/72, process 7/8. GSI ownership recovery and graceful shutdown with Cellule's observed-stream EOF panic remain unresolved. Current-source full peer/process CI and old-root upgrades remain unqualified.
+
+[Read-locality evidence](../benchmarks/2026-10-01-follower-discovery-verification/preceding-read-locality.json) from the preceding release shows that a single base Cell often executes on a follower. Remote read routing and authorization are the next investigation; the GET counters include background work and do not identify each read's purpose. Single-Cell placement alone does not remove private peer I/O.
+
+### Previous cold catalog release verification
 
 The [cold catalog release comparison](../benchmarks/2026-10-01-cold-catalog-release/README.md) measures committed source `1e8765c`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite write and transaction parity remains unmet.** Single mode exceeds SQLite's request rate only for eight-client ListTables; four Cells exceed it only for single-client DescribeTable.
 
