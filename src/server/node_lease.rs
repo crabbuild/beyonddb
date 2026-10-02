@@ -32,6 +32,37 @@ fn renewal_phase(progress: &watch::Sender<RenewalProgress>, phase: &'static str)
     });
 }
 
+/// Latest completed canonical observation of this publisher's own boot session.
+///
+/// This is an ETag hint for a conditional write, never a liveness or authority
+/// cache. No provider I/O holds the watch lock. Late responses cannot replace a
+/// newer generation; unseen changes still require the directory's CAS rebase.
+#[derive(Clone)]
+pub(super) struct SessionObservation(watch::Sender<VersionedNodeAdvertisement>);
+
+impl SessionObservation {
+    fn new(observed: VersionedNodeAdvertisement) -> Self {
+        Self(watch::channel(observed).0)
+    }
+
+    fn latest(&self) -> VersionedNodeAdvertisement {
+        self.0.borrow().clone()
+    }
+
+    pub(super) fn record(&self, observed: &VersionedNodeAdvertisement) {
+        self.0.send_if_modified(|current| {
+            if observed.advertisement().session() == current.advertisement().session()
+                && observed.advertisement().generation() > current.advertisement().generation()
+            {
+                current.clone_from(observed);
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
 /// Publishes signed node advertisements into the authoritative object-store directory.
 pub struct NodeLeasePublisher {
     directory: NodeDirectory,
@@ -65,7 +96,7 @@ impl NodeLeasePublisher {
         Ok(PublishedNodeLease {
             publisher: self,
             session: observed.advertisement().session(),
-            observed,
+            observed: SessionObservation::new(observed),
             log_transitions: Arc::new(Mutex::new(())),
             guard,
             fence_on_drop: true,
@@ -100,7 +131,7 @@ impl NodeLeasePublisher {
 pub struct PublishedNodeLease {
     publisher: NodeLeasePublisher,
     session: cellule_runtime::identity::SessionId,
-    observed: VersionedNodeAdvertisement,
+    observed: SessionObservation,
     log_transitions: Arc<Mutex<()>>,
     guard: NodeLeaseGuard,
     fence_on_drop: bool,
@@ -124,6 +155,7 @@ impl PublishedNodeLease {
             self.session,
             self.guard.clone(),
             Arc::clone(&self.log_transitions),
+            self.observed.clone(),
         )
     }
 
@@ -206,15 +238,16 @@ impl PublishedNodeLease {
         let next = self.publisher.advertisement(now_ms, Some(progress)).await?;
         self.guard.check()?;
         renewal_phase(progress, "directory-refresh");
+        let observed = self.observed.latest();
         let renewed = self
             .publisher
             .directory
-            .refresh(&self.observed, next, now_ms)
+            .refresh(&observed, next, now_ms)
             .await?;
         renewal_phase(progress, "guard-renewal");
         self.guard
             .renew(unix_time_ms()?, renewed.advertisement().expires_at_ms())?;
-        self.observed = renewed;
+        self.observed.record(&renewed);
         Ok(())
     }
 }

@@ -7,11 +7,11 @@ use object_store::{
 use std::{fmt, sync::Mutex};
 
 #[derive(Debug, Default)]
-struct HeldReadStore {
+pub(super) struct HeldReadStore {
     inner: InMemory,
-    held_path: Mutex<Option<Path>>,
-    entered: CancellationToken,
-    release: CancellationToken,
+    pub(super) held_path: Mutex<Option<Path>>,
+    pub(super) entered: CancellationToken,
+    pub(super) release: CancellationToken,
 }
 
 impl fmt::Display for HeldReadStore {

@@ -16,7 +16,7 @@ use cellule_runtime::{
     },
 };
 
-use super::node_lease::unix_time_ms;
+use super::node_lease::{SessionObservation, unix_time_ms};
 
 const MAX_CAS_ATTEMPTS: usize = 4;
 
@@ -32,6 +32,7 @@ pub struct PublishedNodeLogAuthority {
     session: SessionId,
     guard: NodeLeaseGuard,
     transitions: Arc<Mutex<()>>,
+    observed: SessionObservation,
 }
 
 impl PublishedNodeLogAuthority {
@@ -44,12 +45,14 @@ impl PublishedNodeLogAuthority {
         session: SessionId,
         guard: NodeLeaseGuard,
         transitions: Arc<Mutex<()>>,
+        observed: SessionObservation,
     ) -> Self {
         Self {
             directory,
             session,
             guard,
             transitions,
+            observed,
         }
     }
 
@@ -62,6 +65,7 @@ impl PublishedNodeLogAuthority {
             .await?
             .ok_or(Error::Fenced)?;
         self.guard.check()?;
+        self.observed.record(&current);
         Ok((current, now_ms))
     }
 
@@ -98,6 +102,7 @@ impl PublishedNodeLogAuthority {
             {
                 Ok(Some(enrolled)) => {
                     self.guard.check()?;
+                    self.observed.record(&enrolled);
                     let log = enrolled
                         .advertisement()
                         .log()
@@ -127,6 +132,7 @@ impl PublishedNodeLogAuthority {
             .await?
             .ok_or(Error::Fenced)?;
         self.guard.check()?;
+        self.observed.record(&current);
         let members = exact_open_log(&current, log_epoch)?.members().to_vec();
         let live = self
             .directory
@@ -153,8 +159,9 @@ impl PublishedNodeLogAuthority {
                 return Ok(());
             }
             match self.directory.activate_log(&observed, now_ms).await {
-                Ok(_) => {
+                Ok(updated) => {
                     self.guard.check()?;
+                    self.observed.record(&updated);
                     return Ok(());
                 }
                 Err(error) => last_error = Some(error),
@@ -180,8 +187,9 @@ impl PublishedNodeLogAuthority {
                 .advance_log_coverage(&observed, tiered_through, now_ms)
                 .await
             {
-                Ok(_) => {
+                Ok(updated) => {
                     self.guard.check()?;
+                    self.observed.record(&updated);
                     return Ok(());
                 }
                 Err(error) => last_error = Some(error),
@@ -216,8 +224,9 @@ impl PublishedNodeLogAuthority {
             }
             attempted = true;
             match self.directory.close_log(&observed, barrier, now_ms).await {
-                Ok(_) => {
+                Ok(updated) => {
                     self.guard.check()?;
+                    self.observed.record(&updated);
                     return Ok(());
                 }
                 Err(error) => last_error = Some(error),

@@ -64,7 +64,7 @@ named volume for restart testing; removing it removes this fixture's data.
 Use a service with qualified conditional writes for any nonlocal deployment.
 
 On macOS with Colima, this named volume keeps provider data inside the VM.
-A [direct S3 diagnostic](../benchmarks/2026-09-30-rustfs-storage-probe/README.md)
+A direct S3 diagnostic
 measured faster 1-KiB conditional writes on native volumes than host file
 sharing in both repetitions. GET results and host load differed; this is a
 local fixture observation, not a production capacity guarantee. Record the

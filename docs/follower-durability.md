@@ -150,7 +150,7 @@ Add these fields to each node's existing server configuration:
 Use distinct node IDs, certificates, and persistent directories. A three-node
 fixture provides two enrolled followers for each leader. When an eligible
 ensemble is unavailable, SDK writes retain the object-publication path. The
-[server verification and release comparison](../benchmarks/2026-09-30-follower-server/README.md)
+server verification and release comparison
 records the tested scope, request errors, and remaining performance gaps.
 
 ## Verification before comparing throughput

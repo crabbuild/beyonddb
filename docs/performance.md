@@ -2,6 +2,8 @@
 
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: by default an item write waits for Cellule to publish committed state to object storage. Experimental follower durability can acknowledge a durable follower receipt while object tiering continues.
 
+Benchmark reports, raw logs and fixture snapshots are kept locally and excluded from Git. The summaries below retain measured revisions and limitations; durable behavior is checked by the committed integration tests.
+
 ## Why writes and transactions cost more than SQLite
 
 The pinned ExtendDB SQLite backend uses WAL with `synchronous=NORMAL`. SQLite documents that this mode does not synchronize the WAL after every commit; `FULL` adds a synchronization for each commit. BeyondDB waits for object-store publication or a durable follower receipt before acknowledging a mutation. The benchmark therefore compares different durability paths. [SQLite durability reference](https://www.sqlite.org/pragma.html#pragma_synchronous)
@@ -19,7 +21,7 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The [latest completed release comparison](../benchmarks/2026-10-02-acknowledged-read-release/README.md) measured SQL commands at 0.800 ms on average in four-Cell mode and 1.059 ms in single-Cell mode. Command responses with follower durability averaged 101.332 and 85.691 ms respectively. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency. The host was heavily loaded and using about 36–37 GiB of swap, which limits comparison with earlier samples.
+The latest completed release comparison measured SQL commands at 0.800 ms on average in four-Cell mode and 1.059 ms in single-Cell mode. Command responses with follower durability averaged 101.332 and 85.691 ms respectively. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency. The host was heavily loaded and using about 36–37 GiB of swap, which limits comparison with earlier samples.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
@@ -36,6 +38,24 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 | Follower/object I/O | Measure and reduce transport, authority lookup and storage latency. | The chosen durability contract and restart survival. |
 
 These changes address different parts of the request. A single data Cell can remove participant fan-out, but tokenized transaction writes still have several serial durability barriers. Lower SQL execution time alone cannot remove those barriers.
+
+### Avoid stale heartbeat writes after local log updates
+
+A completed node-log update changes the node advertisement's ETag. Previously, the heartbeat retained its older version, so its next renewal first attempted a stale conditional write, then read the current record and retried. The publisher and its log adapter now share their newest completed canonical observation. Late replies cannot replace a higher generation.
+
+```text
+Local log update -> completed record + ETag -> shared version hint
+                                                     |
+Heartbeat -------------------------------------------+
+                                                     |
+                                              conditional write
+                                                     |
+                              conflict -> canonical read -> retry
+```
+
+The hint reduces the measured local-update renewal path from **two PUTs and one GET to one PUT**. It grants no authority: the directory still checks the signed identity, transition and exact ETag. Log operations continue to read canonical state; unseen updates still require a conflict and authoritative rebase. No provider I/O holds the shared observation lock, and the existing 15-second lease and fencing checks remain.
+
+The [heartbeat regression](../tests/node_log_authority/heartbeat_versions.rs) injects 6.5-second conditional-write latency after a completed log coverage update. The old implementation fences before its first renewal; the updated implementation completes two successive renewals and remains live. Delayed read replies, unseen changes and stalled log I/O are also checked. This isolates an avoidable renewal cost; it does not establish that every previous benchmark fence has this cause or prove SQLite throughput parity.
 
 ### Share transaction prepare publications
 
@@ -55,7 +75,7 @@ Transaction B: durable BEGIN -> prepare B --+  stores separate intents and locks
 
 A rejected prepare rolls back the whole batch. Individual commands follow only a durable rejected receipt or a proven refusal before the batch starts. Uncertain replies trigger durable participant-state reads. Coordinator decisions, participant resolutions and stream records retain their existing semantics.
 
-The [signed SDK verification](../benchmarks/2026-10-02-prepare-batching-verification/README.md) reduces **64 durable data commands to 38–40** for 32 independent two-item transaction writes. It checks complete results after owner restoration and recovery after losing a batch reply following durable publication. **43 distinct tests, formatting and strict Clippy pass.** Batch grouping varies with scheduling. This proves reduced durability work; release throughput and SQLite parity require separate measurement.
+The signed SDK verification reduces **64 durable data commands to 38–40** for 32 independent two-item transaction writes. It checks complete results after owner restoration and recovery after losing a batch reply following durable publication. **43 distinct tests, formatting and strict Clippy pass.** Batch grouping varies with scheduling. This proves reduced durability work; release throughput and SQLite parity require separate measurement.
 
 ### Avoid repeating acknowledged transaction work
 
@@ -75,13 +95,13 @@ Durable BEGIN -> prepare participants -> record receipts + COMMIT
                                            SDK response
 ```
 
-The [signed two-Cell regression](../benchmarks/2026-10-02-acknowledged-read-verification/README.md) measures **five coordinator queries before this change and three afterward**. It checks response order, absent items, owner restoration, and subsequent writes. Oversized BEGIN payloads and transactions involving the legacy account Cell still use durable participant discovery. Token replay, uncertain replies, and recovery retain authoritative coordinator reads. Participant commands, durable decisions, saved-image reads, and cleanup receipts remain required. An earlier broader shortcut failed mixed-participant recovery verification and remains excluded; its investigation is retained. Removing queries is a measured reduction in work; it does not establish an end-to-end throughput gain or SQLite parity.
+The signed two-Cell regression measures **five coordinator queries before this change and three afterward**. It checks response order, absent items, owner restoration, and subsequent writes. Oversized BEGIN payloads and transactions involving the legacy account Cell still use durable participant discovery. Token replay, uncertain replies, and recovery retain authoritative coordinator reads. Participant commands, durable decisions, saved-image reads, and cleanup receipts remain required. An earlier broader shortcut failed mixed-participant recovery verification and remains excluded; its investigation is retained. Removing queries is a measured reduction in work; it does not establish an end-to-end throughput gain or SQLite parity.
 
 ## Latest release verification
 
 ### Coalesced prepares: release qualification fails
 
-The [prepare-batching release attempt](../benchmarks/2026-10-02-prepare-batching-release/README.md) measures source `2ebb948` with unchanged dependency pins and durability settings. **All 72 unique cases run**, including one declared unchanged single-Cell retry after the original trial fences during item seeding. The failed original trial remains in the report. The retry completes 6,117 requests with zero SDK errors; four Cells complete 170 requests with **77 errors across 17 cases**; SQLite completes 25,340 requests with zero errors. **SQLite parity and runtime qualification remain unmet.**
+The prepare-batching release attempt measures source `2ebb948` with unchanged dependency pins and durability settings. **All 72 unique cases run**, including one declared unchanged single-Cell retry after the original trial fences during item seeding. The failed original trial remains in the report. The retry completes 6,117 requests with zero SDK errors; four Cells complete 170 requests with **77 errors across 17 cases**; SQLite completes 25,340 requests with zero errors. **SQLite parity and runtime qualification remain unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -91,9 +111,9 @@ The [prepare-batching release attempt](../benchmarks/2026-10-02-prepare-batching
 | TransactGetItems | 30.68 | 0.07* | 648.64 |
 | TransactWriteItems | 0.84 | 0.00* | 203.80 |
 
-\* Cases contain errors; zero means no successful sample after owner/authorization failures, not healthy capacity. Single-Cell transaction writes complete eight calls in 9.49 seconds, p95 **8,378.14 ms**, versus SQLite's 1,022 calls and **118.60 ms**. Calls contain two items. Eight completions do not establish a tail distribution. [Full tables](../benchmarks/2026-10-02-prepare-batching-release/tables.md) retain all APIs, errors, counts and elapsed times.
+\* Cases contain errors; zero means no successful sample after owner/authorization failures, not healthy capacity. Single-Cell transaction writes complete eight calls in 9.49 seconds, p95 **8,378.14 ms**, versus SQLite's 1,022 calls and **118.60 ms**. Calls contain two items. Eight completions do not establish a tail distribution. Full tables retain all APIs, errors, counts and elapsed times.
 
-The [43-test verification](../benchmarks/2026-10-02-prepare-batching-verification/README.md) proves 32 independent signed SDK transaction writes use **38–40 data commands instead of 64**, including recovery from a batch reply lost after publication. Results survive owner restoration. Formatting and strict Clippy pass. This is reduced publication work; the release attempt does not establish a throughput gain.
+The 43-test verification proves 32 independent signed SDK transaction writes use **38–40 data commands instead of 64**, including recovery from a batch reply lost after publication. Results survive owner restoration. Formatting and strict Clippy pass. This is reduced publication work; the release attempt does not establish a throughput gain.
 
 Single-Cell SQL commands average **1.857 ms**, while follower durability responses average **356.278 ms**, peer lookup **193.687 ms** and enrollment **61.573 ms**. These scopes overlap and cannot be added. The original single trial and four-Cell run fence after directory-refresh waits of about **12.0/12.3 seconds**; the cause inside that phase remains unisolated. Reliable renewal and coordinator admission remain priorities.
 
@@ -101,7 +121,7 @@ On 12 CPUs, SDK-window load is single retry **94.87→34.83**, four Cells **40.7
 
 ### Scoped transaction-read metadata release
 
-The [scoped-read release comparison](../benchmarks/2026-10-02-acknowledged-read-release/README.md) measures committed source `eda759e` with unchanged reviewed dependencies. All **72 cases complete with zero SDK errors**: single Cell 12,116 completions, four Cells 18,859, SQLite 52,086. **SQLite parity remains unmet.** No API exceeds SQLite's eight-client rate in both BeyondDB modes.
+The scoped-read release comparison measures committed source `eda759e` with unchanged reviewed dependencies. All **72 cases complete with zero SDK errors**: single Cell 12,116 completions, four Cells 18,859, SQLite 52,086. **SQLite parity remains unmet.** No API exceeds SQLite's eight-client rate in both BeyondDB modes.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -111,9 +131,9 @@ The [scoped-read release comparison](../benchmarks/2026-10-02-acknowledged-read-
 | TransactGetItems | 105.41 | 0.98 | 598.33 |
 | TransactWriteItems | 3.78 | 4.58 | 369.00 |
 
-Eight-client transaction writes complete 27/28/1,846 requests (single/four/SQLite), with successful p95 **2,338.10/2,472.83/81.39 ms**. Each call contains two items. The four-Cell read case completes only nine transactions in 9.14 seconds, with successful p95 **8,876.13 ms**. Low counts and short targets do not qualify sustained throughput or a tail distribution. [Complete tables](../benchmarks/2026-10-02-acknowledged-read-release/tables.md) retain all APIs, errors, completions and elapsed times.
+Eight-client transaction writes complete 27/28/1,846 requests (single/four/SQLite), with successful p95 **2,338.10/2,472.83/81.39 ms**. Each call contains two items. The four-Cell read case completes only nine transactions in 9.14 seconds, with successful p95 **8,876.13 ms**. Low counts and short targets do not qualify sustained throughput or a tail distribution. Complete tables retain all APIs, errors, completions and elapsed times.
 
-The scoped optimization reduces fresh two-Cell read coordinator queries from five to three and passes 35 focused/library tests, formatting and strict Clippy. An earlier broader shortcut fails mixed account/data recovery and is excluded; its failures and baseline comparison remain in the [verification record](../benchmarks/2026-10-02-acknowledged-read-verification/README.md). This is a reduction in coordinator work, not an isolated end-to-end speedup.
+The scoped optimization reduces fresh two-Cell read coordinator queries from five to three and passes 35 focused/library tests, formatting and strict Clippy. An earlier broader shortcut fails mixed account/data recovery and is excluded; its failures and baseline comparison remain in the verification record. This is a reduction in coordinator work, not an isolated end-to-end speedup.
 
 Four-Cell SQL command primitives average 0.800 ms, while follower durability command responses average 101.332 ms and durable follower append 24.537 ms. These scopes overlap, include different populations, and cannot be added. During concurrent transaction reads, peer lookup and enrollment average 87.868 and 49.800 ms. Discovery, durability and batching need further work. Runtime warnings record two short directory-refresh session-change failures; no terminal fencing occurs, and the earlier endpoint loss remains unresolved.
 
@@ -121,7 +141,7 @@ On 12 CPUs, SDK-window host load is single **25.74→31.39**, four Cells **27.65
 
 ### Previous independent heartbeat release
 
-The [independent heartbeat release attempt](../benchmarks/2026-10-02-independent-heartbeat-release/README.md) measures committed source `e1f7664` with unchanged reviewed dependencies. All **72 cases run**. Single-Cell BeyondDB and SQLite complete their 24 cases with zero SDK errors; four-Cell BeyondDB records **72 errors across 16 cases**, loses its endpoint and exits fenced. **SQLite parity and runtime qualification remain unmet.**
+The independent heartbeat release attempt measures committed source `e1f7664` with unchanged reviewed dependencies. All **72 cases run**. Single-Cell BeyondDB and SQLite complete their 24 cases with zero SDK errors; four-Cell BeyondDB records **72 errors across 16 cases**, loses its endpoint and exits fenced. **SQLite parity and runtime qualification remain unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -131,17 +151,17 @@ The [independent heartbeat release attempt](../benchmarks/2026-10-02-independent
 | TransactGetItems | 215.46 | 0.00* | 665.99 |
 | TransactWriteItems | 4.54 | 0.00* | 278.76 |
 
-\* Cases contain errors after the four-Cell runtime fails; zero is not healthy capacity. Single-Cell transaction writes complete 29 requests with p95 **1,959.57 ms**, versus SQLite's 1,412 requests and **92.63 ms**. Calls contain two items. [Full tables and raw results](../benchmarks/2026-10-02-independent-heartbeat-release/tables.md) retain counts, errors, tails and actual elapsed time.
+\* Cases contain errors after the four-Cell runtime fails; zero is not healthy capacity. Single-Cell transaction writes complete 29 requests with p95 **1,959.57 ms**, versus SQLite's 1,412 requests and **92.63 ms**. Calls contain two items. Full tables and raw results retain counts, errors, tails and actual elapsed time.
 
-The [regression](../benchmarks/2026-10-02-transaction-timeout-diagnosis/README.md) proves stalled log I/O held the heartbeat's shared mutex. The fix keeps a separate log-transition mutex and lets heartbeat renewal proceed; signed ETag retries preserve log state. Formatting, strict Clippy and 39 focused/library tests pass. The original fresh transaction diagnostic now completes 32 distinct writes with zero errors and verifies 64 items by strong reads. Resident coordinator waves are not consistently faster, so that diagnostic does not prove a coordinator-reuse speedup.
+The regression proves stalled log I/O held the heartbeat's shared mutex. The fix keeps a separate log-transition mutex and lets heartbeat renewal proceed; signed ETag retries preserve log state. Formatting, strict Clippy and 39 focused/library tests pass. The original fresh transaction diagnostic now completes 32 distinct writes with zero errors and verifies 64 items by strong reads. Resident coordinator waves are not consistently faster, so that diagnostic does not prove a coordinator-reuse speedup.
 
 **The fix does not resolve every fencing failure.** Four-Cell logs retain terminal Fenced errors; the precise remaining renewal phase is not yet isolated. SDK-window host load is single **33.50→28.05**, four Cells **52.76→69.93**, SQLite **69.45→54.44**, on 12 CPUs with about 36 GiB of swap. No local build, test or provider probe overlaps measurement. All ten fixture PIDs and three containers are absent; no forced cleanup is needed. Changing contention prevents attribution of an end-to-end speedup. Full recovery, larger single-Cell budgets, live conversion, sustained capacity and SQLite parity remain unfinished. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/37040618370) fails: native 48/48, peers 74/75 with missing GSI ownership, processes 7/8 with the observed-stream EOF shutdown panic.
 
-The follow-up [renewal-phase diagnostic](../benchmarks/2026-10-02-remaining-lease-diagnosis/README.md) repeats the original four-Cell workload at source `7cba575`, adding operational failure observations with unchanged deadlines and durability. All 24 cases run: 8,502 completions, **six timeouts** (five transaction reads, one transaction write). No renewal warning or terminal Fenced error occurs; the earlier endpoint loss is not reproduced and remains unresolved. Eight-client transaction writes complete eight requests at 0.60 req/s with successful p95 7,613.65 ms. This is a diagnostic, with no fresh SQLite comparison or speedup claim. SDK-window load is 74.40→49.94 on 12 CPUs, with about 37 GiB of swap. Three PIDs and one container are absent without forced cleanup. A retained mailbox refusal and incomplete-resolution warning do not establish the cause of a specific timeout.
+The follow-up renewal-phase diagnostic repeats the original four-Cell workload at source `7cba575`, adding operational failure observations with unchanged deadlines and durability. All 24 cases run: 8,502 completions, **six timeouts** (five transaction reads, one transaction write). No renewal warning or terminal Fenced error occurs; the earlier endpoint loss is not reproduced and remains unresolved. Eight-client transaction writes complete eight requests at 0.60 req/s with successful p95 7,613.65 ms. This is a diagnostic, with no fresh SQLite comparison or speedup claim. SDK-window load is 74.40→49.94 on 12 CPUs, with about 37 GiB of swap. Three PIDs and one container are absent without forced cleanup. A retained mailbox refusal and incomplete-resolution warning do not establish the cause of a specific timeout.
 
 ### Previous Cellule member-expiry release verification
 
-The [Cellule member-expiry release refresh](../benchmarks/2026-10-02-cellule-member-rotation-release/README.md) measures committed source `61a74a4`, pinning reviewed Cellule `0f4ca09`. All **72 cases run**. Four-Cell BeyondDB and SQLite complete 24 cases each with zero request errors; single-Cell BeyondDB records **eight timeouts** in its concurrent transaction-write case. **The all-API SQLite performance goal remains unmet.**
+The Cellule member-expiry release refresh measures committed source `61a74a4`, pinning reviewed Cellule `0f4ca09`. All **72 cases run**. Four-Cell BeyondDB and SQLite complete 24 cases each with zero request errors; single-Cell BeyondDB records **eight timeouts** in its concurrent transaction-write case. **The all-API SQLite performance goal remains unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -151,15 +171,15 @@ The [Cellule member-expiry release refresh](../benchmarks/2026-10-02-cellule-mem
 | TransactGetItems | 82.34 | 2.83 | 526.00 |
 | TransactWriteItems | 0.00* | 2.26 | 273.94 |
 
-\* No successful sample: all eight requests time out. Four-Cell transaction writes complete 17 requests with p95 **3,911.42 ms**, versus SQLite's **100.14 ms**. Calls contain two items. The [complete tables](../benchmarks/2026-10-02-cellule-member-rotation-release/tables.md) retain every API, client count, tail, completion and error; raw JSON retains actual elapsed time.
+\* No successful sample: all eight requests time out. Four-Cell transaction writes complete 17 requests with p95 **3,911.42 ms**, versus SQLite's **100.14 ms**. Calls contain two items. The complete tables retain every API, client count, tail, completion and error; raw JSON retains actual elapsed time.
 
-The upgrade includes private peer TCP_NODELAY, vectored writes, fresh-authority routing improvements, combined compaction/append publication, admitted owner fences and host member-expiry rotation. BeyondDB implements the required rotation callback using fresh enrollment and bounded signed fleet observations on the host's 30-second interval. [Verification](../benchmarks/2026-10-02-cellule-member-rotation-verification/README.md) records passing focused authority, durability, prepare and single-Cell SDK cases, formatting, strict Clippy and 28 library tests. The broad two-owner test fails on a missing GSI owner. Preceding-source SDK CI passes native **48/48**, peers **74/75** and processes **7/8**, retaining coordinator ownership and EOF shutdown failures. No dependency source is patched; full recovery remains unqualified.
+The upgrade includes private peer TCP_NODELAY, vectored writes, fresh-authority routing improvements, combined compaction/append publication, admitted owner fences and host member-expiry rotation. BeyondDB implements the required rotation callback using fresh enrollment and bounded signed fleet observations on the host's 30-second interval. Verification records passing focused authority, durability, prepare and single-Cell SDK cases, formatting, strict Clippy and 28 library tests. The broad two-owner test fails on a missing GSI owner. Preceding-source SDK CI passes native **48/48**, peers **74/75** and processes **7/8**, retaining coordinator ownership and EOF shutdown failures. No dependency source is patched; full recovery remains unqualified.
 
 **This sample does not isolate an end-to-end speedup or regression.** On 12 logical CPUs, SDK-window load is single **26.78→32.03**, four Cells **35.65→29.46**, SQLite **28.64→30.43**, with about **35–36 GiB of swap** in use. No task-local build, test or provider probe overlaps measurement. One mailbox-capacity warning occurs in single mode; four Cells retain two deferred transaction-resolution warnings. All seven fixture PIDs and both containers are absent without forced BeyondDB cleanup. Zero errors in four-Cell mode does not prove maintenance convergence or sustained capacity. Larger configurable single-Cell budgets, live conversion, old-root upgrades and SQLite parity remain unfinished.
 
 ### Previous bounded prepare release verification
 
-The [bounded prepare release refresh](../benchmarks/2026-10-02-prepare-capacity-release/README.md) measures committed source `8b2f92e`. **Performance qualification fails:** the single/four-Cell fixtures lose their serving leases during measurement, record **26/71 request errors**, and complete no transaction writes. SQLite completes its 24 cases with zero errors after its missing release binary is rebuilt from the same pinned source. All **72 unique cases** run across the retained experiment and repaired SQLite invocation. **The all-API SQLite goal remains unmet.**
+The bounded prepare release refresh measures committed source `8b2f92e`. **Performance qualification fails:** the single/four-Cell fixtures lose their serving leases during measurement, record **26/71 request errors**, and complete no transaction writes. SQLite completes its 24 cases with zero errors after its missing release binary is rebuilt from the same pinned source. All **72 unique cases** run across the retained experiment and repaired SQLite invocation. **The all-API SQLite goal remains unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -169,9 +189,9 @@ The [bounded prepare release refresh](../benchmarks/2026-10-02-prepare-capacity-
 | TransactGetItems | 13.23 | 0.09* | 391.10 |
 | TransactWriteItems | 0.00* | 0.00* | 239.73 |
 
-\* Cases contain errors. Zero means no request completed after endpoint loss, not healthy capacity. Four-Cell transaction reads complete one request and time out eight; its successful latency percentile cannot represent a latency distribution. The [full tables](../benchmarks/2026-10-02-prepare-capacity-release/tables.md) retain all APIs, client counts, p95 values, completions and errors; raw JSON retains actual elapsed times.
+\* Cases contain errors. Zero means no request completed after endpoint loss, not healthy capacity. Four-Cell transaction reads complete one request and time out eight; its successful latency percentile cannot represent a latency distribution. The full tables retain all APIs, client counts, p95 values, completions and errors; raw JSON retains actual elapsed times.
 
-The [held-publication regression](../benchmarks/2026-10-02-prepare-capacity-verification/README.md) proves **eight concurrent small prepares fit instead of three**. New account/data commands reserve 64 KiB replies for inputs up to 32 KiB; the prior roughly 4 MiB reply reservation exhausted the 16 MiB Cell mailbox. Complete failure images use the existing wide command only after a durable rejected receipt proves rollback. Reply loss retains authoritative recovery. Owner restoration, token reuse, mixed participants, capacity refusal, formatting, strict Clippy and 28 library cases pass. This is an admission improvement; the failed release run does not establish a transaction speedup.
+The held-publication regression proves **eight concurrent small prepares fit instead of three**. New account/data commands reserve 64 KiB replies for inputs up to 32 KiB; the prior roughly 4 MiB reply reservation exhausted the 16 MiB Cell mailbox. Complete failure images use the existing wide command only after a durable rejected receipt proves rollback. Reply loss retains authoritative recovery. Owner restoration, token reuse, mixed participants, capacity refusal, formatting, strict Clippy and 28 library cases pass. This is an admission improvement; the failed release run does not establish a transaction speedup.
 
 **This workstation sample does not isolate a source regression or speedup.** On 12 logical CPUs, SDK-window load rises 20.49→43.70 for single mode and 47.06→71.54 for four Cells; SQLite runs at 39.42→36.69. Swap is about 34.4–35.3 GiB for BeyondDB and 39 GiB for SQLite. No task-local build, test or provider probe overlaps measurement. The SQLite rebuild is separate and its new binary identity is recorded. All seven fixture PIDs and both containers are absent; volumes are retained.
 
@@ -179,7 +199,7 @@ Owned BeyondDB logs end with `Fenced`; the immediate cause of delayed lease rene
 
 ### Previous fresh remote routing release verification
 
-The [fresh remote routing release comparison](../benchmarks/2026-10-02-read-routing-release/README.md) measures committed source `b285dae`. All **72 cases ran**, with one Single transaction-write throttling cancellation, one four-Cell transaction-read timeout and zero SQLite request errors. **The all-API SQLite performance goal remains unmet.** Only ListTables exceeds SQLite's eight-client request rate in both BeyondDB modes.
+The fresh remote routing release comparison measures committed source `b285dae`. All **72 cases ran**, with one Single transaction-write throttling cancellation, one four-Cell transaction-read timeout and zero SQLite request errors. **The all-API SQLite performance goal remains unmet.** Only ListTables exceeds SQLite's eight-client request rate in both BeyondDB modes.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -191,17 +211,17 @@ The [fresh remote routing release comparison](../benchmarks/2026-10-02-read-rout
 
 Transaction-write p95 is 9623.62/5522.40 ms for single/four Cells, versus SQLite's 46.15 ms. Completed requests are 7/16/2026, with one Single cancellation excluded from successful latency percentiles. Calls contain two items. The full report retains all API rates, tails, counts, errors and actual elapsed time.
 
-The [gated regression](../benchmarks/2026-10-02-read-routing-verification/README.md) proves fresh authority and owner enrollment reads overlap; neither read is skipped. A bounded session hint selects the probe, but fresh authority still decides ownership and lease expiry is rechecked after I/O. Changed owners get their own fresh enrollment read. The test checks current-owner probe failure, restoration on a third node and a signed strong read with SDK retries disabled. Existing drain/expiry cases, formatting, strict Clippy and all 28 library cases pass.
+The gated regression proves fresh authority and owner enrollment reads overlap; neither read is skipped. A bounded session hint selects the probe, but fresh authority still decides ownership and lease expiry is rechecked after I/O. Changed owners get their own fresh enrollment read. The test checks current-owner probe failure, restoration on a third node and a signed strong read with SDK retries disabled. Existing drain/expiry cases, formatting, strict Clippy and all 28 library cases pass.
 
 **The measurement does not isolate an end-to-end speedup or regression.** Host load is single: 24.76→33.82; partitioned: 29.82→26.20; sqlite: 26.67→26.44, on 12 logical CPUs with about 42–43 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The temporary Python environment was recreated with the same boto3 version; the previous botocore version was not recorded. All seven fixture PIDs and both containers are absent, without forced BeyondDB cleanup.
 
 Single mode records a participant-capacity warning during SDK measurement and two follower-append warnings after it. Four-Cell owned logs are empty. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36971574005) fails: native 48/48, peers 70/72 and process 7/8. Post-drain token replay, GSI ownership recovery and follower shutdown with the observed-stream EOF panic remain unresolved. Current-source full peer/process CI and old-root upgrades remain unqualified.
 
-[Participant capacity evidence](../benchmarks/2026-10-02-read-routing-verification/participant-capacity-evidence.json) identifies the next hypothesis: prepare advertises a roughly 4 MiB maximum reply while the runtime reserves that bound against a 16 MiB per-Cell mailbox. A correctly bounded metadata-only prepare path needs a regression with real replies held in flight; failure images and durable transaction rules must remain. No prepare change is included in this release.
+Participant capacity evidence identifies the next hypothesis: prepare advertises a roughly 4 MiB maximum reply while the runtime reserves that bound against a 16 MiB per-Cell mailbox. A correctly bounded metadata-only prepare path needs a regression with real replies held in flight; failure images and durable transaction rules must remain. No prepare change is included in this release.
 
 ### Previous follower discovery release verification
 
-The [follower discovery release comparison](../benchmarks/2026-10-01-follower-discovery-release/README.md) measures committed source `d88f580`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases ran**, but four-Cell TransactGetItems has **nine SDK read timeouts**. Single mode and SQLite have zero request errors. **SQLite parity remains unmet; every eight-client API is below SQLite's request rate in this sample.**
+The follower discovery release comparison measures committed source `d88f580`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases ran**, but four-Cell TransactGetItems has **nine SDK read timeouts**. Single mode and SQLite have zero request errors. **SQLite parity remains unmet; every eight-client API is below SQLite's request rate in this sample.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -213,17 +233,17 @@ The [follower discovery release comparison](../benchmarks/2026-10-01-follower-di
 
 Transaction-write p95 is 1692.89/7442.14 ms for single/four Cells, versus SQLite's 36.88 ms. Completed requests are 32/9/2485; requests contain two items. Four-Cell transaction reads complete zero/one requests at one/eight clients, with one/eight timeouts. Latency percentiles cover successful requests only and exclude failures. The full report retains rates, counts, errors, tails and actual elapsed time for every case.
 
-The [transport regression](../benchmarks/2026-10-01-follower-discovery-verification/README.md) proves two concurrent cold or expired follower lookups perform one signed fleet scan instead of two. Each follower still performs fresh canonical mTLS-bound authorization and fsyncs. The shared discovery survives only its in-flight callers; existing peer cache and hard advertisement expiry bounds remain. Cancellation, duplicate identities, durable recovery and store reopen are checked. Formatting, strict Clippy and 28 library tests pass.
+The transport regression proves two concurrent cold or expired follower lookups perform one signed fleet scan instead of two. Each follower still performs fresh canonical mTLS-bound authorization and fsyncs. The shared discovery survives only its in-flight callers; existing peer cache and hard advertisement expiry bounds remain. Cancellation, duplicate identities, durable recovery and store reopen are checked. Formatting, strict Clippy and 28 library tests pass.
 
 **This sample does not isolate an end-to-end speedup or regression.** The host is heavily contended: SDK-window load is 56.19→34.77 for single mode, 41.61→156.51 for four Cells and 149.14→62.17 for SQLite, on 12 logical CPUs with 34–36 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The failed experiment is retained; deadlines and retries are unchanged. All seven fixture PIDs and both containers are absent, with no forced BeyondDB cleanup.
 
 Both measurements retain two mailbox-capacity warnings; four-Cell shutdown adds two follower-append warnings outside the SDK window. No background convergence is claimed for timed-out requests. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36826386923) is now terminal failure: native 48/48, peers 71/72, process 7/8. GSI ownership recovery and graceful shutdown with Cellule's observed-stream EOF panic remain unresolved. Current-source full peer/process CI and old-root upgrades remain unqualified.
 
-[Read-locality evidence](../benchmarks/2026-10-01-follower-discovery-verification/preceding-read-locality.json) from the preceding release shows that a single base Cell often executes on a follower. Remote read routing and authorization are the next investigation; the GET counters include background work and do not identify each read's purpose. Single-Cell placement alone does not remove private peer I/O.
+Read-locality evidence from the preceding release shows that a single base Cell often executes on a follower. Remote read routing and authorization are the next investigation; the GET counters include background work and do not identify each read's purpose. Single-Cell placement alone does not remove private peer I/O.
 
 ### Previous cold catalog release verification
 
-The [cold catalog release comparison](../benchmarks/2026-10-01-cold-catalog-release/README.md) measures committed source `1e8765c`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite write and transaction parity remains unmet.** Single mode exceeds SQLite's request rate only for eight-client ListTables; four Cells exceed it only for single-client DescribeTable.
+The cold catalog release comparison measures committed source `1e8765c`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite write and transaction parity remains unmet.** Single mode exceeds SQLite's request rate only for eight-client ListTables; four Cells exceed it only for single-client DescribeTable.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -235,7 +255,7 @@ The [cold catalog release comparison](../benchmarks/2026-10-01-cold-catalog-rele
 
 Transaction-write p95 is 1772.24/3469.94 ms for single/four Cells, versus SQLite's 36.97 ms. Completed requests are 35/19/2583; four-Cell single-client writes complete only three requests. Calls contain two items. The full report includes every API, client count, percentile and completed-request count.
 
-The [signed regression](../benchmarks/2026-10-01-cold-catalog-verification/README.md) proves cold coordinator catalog publication overlaps registration discovery and authority lookup. Bootstrap still requires the published catalog proof, and BEGIN still requires durable registration. Missing-generation checks, competing-owner fences, token identity and the resident fast path remain intact. Registration, incarnation restoration, token replay and the committed item are verified.
+The signed regression proves cold coordinator catalog publication overlaps registration discovery and authority lookup. Bootstrap still requires the published catalog proof, and BEGIN still requires durable registration. Missing-generation checks, competing-owner fences, token identity and the resident fast path remain intact. Registration, incarnation restoration, token replay and the committed item are verified.
 
 **This sample does not establish an end-to-end speedup.** Transaction rates are below the preceding sample; ordinary writes and reads also vary. Host load is 28.64→30.53 for single mode, 30.45→52.43 for four Cells and 49.19→26.57 for SQLite, on 12 logical CPUs. Start snapshots report 31–33 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The old-release cold/warm diagnostic also shows substantial latency on warmed shards, but its sequential populations and changing host load do not isolate admission cost.
 
@@ -243,7 +263,7 @@ Formatting, strict Clippy, 28 library tests and nine focused admission/registrat
 
 ### Previous acknowledged-completion release verification
 
-The [acknowledged-completion release comparison](../benchmarks/2026-10-01-acknowledged-completion-release/README.md) measures committed source `daa73a8`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite performance parity remains unmet; every eight-client API is slower than SQLite in this run.**
+The acknowledged-completion release comparison measures committed source `daa73a8`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases have zero SDK request errors**. **SQLite performance parity remains unmet; every eight-client API is slower than SQLite in this run.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -255,7 +275,7 @@ The [acknowledged-completion release comparison](../benchmarks/2026-10-01-acknow
 
 Transaction-write p95 is 1074.01/1283.80 ms for single/four Cells, versus SQLite's 13.97 ms. Calls contain two items. The full report includes every API, client count, percentile and completed-request count.
 
-The [signed regression](../benchmarks/2026-10-01-acknowledged-completion-verification/README.md) proves fresh small transaction writes use **one coordinator query instead of four**. After an acknowledged fresh BEGIN and COMMIT, the adapter uses the exact accepted participant set and durably records every resolution receipt before success. Token replay, uncertain decisions, larger inputs and read-image cleanup retain authoritative readback. Lost participant replies require observed committed state; lost coordinator receipts return a transient error until replay confirms completion. Two-Cell values survive owner restoration.
+The signed regression proves fresh small transaction writes use **one coordinator query instead of four**. After an acknowledged fresh BEGIN and COMMIT, the adapter uses the exact accepted participant set and durably records every resolution receipt before success. Token replay, uncertain decisions, larger inputs and read-image cleanup retain authoritative readback. Lost participant replies require observed committed state; lost coordinator receipts return a transient error until replay confirms completion. Two-Cell values survive owner restoration.
 
 This reduces coordinator work but **does not demonstrate an end-to-end speedup**. The previous sample measured 10.76/10.15 transaction writes/s; this run measures 9.58/7.48. The ordinary read/write paths are unchanged and their rates also vary. Host load is 16.60→17.98 for single mode, 16.69→25.86 for four Cells and 25.63→14.56 for SQLite, on 12 logical CPUs. No task-local build, test or provider probe overlaps measurement. SQL handler means are 0.869/0.532 ms; durable follower append means are 14.657/17.394 ms. These overlapping background-inclusive populations are not additive request timings.
 
@@ -263,7 +283,7 @@ Formatting, strict Clippy, 28 library tests, signed restoration and completion-f
 
 ### Previous returned-update release verification
 
-The [returned-update release refresh](../benchmarks/2026-10-01-returned-update-release/README.md) measures committed source `a07acaf`, Cellule `a4500ad` and ExtendDB `7eaa89b`. It completes **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. **SQLite write and transaction parity remains unmet.**
+The returned-update release refresh measures committed source `a07acaf`, Cellule `a4500ad` and ExtendDB `7eaa89b`. It completes **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. **SQLite write and transaction parity remains unmet.**
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -277,17 +297,17 @@ UpdateItem p95 is 97.97/112.52 ms for single/four Cells, versus SQLite's 17.56 m
 
 **These are contended workstation samples.** The 12-core host's load falls from 39.26→25.84 during single mode, 25.35→22.68 for four Cells and 21.75→20.65 for SQLite. No task-local build, test or provider probe overlaps measurement. Read and transaction paths are unchanged, yet their rates rise too; the rate changes do not isolate a source speedup. SQL handler means are 0.876/0.609 ms, while follower durable append means are 16.368/20.103 ms. These overlapping populations include background work and must not be added into a request latency.
 
-The [returned-update verification](../benchmarks/2026-10-01-returned-update-verification/README.md) proves **64 concurrent signed updates use 24 durable commands instead of 64**. The pinned ExtendDB UpdateItem handler always requests the new image for capacity calculation, including `ReturnValues=NONE`; this previously bypassed the no-return batcher. Routed updates now coalesce distinct keys and return compact individual results. Conditions retain their own failures, successful writes retain individual stream ordinals, and repeated keys are deferred. The per-Cell queue has 64 permits, with batches capped at 16 updates, 1 MiB input and 128 KiB reply. A 2 ms partial-queue window trades a small single-client delay for sharing durable work.
+The returned-update verification proves **64 concurrent signed updates use 24 durable commands instead of 64**. The pinned ExtendDB UpdateItem handler always requests the new image for capacity calculation, including `ReturnValues=NONE`; this previously bypassed the no-return batcher. Routed updates now coalesce distinct keys and return compact individual results. Conditions retain their own failures, successful writes retain individual stream ordinals, and repeated keys are deferred. The per-Cell queue has 64 permits, with batches capped at 16 updates, 1 MiB input and 128 KiB reply. A 2 ms partial-queue window trades a small single-client delay for sharing durable work.
 
 Large replies fall back to separate commands only after a confirmed rejected receipt proves that items, indexes and stream records rolled back. An ambiguous invocation is never retried internally. Signed tests verify same-key ADD results, condition-failure images, stream replay, owner restoration and 390,000-byte escaped item images. The same returned-image cases match the pinned SQLite server. Formatting, strict Clippy, 28 library tests, 48 native cases and three focused update tests pass.
 
 Cellule `a4500ad` contains website/documentation changes with identical Rust code to the previous pin. It does not fix runtime recovery or performance. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36810977455) fails: native 48/48, peers 67/68, process 7/8. Coordinator ownership during restart and graceful shutdown after an owner kill remain open qualification gaps; the earlier post-drain replay failure does not recur in that run, without a claimed fix. The new source has not completed full peer/process qualification or old-root upgrade checks. Matching compiled peers are required.
 
-All seven fixture PIDs and both containers are absent. Neither BeyondDB fixture requires forced process cleanup; SQLite exits 0. Four-Cell logs retain two deferred transaction-resolution warnings during measurement. Zero SDK errors does not qualify maintenance convergence. A separate [Cellule EOF guard proposal](../benchmarks/2026-10-01-returned-update-verification/proposals/README.md) is unapplied and awaits the dependency approval required by AGENTS.md.
+All seven fixture PIDs and both containers are absent. Neither BeyondDB fixture requires forced process cleanup; SQLite exits 0. Four-Cell logs retain two deferred transaction-resolution warnings during measurement. Zero SDK errors does not qualify maintenance convergence. A separate Cellule EOF guard proposal is unapplied and awaits the dependency approval required by AGENTS.md.
 
 ### Previous acknowledged-BEGIN release comparison
 
-The [acknowledged-BEGIN release refresh](../benchmarks/2026-10-01-acknowledged-begin-release/README.md) measures committed source `d46f6f9`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. SQLite write and transaction parity remains unmet.
+The acknowledged-BEGIN release refresh measures committed source `d46f6f9`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK request errors** across fresh single-Cell, four-Cell and SQLite fixtures. SQLite write and transaction parity remains unmet.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -300,13 +320,13 @@ Transaction-write p95 was 1990.78/1227.48 ms for single/four Cells, versus SQLit
 
 **This is a contended workstation sample.** The 12-core host's load changed from 15.86→34.83 during the single run, 38.78→28.02 for four Cells and 26.97→22.00 for SQLite. No task-local build, test or provider probe overlapped measurement. Four-Cell transaction writes are higher than the preceding sample, while single-Cell writes are lower; this experiment does not isolate a source speedup.
 
-The [signed SDK regression](../benchmarks/2026-10-01-acknowledged-begin-verification/README.md) verifies fresh transaction coordinator queries fall from five to four. After a confirmed fresh BEGIN, the adapter reuses its exact accepted participants for inputs at most 32 KiB. Existing tokens, ambiguous replies, larger inputs and recovery still read durable coordinator state. All durable prepare, decision, resolution and completion checks remain.
+The signed SDK regression verifies fresh transaction coordinator queries fall from five to four. After a confirmed fresh BEGIN, the adapter reuses its exact accepted participants for inputs at most 32 KiB. Existing tokens, ambiguous replies, larger inputs and recovery still read durable coordinator state. All durable prepare, decision, resolution and completion checks remain.
 
 The full 48-case native suite, four signed Cell-model tests, formatting and strict all-target Clippy pass for this source. Its production-equivalent `bbe1803` [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36810977455) subsequently fails: native 48/48, peers 67/68 and process 7/8. Coordinator ownership during restart and graceful shutdown remain open. An earlier run also failed post-drain token replay and GSI ownership; no fix is claimed from their absence in this run. Older-root upgrades remain unqualified. All seven benchmark fixture PIDs and both containers are absent.
 
 ### Previous coordinator-admission release comparison
 
-The [coordinator-admission release refresh](../benchmarks/2026-10-01-coordinator-registration-release/README.md) measures committed source `58ba0dd`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK errors** across fresh single-Cell, four-Cell and SQLite fixtures, using signed AWS CLI creation and the unchanged boto3 harness.
+The coordinator-admission release refresh measures committed source `58ba0dd`, Cellule `e07670e` and ExtendDB `7eaa89b`. It completed **72 cases with zero SDK errors** across fresh single-Cell, four-Cell and SQLite fixtures, using signed AWS CLI creation and the unchanged boto3 harness.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -317,7 +337,7 @@ The [coordinator-admission release refresh](../benchmarks/2026-10-01-coordinator
 
 Single-Cell transaction reads measured p95 20.54 ms, versus 1816.47 ms with four Cells and 21.73 ms with SQLite. Single-Cell transaction writes measured p95 1126.21 ms, versus SQLite's 37.02 ms. SQLite parity remains unmet.
 
-The [admission regression](../benchmarks/2026-10-01-cold-admission-verification/README.md) reduces fresh coordinator authority reads from two to one and four concurrent account registrations to one durable command. Metadata envelopes now reserve 4 KiB per input/result. Cancellation cannot acknowledge an unpublished registration, and acknowledged rows survive account owner restoration. Coordinator shard identities and token replay routing remain unchanged.
+The admission regression reduces fresh coordinator authority reads from two to one and four concurrent account registrations to one durable command. Metadata envelopes now reserve 4 KiB per input/result. Cancellation cannot acknowledge an unpublished registration, and acknowledged rows survive account owner restoration. Coordinator shard identities and token replay routing remain unchanged.
 
 This sample does **not** establish an end-to-end transaction-write speedup: the preceding record measured 10.39/7.55 requests/s, versus 9.35/5.65 here. Single-mode PutItem increased while four-Cell writes decreased. Fresh owner placement, I/O latency, host load and acknowledgment populations differ between fixtures. The count regression proves reduced admission work; the SDK samples do not isolate its throughput effect.
 
@@ -327,7 +347,7 @@ Focused checks, signed placement tests, 27 library tests, formatting and strict 
 
 ### Previous placement release comparison
 
-The [single/four-Cell release comparison](../benchmarks/2026-10-01-cell-model-release/README.md) measures source `8ecd6d5`, Cellule `e07670e`, and ExtendDB `7eaa89b`. Both BeyondDB fixtures use the same binary and four configured initial partitions, with `single` or `partitioned` selected at creation. AWS CLI creates each table; signed boto3 measures the unchanged workload. All 24 cases per fixture completed: **72 cases, zero SDK errors** across two BeyondDB modes and SQLite.
+The single/four-Cell release comparison measures source `8ecd6d5`, Cellule `e07670e`, and ExtendDB `7eaa89b`. Both BeyondDB fixtures use the same binary and four configured initial partitions, with `single` or `partitioned` selected at creation. AWS CLI creates each table; signed boto3 measures the unchanged workload. All 24 cases per fixture completed: **72 cases, zero SDK errors** across two BeyondDB modes and SQLite.
 
 | API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
 | --- | ---: | ---: | ---: |
@@ -342,11 +362,11 @@ Single mode returned 1,691 eight-client transaction reads, while the four-Cell s
 
 Host load was 17.93→16.75 for single, 17.46→23.30 for partitioned, and 24.15→26.65 for SQLite. No task-local build/test/provider probe overlapped measurement. Every new fixture PID/container is absent; volumes and scratch data are retained. Partitioned logs retain deferred recovery and mailbox-byte pressure in maintenance workers. Zero SDK errors does not qualify those workers' convergence.
 
-The [placement verification](../benchmarks/2026-10-01-cell-model-verification/README.md) passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. The original record captured Rust CI success and SDK CI pending. Subsequent production-equivalent SDK CI failed as described above; full recovery and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
+The placement verification passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. The original record captured Rust CI success and SDK CI pending. Subsequent production-equivalent SDK CI failed as described above; full recovery and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
 
 ### Previous native-volume release pair
 
-The [native-volume release pair](../benchmarks/2026-10-01-native-volume-release/README.md)
+The native-volume release pair
 reuses source `7cf8f46` and the exact binary from the preceding host-bind run,
 with Cellule `e07670e` and ExtendDB `7eaa89b`. RustFS stores data in a named
 volume inside Colima. All 24 cases completed per backend with **zero SDK errors**.
@@ -371,7 +391,7 @@ No task-local build/test overlapped either measurement. The comparison cannot
 isolate a code or storage speedup. All fixture processes/container are absent;
 the named volume and server scratch data remain available for inspection.
 
-A [direct S3 diagnostic](../benchmarks/2026-09-30-rustfs-storage-probe/README.md)
+A direct S3 diagnostic
 completed 48 cases without errors, using opposite storage orders. Native-volume
 1-KiB conditional replacements reached 226–238 requests/s at eight clients,
 versus 71–77 on binds. GET throughput was lower in those native samples while
@@ -390,7 +410,7 @@ passed, peers 57/59 and process 7/8 failed. Full recovery remains unqualified.
 
 ### Previous bounded-snapshot host-bind release pair
 
-The [bounded coordinator snapshot release pair](../benchmarks/2026-09-30-coordinator-snapshot-release/README.md)
+The bounded coordinator snapshot release pair
 measures source `7cf8f46`, Cellule `e07670e`, and ExtendDB `7eaa89b`.
 All 24 cases completed per backend. BeyondDB recorded **five SDK timeouts**,
 all in eight-client TransactWriteItems; SQLite recorded zero.
@@ -412,7 +432,7 @@ placement and provider costs also vary. This sample does not isolate the query
 fusion's throughput effect or establish production/fleet capacity. All fixture
 PIDs and the exact RustFS container are absent, with no forced PID cleanup.
 
-The [counted driver regression](../benchmarks/2026-09-30-coordinator-snapshot-verification/README.md)
+The counted driver regression
 fails before the change with seven coordinator queries and passes after with
 four. One bounded query observes durable status and small immutable payloads;
 large inputs retain chunked retrieval. Durable preparation, decision, resolution
@@ -438,7 +458,7 @@ sample count, failure, phase metric, source/binary hash and host snapshot.
 
 ### Previous Cellule e07670e release pair
 
-The [Cellule e07670e release pair](../benchmarks/2026-09-30-cellule-e07670e-release/README.md)
+The Cellule e07670e release pair
 measures source `664e07a`, reviewed upstream Cellule `e07670e`, and ExtendDB
 `7eaa89b`. All 24 cases completed per backend. BeyondDB recorded **seven SDK
 timeouts** in eight-client TransactGetItems; SQLite recorded zero.
@@ -465,7 +485,7 @@ are absent, with no forced PID cleanup. Raw data and hashes are retained.
 The new main includes the approved one-read append API unchanged, lease-fenced
 resident-route reuse, bounded owner-discovery coalescing, read-replica release
 checks and serialized directory-cache index snapshots. The lockfile changes only
-seven Cellule Git sources. [Upgrade verification](../benchmarks/2026-09-30-cellule-e07670e-verification/README.md)
+seven Cellule Git sources. Upgrade verification
 passes 27 library tests, 58 residency/routing tests, formatting and strict Clippy;
 seven coordinator cases also pass and overlap residency. Upstream's four CI
 workflows and BeyondDB source Rust CI pass. The subsequent full signed recovery CI failed: native 47/47 passed, peers
@@ -480,7 +500,7 @@ request failures, case metrics and fixture metadata.
 
 ### Previous parallel coordinator release pair
 
-The [parallel coordinator release pair](../benchmarks/2026-09-30-parallel-coordinator-release/README.md)
+The parallel coordinator release pair
 measures source `388ae62`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
 Both backends completed all 24 cases with **zero SDK errors**.
 
@@ -497,7 +517,7 @@ and 18.82→19.52 during SQLite. Owner placement and provider latency also vary.
 Point reads slowed despite their unchanged path, so this sequential pair does
 not isolate the admission change's effect. The all-API SQLite objective remains unmet.
 
-The [concurrent signed SDK regression](../benchmarks/2026-09-30-parallel-coordinator-verification/README.md)
+The concurrent signed SDK regression
 proves that two independent cold coordinators can enter authority creation
 concurrently. It failed before the change and passes afterward, with durable
 registration and data-owner restoration checks retained. Bounded pending-slot
@@ -520,7 +540,7 @@ and verified cleanup.
 
 ### Previous follower-phase release pair
 
-The [follower-phase release pair](../benchmarks/2026-09-30-follower-phases-release/README.md)
+The follower-phase release pair
 measures source `22002dc`, reviewed Cellule `8ca658b`, and ExtendDB `7eaa89b`.
 Both backends completed all 24 cases with **zero SDK errors**.
 
@@ -545,14 +565,14 @@ and publication total mean 416.128 ms. The evidence supports examining cold
 transaction admission and object publication next, while retaining exact fences
 and fresh authorization. It does not isolate a network-only duration.
 
-[Phase verification](../benchmarks/2026-09-30-follower-phases-verification/README.md)
+Phase verification
 passed all 27 library tests, formatting and strict Clippy, including actual mTLS
 append/reopen phase counts and cancellation accounting. Full signed peer/restart
 qualification and the all-API SQLite objective remain open.
 
 ### Previous resident-admission release pair
 
-The [resident-admission release pair](../benchmarks/2026-09-30-resident-admission-release/README.md)
+The resident-admission release pair
 measures source `6e92b5d`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. All 24
 cases completed per backend: BeyondDB recorded **four SDK errors** in
 eight-client TransactGetItems; SQLite recorded zero.
@@ -569,7 +589,7 @@ in every measured case. Host load during BeyondDB was 41.43→32.36; SQLite ran
 sequentially at 32.36→20.40. Fresh owner placement also varies. This busy local
 sample cannot isolate the optimization's speedup or establish fleet capacity.
 
-The [focused admission regression](../benchmarks/2026-09-30-resident-admission-verification/README.md)
+The focused admission regression
 proves four warm admissions remove four canonical coordinator reads and perform
 zero provider reads. Drain, a new provisioner, and missing registration still
 use canonical admission. Two focused regressions, five coordinator lifecycle
@@ -582,7 +602,7 @@ remains unmet.
 
 ### Previous provider-observation release pair
 
-The [provider-observation release pair](../benchmarks/2026-09-30-provider-observations-release/README.md)
+The provider-observation release pair
 measures source `b2b6350`, Cellule `8ca658b`, and ExtendDB `7eaa89b`. Both
 backends completed all 24 cases with **zero SDK errors**.
 
@@ -603,13 +623,13 @@ the snapshot interval, while SQL primitive command/query means were
 0.358/0.103 ms. These are overlapping events with different counts, including
 background work; do not sum them into SDK latency. The full report contains
 all 24 cases, raw results, metrics, host metadata, hashes, and verified cleanup.
-The [focused discovery regression](../benchmarks/2026-09-30-account-discovery-verification/README.md)
+The focused discovery regression
 passes, but the full signed peer/restart scenario still fails. Production
 recovery qualification and the all-API SQLite objective remain open.
 
 ### Previous one-read follower append release pair
 
-The [one-read follower append release pair](../benchmarks/2026-09-30-one-read-append-release/README.md)
+The one-read follower append release pair
 measures source `9b62001` and reviewed Cellule `8ca658b`
 ([dependency PR](https://github.com/crabbuild/cellule/pull/31)). ExtendDB remains
 `7eaa89b`. All 24 cases completed per backend; BeyondDB recorded **four SDK
@@ -635,12 +655,12 @@ checks. Its counted-store and signed SDK process-kill tests pass. Host load was
 also varies between fixtures. This local sample does not establish a service
 speedup. Cellule's four CI workflows and BeyondDB Rust CI passed. Full SDK CI
 failed one long peer recovery test; native SDK and process suites passed. The
-[recovery follow-up](../benchmarks/2026-09-30-account-discovery-verification/README.md)
+recovery follow-up
 records the focused fix and the remaining full-scenario failure.
 
 ### Previous resident-routing release pair
 
-The [resident-routing release pair](../benchmarks/2026-09-30-resident-routing-release/README.md)
+The resident-routing release pair
 measures source `c6fb584`, still pinned to Cellule `70bd25f` and ExtendDB `7eaa89b`.
 All 24 cases completed per backend. BeyondDB recorded two SDK errors in the
 eight-client TransactGetItems case; SQLite recorded none.
@@ -666,7 +686,7 @@ this measured release.
 
 ### Previous Cellule upgrade release pair
 
-The [Cellule `70bd25f` release rerun](../benchmarks/2026-09-30-cellule-70bd25f/README.md)
+The Cellule `70bd25f` release rerun
 uses source `37b25ff`, upgraded from Cellule `30671d5` to the latest `origin/main`
 checked on September 30. All six direct dependencies and seven lockfile packages
 pin the new revision; ExtendDB remains `7eaa89b`. The measured code also adds the
@@ -708,14 +728,14 @@ query. The original long test passed that step, then failed coordinator recovery
 The opt-in resident resolver also avoids authority reads after handle-cache expiry
 and checks the current actor before reusing a cached handle. Signed owner-expiry
 recovery passes with caches off and on. These source changes are now measured in the resident-routing pair above;
-see the [follow-up verification record](../benchmarks/2026-09-30-cellule-resident-verification/README.md).
+see the follow-up verification record.
 Two local process-suite attempts failed owner recovery and subsequent fixture
 creation; Docker’s filesystem had almost no free inodes. All eight process tests
 passed in CI. Full recovery qualification remains open.
 
 ### Previous instrumented release pair
 
-The [instrumented release rerun](../benchmarks/2026-09-30-runtime-metrics/README.md)
+The instrumented release rerun
 uses source `8e33705` and Cellule `30671d5`, which was current at measurement. Both backends
 completed all 24 cases: BeyondDB recorded **38 SDK errors**, SQLite zero. Each
 failing case's recorded first error was a read timeout.
@@ -756,7 +776,7 @@ whose object publication is blocked.
 ### Previous follower diagnostic pair
 
 At that measurement, Cellule `origin/main` was `30671d5`, used
-by all direct dependencies and lockfile packages. The [fresh release rerun](../benchmarks/2026-09-30-follower-diagnostics/README.md)
+by all direct dependencies and lockfile packages. The fresh release rerun
 uses measured source `9cba5f1` (production code `d04176c`) and completed all
 24 cases per backend. BeyondDB had **three transaction read timeouts**:
 one in `TransactGetItems`, two in `TransactWriteItems` at eight clients.
@@ -788,7 +808,7 @@ errors, fixture metadata, and raw logs.
 
 ### Previous combined coordinator release pair
 
-The [combined coordinator-commit release pair](../benchmarks/2026-09-30-prepared-commit/README.md)
+The combined coordinator-commit release pair
 uses source `3ccab15`, Cellule `30671d5`, three BeyondDB processes, four initial
 partitions, experimental follower durability, and signed boto3. Both backends
 completed all 24 cases. BeyondDB recorded **eight timeouts**: five in eight-client
@@ -822,12 +842,12 @@ in CI; a local retry committed transactions but missed the replacement server's
 45-second health deadline. The measured frontend also logged 12 node-log
 submission rejections with `RuntimeClosed` and fallback to object coverage.
 The dependency pin and follower durability remain incompletely qualified.
-A [diagnostic follow-up](../benchmarks/2026-09-30-prepared-commit/diagnostics/README.md)
+A diagnostic follow-up
 adds first-error logging and records two passing local follower process-kill
 checks. The CI activation failure remains unresolved; these checks do not
 change the benchmark results.
 
-The preceding [compact transaction-read pair](../benchmarks/2026-09-30-compact-transaction-read/README.md)
+The preceding compact transaction-read pair
 recorded six transaction-read timeouts. That response codec keeps legal large
 binary and escaped-string reads on the single-Cell query path, avoiding JSON
 expansion into durable saved images. Signed remote-owner reads preserved exact
@@ -837,7 +857,7 @@ rollout is unqualified. Its full SDK CI failed with elastic Cells 46/46,
 peers 50/52, and process tests 7/8. See both reports for raw measurements,
 sample counts, CI links, and local evidence.
 
-The preceding [peer owner-cache pair](../benchmarks/2026-09-30-peer-owner-cache/README.md)
+The preceding peer owner-cache pair
 recorded 19 timeouts under different load. Its signed mTLS regression proves
 that the opt-in 500 ms private receiver cache removes repeated resident
 handle authority reads, refreshes after expiry, and rejects unauthorized or
@@ -846,7 +866,7 @@ SQLite parity.
 
 ## Earlier object-publication fixture
 
-The [release repeat after the peer read fix](../benchmarks/2026-09-30-peer-read-fallback/README.md)
+The release repeat after the peer read fix
 uses BeyondDB `832da2a`, Cellule `30671d5`, and pinned ExtendDB SQLite. Both
 backends completed all 24 signed API/client cases with **zero foreground
 errors**. At eight clients, BeyondDB/SQLite measured 857/778 `GetItem`,
@@ -854,7 +874,7 @@ errors**. At eight clients, BeyondDB/SQLite measured 857/778 `GetItem`,
 `TransactWriteItems` requests/s. BeyondDB logged three deferred background
 sweeps from mailbox capacity. RustFS used a fresh bind mount in Colima's
 shared home directory after the Docker VM ran out of space; the preceding
-[named-volume attempt](../benchmarks/2026-09-30-peer-read-fallback-attempt/README.md)
+named-volume attempt
 became fenced and recorded 45 foreground errors. Host load and storage paths
 differ between runs, so these rates do not prove a code-driven improvement.
 
@@ -872,8 +892,8 @@ clients, BeyondDB/SQLite measured 327/721 `GetItem`, 13/481 `PutItem`, and
 had zero foreground errors. The server logged five deferred background
 operations from Cell mailbox-byte exhaustion. One-minute load on the
 12-logical-CPU host changed from 30.2 to 48.1 during BeyondDB and ended at
-27.0 after SQLite. See the [full table, p95 latencies, fixture, and raw
-JSON](../benchmarks/2026-09-30-cellule-main-rerun/README.md). These sequential
+27.0 after SQLite. See the full table, p95 latencies, fixture, and raw
+JSON. These sequential
 samples do not establish a controlled speed ratio or production capacity.
 
 The [preceding complete Cellule `9e17746` rerun](../benchmarks/2026-09-29-cellule-main-rerun/README.md)

@@ -20,6 +20,9 @@ use tokio_util::sync::CancellationToken;
 #[path = "node_log_authority/stalled_log_read.rs"]
 mod stalled_log_read;
 
+#[path = "node_log_authority/heartbeat_versions.rs"]
+mod heartbeat_versions;
+
 const FLEET: Digest = Digest::from_bytes([80; 32]);
 const IMAGE: Digest = Digest::from_bytes([81; 32]);
 const RELEASE: Digest = Digest::from_bytes([82; 32]);
