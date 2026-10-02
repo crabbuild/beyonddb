@@ -71,6 +71,8 @@ The choice persists in the table generation. Changing or removing the tag later 
 
 Table size and write load both matter. A smaller table with heavy writes may need several Cells. One Cell serializes mutations and remains subject to node admission, disk budgets, and recovery costs. `single` suppresses splitting; it does not remove resource limits. Hash-range splitting also does not solve every hot partition-key workload; see the delivery gates below.
 
+Start with `auto` when you want one base data Cell today and room to split later. Choose `single` when fixed placement matters and you can keep the complete Cell within its resource budget. Choose `partitioned` when measured write load needs several independent owners from the beginning. Labels such as “medium” or “large” do not determine placement: both stored bytes and write demand matter.
+
 **Current sizing limit:** the compiled base data Cell has a **512 MiB SQLite database budget** and a **64 MiB capture budget**. The database budget includes items, local indexes, stream records, transaction state and other Cell metadata; usable item storage is smaller. The creation tag does not raise these limits. A table that will exceed this budget needs `auto` or `partitioned` in the current release. Configurable larger single-Cell budgets and live placement conversion are unfinished.
 
 Small same-Cell transaction reads can use one atomic query. Tokenized transaction writes still require the account-scoped coordinator, and cross-table transactions can span Cells. Placement therefore reduces some transaction work without establishing SQLite write parity. See [transaction execution paths](cross-cell-transactions.md#one-cell-and-multiple-cell-requests) and [measured performance](performance.md).

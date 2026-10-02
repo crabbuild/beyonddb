@@ -55,7 +55,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 28] = [
+static COMMANDS: [OperationDescriptor; 29] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -89,6 +89,7 @@ static COMMANDS: [OperationDescriptor; 28] = [
     update_batch::batch_operation(25),
     operation(26),
     crate::participant::bounded_prepare_operation(28),
+    crate::participant::bounded_prepare_operation(29),
     OperationDescriptor {
         codec_version: 2,
         ..no_return_operation(52)
@@ -163,6 +164,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/scan.rs"));
                 source.update(include_bytes!("partition/transaction.rs"));
                 source.update(include_bytes!("partition/transaction/participant.rs"));
+                source.update(include_bytes!("partition/transaction/prepare_batch.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
                 source.update(include_bytes!("partition/update_batch.rs"));
                 source.update(include_bytes!("item_wire.rs"));
@@ -223,6 +225,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
         registry.bind_command::<PreparePartitionTransactionBounded>()?;
+        registry.bind_command::<PreparePartitionTransactionBatch>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_command::<ReleasePartitionTransactionReads>()?;
         registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;

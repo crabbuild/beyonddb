@@ -75,6 +75,7 @@ uuid.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+prost = "=0.13.5"
 cellule-store = { workspace = true, features = ["test-support"] }
 aws-config.workspace = true
 aws-credential-types.workspace = true

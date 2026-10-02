@@ -19,11 +19,43 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The successful single-Cell fixture in the latest attempt measured SQL commands at 0.859 ms on average. Durable follower append averaged 19.740 ms, enrollment observations 11.679 ms and command responses with follower durability 71.192 ms. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency.
+The [latest completed release comparison](../benchmarks/2026-10-02-acknowledged-read-release/README.md) measured SQL commands at 0.800 ms on average in four-Cell mode and 1.059 ms in single-Cell mode. Command responses with follower durability averaged 101.332 and 85.691 ms respectively. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency. The host was heavily loaded and using about 36–37 GiB of swap, which limits comparison with earlier samples.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
+
+### Where optimization can help
+
+| Cost | What can reduce it | What must remain correct |
+| --- | --- | --- |
+| One durable publication per independent mutation | Coalesce mutations targeting the same Cell. | Individual conditions, results, stream records and durable acknowledgements. |
+| Transaction prepare publications | Coalesce independent participant prepares targeting the same Cell. | Separate transaction identities, locks and coordinator decisions; atomic rollback of a rejected batch. |
+| Fresh coordinator admission | Reuse admitted owners and coalesce discovery/catalog work. | Account-scoped token replay and mismatch checks, owner fencing and recovery discovery. |
+| Several participants for a small table | Start with one data Cell using `single` or `auto`. | Disk and write budgets, index placement and recovery time. |
+| Follower/object I/O | Measure and reduce transport, authority lookup and storage latency. | The chosen durability contract and restart survival. |
+
+These changes address different parts of the request. A single data Cell can remove participant fan-out, but tokenized transaction writes still have several serial durability barriers. Lower SQL execution time alone cannot remove those barriers.
+
+### Share transaction prepare publications
+
+Independent small transactions targeting the same data Cell can share a prepare publication. Each transaction retains its own intent, locks and coordinator decision. The queue is bounded to 64 pending prepares per Cell; each batch contains at most 16 prepares and 32 KiB of input, with a 2 ms collection window. A single selected prepare uses the existing command. Legacy account participants and large payloads retain their existing paths.
+
+```text
+Transaction A: durable BEGIN -> prepare A --+
+                                           |  one data Cell publication
+Transaction B: durable BEGIN -> prepare B --+  stores separate intents and locks
+                                           |
+                                 durable receipt for each coordinator
+                                      /                \
+                              A: COMMIT/ABORT      B: COMMIT/ABORT
+                                      |                |
+                              resolve A            resolve B
+```
+
+A rejected prepare rolls back the whole batch. Individual commands follow only a durable rejected receipt or a proven refusal before the batch starts. Uncertain replies trigger durable participant-state reads. Coordinator decisions, participant resolutions and stream records retain their existing semantics.
+
+The [signed SDK verification](../benchmarks/2026-10-02-prepare-batching-verification/README.md) reduces **64 durable data commands to 38–40** for 32 independent two-item transaction writes. It checks complete results after owner restoration and recovery after losing a batch reply following durable publication. **43 distinct tests, formatting and strict Clippy pass.** Batch grouping varies with scheduling. This proves reduced durability work; release throughput and SQLite parity require separate measurement.
 
 ### Avoid repeating acknowledged transaction work
 

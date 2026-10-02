@@ -486,6 +486,14 @@ impl CellStorage {
         .len();
         let inline = input_bytes <= crate::transaction_transport::INLINE_BYTES;
         let bounded = input_bytes <= crate::participant::SMALL_PREPARE_BYTES;
+        if let ParticipantPrepare::Data(ref input) = input
+            && bounded
+        {
+            return self
+                .prepare_batcher
+                .submit(target.clone(), input.clone())
+                .await;
+        }
         let result = match input {
             ParticipantPrepare::Account(input) => {
                 if inline {

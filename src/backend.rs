@@ -5,6 +5,7 @@ mod batch;
 mod data;
 mod global_index;
 mod metadata_cache;
+mod prepare_batch;
 mod recovery;
 mod remaining;
 mod statistics;
@@ -43,6 +44,7 @@ use extenddb_storage::{BoxedFuture, TableEngine};
 
 use batch::NoReturnBatcher;
 use metadata_cache::MetadataCache;
+use prepare_batch::PrepareBatcher;
 use update_batch::UpdateBatcher;
 
 /// Installs an initial table's data Cells before its route becomes visible.
@@ -93,6 +95,7 @@ pub struct CellStorage {
     client: CellClient,
     no_return_batcher: Arc<NoReturnBatcher>,
     update_batcher: Arc<UpdateBatcher>,
+    prepare_batcher: Arc<PrepareBatcher>,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
@@ -130,6 +133,7 @@ impl CellStorage {
         Self {
             no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
             update_batcher: Arc::new(UpdateBatcher::new(client.clone())),
+            prepare_batcher: Arc::new(PrepareBatcher::new(client.clone())),
             client,
             region: region.into(),
             initial_partitions: None,

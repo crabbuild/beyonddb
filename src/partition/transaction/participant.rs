@@ -76,7 +76,7 @@ impl Command for PreparePartitionTransactionBounded {
     }
 }
 
-fn prepare_partition(
+pub(super) fn prepare_partition(
     context: &mut CommandContext<'_, '_>,
     input: PreparePartitionTransactionInput,
 ) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {

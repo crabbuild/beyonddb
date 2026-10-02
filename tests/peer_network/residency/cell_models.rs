@@ -169,6 +169,188 @@ async fn sdk_returned_updates_coalesce_and_survive_owner_restore() {
 #[derive(Default)]
 struct CoordinatorQueries(std::sync::atomic::AtomicU64);
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sdk_transaction_prepares_coalesce_and_survive_owner_restore() {
+    transaction_prepares(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sdk_transaction_prepares_recover_lost_batch_reply() {
+    transaction_prepares(true).await;
+}
+
+async fn transaction_prepares(drop_reply: bool) {
+    let commands = Arc::new(DataCommands::default());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let drop_marker = dropped.clone();
+    let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(
+        1,
+        Arc::new(InMemory::new()),
+        128,
+        false,
+        move |router| {
+            router.layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let dropped = drop_marker.clone();
+                    async move {
+                        use cellule_runtime::peer::wire::{self, mutation_request, peer_request};
+                        use prost::Message;
+                        let (parts, body) = request.into_parts();
+                        let bytes = axum::body::to_bytes(body, 8 * 1024 * 1024).await.unwrap();
+                        let batch = wire::PeerRequest::decode(bytes.as_ref()).ok().is_some_and(|request| {
+                            matches!(request.operation,
+                                Some(peer_request::Operation::Mutate(mutation))
+                                    if matches!(&mutation.operation,
+                                        Some(mutation_request::Operation::CellCommand(command)) if command.command_id == 29))
+                        });
+                        let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+                        let response = next.run(request).await;
+                        if drop_reply && batch && !dropped.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            // The real authenticated handler has durably published.
+                            // Lose only the reply body, after dispatch, so the
+                            // caller must observe each intent instead of retrying.
+                            return axum::response::Response::new(axum::body::Body::from_stream(
+                                futures_util::stream::once(async {
+                                    Err::<axum::body::Bytes, _>(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+                                }),
+                            ));
+                        }
+                        response
+                    }
+                },
+            ))
+        },
+        Some(commands.clone()),
+    )
+    .await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = build_http_state(
+        &fixture.node,
+        remote.client(&fixture),
+        fixture.layout.clone(),
+        fixture.provisioner.clone(),
+        [38; 32],
+        "us-east-1",
+        endpoint.clone(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        extenddb_server::start_server(listener, state, None, None)
+            .await
+            .unwrap();
+    });
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk_without_retries(&fixture)
+            .config()
+            .to_builder()
+            .endpoint_url(endpoint)
+            .build(),
+    );
+    // Pre-admit the exact token shards so discovery does not stagger the
+    // concurrent prepares. Requests still traverse signed SDK/HTTP/TLS paths.
+    for index in 0..32 {
+        beyonddb::CoordinatorProvisioner::ensure(
+            fixture.provisioner.as_ref(),
+            &fixture.client,
+            ACCOUNT,
+            format!("prepare-batch-{index}").as_bytes(),
+        )
+        .await
+        .unwrap();
+    }
+    sdk.get_item()
+        .table_name("Residency")
+        .key("id", AwsAttributeValue::S("prepare-warmup".into()))
+        .send()
+        .await
+        .unwrap();
+    commands.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let start = Arc::new(tokio::sync::Barrier::new(33));
+    let mut requests = tokio::task::JoinSet::new();
+    for index in 0..32 {
+        let sdk = sdk.clone();
+        let start = start.clone();
+        requests.spawn(async move {
+            let request = sdk
+                .transact_write_items()
+                .client_request_token(format!("prepare-batch-{index}"))
+                .set_transact_items(Some(
+                    (0..2)
+                        .map(|item| {
+                            TransactWriteItem::builder()
+                                .put(
+                                    Put::builder()
+                                        .table_name("Residency")
+                                        .item(
+                                            "id",
+                                            AwsAttributeValue::S(format!("prepare-{index}-{item}")),
+                                        )
+                                        .item("value", AwsAttributeValue::N(index.to_string()))
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .build()
+                        })
+                        .collect(),
+                ));
+            start.wait().await;
+            request.send().await.unwrap();
+        });
+    }
+    start.wait().await;
+    while let Some(result) = requests.join_next().await {
+        result.unwrap();
+    }
+    let count = commands.0.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("32 signed transaction writes used {count} durable data commands");
+    let id = table_id(&fixture, "Residency").await;
+    let range = ranges(&fixture, "Residency").await.remove(0);
+    fixture
+        .provisioner
+        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+        .await
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    fixture
+        .provisioner
+        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+        .await
+        .unwrap();
+    for index in 0..32 {
+        for item in 0..2 {
+            let restored = sdk
+                .get_item()
+                .table_name("Residency")
+                .key(
+                    "id",
+                    AwsAttributeValue::S(format!("prepare-{index}-{item}")),
+                )
+                .send()
+                .await
+                .unwrap()
+                .item
+                .unwrap();
+            assert_eq!(restored["value"], AwsAttributeValue::N(index.to_string()));
+        }
+    }
+    server.abort();
+    let _ = server.await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+    assert_eq!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        drop_reply
+    );
+    assert!(
+        count < 64,
+        "independent prepares must share durable commits"
+    );
+}
+
 impl cellule_runtime::fleet::telemetry::CellTelemetry for CoordinatorQueries {
     fn primitive_operation(
         &self,

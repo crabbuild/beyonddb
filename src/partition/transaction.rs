@@ -585,6 +585,8 @@ fn apply_staged(
 
 mod participant;
 pub use participant::*;
+mod prepare_batch;
+pub use prepare_batch::*;
 
 pub(super) fn key_locked(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<bool> {
     Ok(!context.sql(&lock_query(key, false))?[0].rows.is_empty())
