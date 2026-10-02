@@ -10,6 +10,163 @@ use cellule_runtime::{
 const ACCOUNT: &str = "123456789012";
 const ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovered_index_can_release_residency_and_serve_later_sdk_requests() {
+    use futures_util::FutureExt;
+    let fixture = Fixture::with_capacity(1, 12).await;
+    CellAuthorizationStore::new(fixture.client.clone())
+        .put_user_policy(
+            ACCOUNT,
+            "network-user",
+            "index-recovery",
+            &serde_json::json!({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": "dynamodb:*",
+                    "Resource": [
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover",
+                        "arn:aws:dynamodb:us-east-1:123456789012:table/ServingIndexFailover/index/ByBucket"
+                    ]
+                }]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+    let index =
+        crate::peer_network::global_indexes::IndexRecovery::create(&fixture.sdk, &fixture.client)
+            .await;
+    let storage = beyonddb::CellStorage::new(fixture.client.clone(), "us-east-1");
+    storage
+        .project_index_changes(ACCOUNT, &index.targets[0], &index.table_id)
+        .await
+        .unwrap();
+    index
+        .assert_settled(&fixture.sdk, &fixture.client, "before")
+        .await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let before = index.assert_owner(&authority, fixture.session).await;
+    // Release both original owners and restore their published roots. Retained
+    // incarnation plus an advanced epoch distinguishes recovery from bootstrap.
+    for target in &index.targets {
+        let proof = CellCatalog::new(fixture.layout.clone(), target.tenant())
+            .lookup(target.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        let control = authority.load(target.cell_id()).await.unwrap().unwrap();
+        fixture
+            .node
+            .runtime()
+            .local_handle(proof, &control)
+            .await
+            .unwrap()
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+    }
+    fixture
+        .provisioner
+        .recover_registered_partitions(ACCOUNT, &fixture.client, &fixture.directory)
+        .await
+        .unwrap();
+    index
+        .assert_settled(&fixture.sdk, &fixture.client, "before")
+        .await;
+    // Reclamation after the successful SDK query is legal and deterministic:
+    // force the index idle at the same post-query boundary as the CI failure.
+    let target = &index.targets[1];
+    let proof = CellCatalog::new(fixture.layout.clone(), target.tenant())
+        .lookup(target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let control = authority.load(target.cell_id()).await.unwrap().unwrap();
+    fixture
+        .node
+        .runtime()
+        .local_handle(proof, &control)
+        .await
+        .unwrap()
+        .unwrap()
+        .drain()
+        .await
+        .unwrap();
+    let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
+    assert_eq!(idle.value().state, ControlState::Idle);
+    assert!(idle.value().owner.is_none());
+    assert!(idle.value().root.is_some());
+    let checked = std::panic::AssertUnwindSafe(index.assert_recovered_authority(
+        &authority,
+        fixture.session,
+        &before,
+    ))
+    .catch_unwind()
+    .await;
+    // Reject a skipped takeover even when the existing image is readable.
+    let mut unchanged = Vec::new();
+    for target in &index.targets {
+        unchanged.push(
+            authority
+                .load(target.cell_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .value()
+                .owner_fence(),
+        );
+    }
+    let skipped = std::panic::AssertUnwindSafe(index.assert_recovered_authority(
+        &authority,
+        fixture.session,
+        &unchanged,
+    ))
+    .catch_unwind()
+    .await;
+    // A fresh bootstrap cannot stand in for restoring the original incarnation.
+    let mut bootstrapped = before.clone();
+    bootstrapped[1].incarnation =
+        cellule_runtime::identity::IncarnationId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
+    let changed_incarnation = std::panic::AssertUnwindSafe(index.assert_recovered_authority(
+        &authority,
+        fixture.session,
+        &bootstrapped,
+    ))
+    .catch_unwind()
+    .await;
+    // A still-serving participant must belong to the expected replacement.
+    let wrong_owner = std::panic::AssertUnwindSafe(index.assert_recovered_authority(
+        &authority,
+        SessionId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+        &before,
+    ))
+    .catch_unwind()
+    .await;
+    // The authority assertion must not require permanent residency. Prove the
+    // next signed write restores the same index and projects a newer image.
+    crate::peer_network::global_indexes::IndexRecovery::write(&fixture.sdk, "after").await;
+    storage
+        .project_index_changes(ACCOUNT, &index.targets[0], &index.table_id)
+        .await
+        .unwrap();
+    index
+        .assert_settled(&fixture.sdk, &fixture.client, "after")
+        .await;
+    fixture.shutdown().await;
+    assert!(skipped.is_err(), "missed recovery must be rejected");
+    assert!(changed_incarnation.is_err(), "bootstrap must be rejected");
+    assert!(
+        wrong_owner.is_err(),
+        "unexpected serving owner must be rejected"
+    );
+    assert!(
+        checked.is_ok(),
+        "post-recovery assertion rejected a published idle index"
+    );
+}
+
 async fn interrupt_acquisition(fixture: &Fixture, handle: CellHandle) {
     let cell = handle.cell_id();
     handle.drain().await.unwrap();

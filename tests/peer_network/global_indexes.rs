@@ -2,14 +2,17 @@ use crate::*;
 use beyonddb::{
     ReadPartitionIndexChange, RoutePageInput, RoutePageOutcome, data_target, global_index_target,
 };
-use cellule_runtime::identity::CellTarget;
+use cellule_runtime::{
+    control::{ControlState, OwnerFence},
+    identity::CellTarget,
+};
 
 const ACCOUNT: &str = "123456789012";
 const TABLE: &str = "ServingIndexFailover";
 
 pub(crate) struct IndexRecovery {
-    targets: Vec<CellTarget>,
-    table_id: String,
+    pub(crate) targets: Vec<CellTarget>,
+    pub(crate) table_id: String,
 }
 
 impl IndexRecovery {
@@ -151,10 +154,44 @@ impl IndexRecovery {
         .expect("signed index query and journal acknowledgement must converge");
     }
 
-    pub(crate) async fn assert_owner(&self, authority: &CellAuthority, session: SessionId) {
+    pub(crate) async fn assert_owner(
+        &self,
+        authority: &CellAuthority,
+        session: SessionId,
+    ) -> Vec<OwnerFence> {
+        let mut fences = Vec::new();
         for target in &self.targets {
             let current = authority.load(target.cell_id()).await.unwrap().unwrap();
             assert_eq!(current.value().owner.as_ref().unwrap().session, session);
+            fences.push(current.value().owner_fence());
+        }
+        fences
+    }
+
+    pub(crate) async fn assert_recovered_authority(
+        &self,
+        authority: &CellAuthority,
+        session: SessionId,
+        before: &[OwnerFence],
+    ) {
+        assert_eq!(self.targets.len(), before.len());
+        for (target, previous) in self.targets.iter().zip(before) {
+            let current = authority.load(target.cell_id()).await.unwrap().unwrap();
+            let control = current.value();
+            assert_eq!(control.incarnation, previous.incarnation);
+            assert!(control.epoch > previous.epoch, "owner epoch must advance");
+            assert!(
+                control.root.is_some(),
+                "recovered root must remain published"
+            );
+            assert!(control.recovery.is_none(), "recovery must finish");
+            match control.state {
+                ControlState::Serving => {
+                    assert_eq!(control.owner.as_ref().unwrap().session, session);
+                }
+                ControlState::Idle => assert!(control.owner.is_none()),
+                state => panic!("recovered Cell has invalid state: {state:?}"),
+            }
         }
     }
 }

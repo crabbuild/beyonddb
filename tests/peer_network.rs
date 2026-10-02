@@ -1280,7 +1280,7 @@ async fn run_signed_sdk_network_recovery() {
     index_recovery
         .assert_settled(&replacement_sdk, &replacement_client, "before")
         .await;
-    index_recovery
+    let index_fences = index_recovery
         .assert_owner(&CellAuthority::new(layout.clone()), remote_session)
         .await;
     // Install before this shard exists. Discovery must see later registrations
@@ -1368,7 +1368,11 @@ async fn run_signed_sdk_network_recovery() {
         .assert_settled(&replacement_sdk, &replacement_client, "before")
         .await;
     index_recovery
-        .assert_owner(&CellAuthority::new(layout.clone()), replacement_session)
+        .assert_recovered_authority(
+            &CellAuthority::new(layout.clone()),
+            replacement_session,
+            &index_fences,
+        )
         .await;
     peer_network::global_indexes::IndexRecovery::write(&replacement_sdk, "after").await;
     index_recovery
