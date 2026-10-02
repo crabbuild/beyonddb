@@ -52,7 +52,8 @@ impl NodeLeasePublisher {
         Ok(PublishedNodeLease {
             publisher: self,
             session: observed.advertisement().session(),
-            observed: Arc::new(Mutex::new(observed)),
+            observed,
+            log_transitions: Arc::new(Mutex::new(())),
             guard,
             fence_on_drop: true,
         })
@@ -76,7 +77,8 @@ impl NodeLeasePublisher {
 pub struct PublishedNodeLease {
     publisher: NodeLeasePublisher,
     session: cellule_runtime::identity::SessionId,
-    observed: Arc<Mutex<VersionedNodeAdvertisement>>,
+    observed: VersionedNodeAdvertisement,
+    log_transitions: Arc<Mutex<()>>,
     guard: NodeLeaseGuard,
     fence_on_drop: bool,
 }
@@ -98,7 +100,7 @@ impl PublishedNodeLease {
             self.publisher.directory.clone(),
             self.session,
             self.guard.clone(),
-            Arc::clone(&self.observed),
+            Arc::clone(&self.log_transitions),
         )
     }
 
@@ -151,16 +153,15 @@ impl PublishedNodeLease {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
         let next = self.publisher.advertisement(now_ms).await?;
-        let mut observed = self.observed.lock().await;
         self.guard.check()?;
         let renewed = self
             .publisher
             .directory
-            .refresh(&observed, next, now_ms)
+            .refresh(&self.observed, next, now_ms)
             .await?;
         self.guard
             .renew(unix_time_ms()?, renewed.advertisement().expires_at_ms())?;
-        *observed = renewed;
+        self.observed = renewed;
         Ok(())
     }
 }

@@ -17,6 +17,9 @@ use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
 
+#[path = "node_log_authority/stalled_log_read.rs"]
+mod stalled_log_read;
+
 const FLEET: Digest = Digest::from_bytes([80; 32]);
 const IMAGE: Digest = Digest::from_bytes([81; 32]);
 const RELEASE: Digest = Digest::from_bytes([82; 32]);

@@ -22,15 +22,16 @@ const MAX_CAS_ATTEMPTS: usize = 4;
 
 /// Directory-backed authority for one leased node session.
 ///
-/// Each operation reloads the current version so a concurrent heartbeat does
-/// not overwrite or permanently obstruct an enrolled log transition. The
-/// directory still validates every transition and compares the exact ETag.
+/// Each operation reloads the current version and retries CAS races. Log I/O
+/// never holds the heartbeat's local state: a stalled transition must not
+/// prevent renewal. The directory validates every transition and exact ETag.
+/// Log transitions share a separate mutex; heartbeat renewal never takes it.
 #[derive(Clone)]
 pub struct PublishedNodeLogAuthority {
     directory: NodeDirectory,
     session: SessionId,
     guard: NodeLeaseGuard,
-    observed: Arc<Mutex<VersionedNodeAdvertisement>>,
+    transitions: Arc<Mutex<()>>,
 }
 
 impl PublishedNodeLogAuthority {
@@ -42,17 +43,17 @@ impl PublishedNodeLogAuthority {
         directory: NodeDirectory,
         session: SessionId,
         guard: NodeLeaseGuard,
-        observed: Arc<Mutex<VersionedNodeAdvertisement>>,
+        transitions: Arc<Mutex<()>>,
     ) -> Self {
         Self {
             directory,
             session,
             guard,
-            observed,
+            transitions,
         }
     }
 
-    async fn load(&self, observed: &mut VersionedNodeAdvertisement) -> Result<i64> {
+    async fn load(&self) -> Result<(VersionedNodeAdvertisement, i64)> {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
         let current = self
@@ -61,8 +62,7 @@ impl PublishedNodeLogAuthority {
             .await?
             .ok_or(Error::Fenced)?;
         self.guard.check()?;
-        *observed = current;
-        Ok(now_ms)
+        Ok((current, now_ms))
     }
 
     /// Enroll a complete follower set for the next log epoch, if available.
@@ -75,10 +75,10 @@ impl PublishedNodeLogAuthority {
         required_follower_bytes: u64,
         live_node_limit: usize,
     ) -> Result<Option<Vec<NodeId>>> {
-        let mut observed = self.observed.lock().await;
+        let _transition = self.transitions.lock().await;
         let mut last_error = None;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let now_ms = self.load(&mut observed).await?;
+            let (observed, now_ms) = self.load().await?;
             if let Some(log) = observed.advertisement().log() {
                 if log.epoch() != log_epoch || log.phase() != NodeLogPhase::Open || log.active() {
                     return Err(Error::Node("node session has a different or active log"));
@@ -97,9 +97,8 @@ impl PublishedNodeLogAuthority {
                 .await
             {
                 Ok(Some(enrolled)) => {
-                    *observed = enrolled;
                     self.guard.check()?;
-                    let log = observed
+                    let log = enrolled
                         .advertisement()
                         .log()
                         .ok_or(Error::Node("enrolled node log is missing"))?;
@@ -117,7 +116,7 @@ impl PublishedNodeLogAuthority {
 
     /// Checks the exact current epoch's members before host-owned rotation.
     ///
-    /// Read the canonical enrollment independently of the heartbeat mutex.
+    /// Read the canonical enrollment independently of heartbeat state.
     /// A slow membership scan must not prevent this node from renewing its
     /// own lease. The result requests rotation; it grants no append authority.
     pub async fn rotation_required(&self, log_epoch: u64, live_node_limit: usize) -> Result<bool> {
@@ -145,17 +144,16 @@ impl PublishedNodeLogAuthority {
     }
 
     async fn activate_epoch(&self, log_epoch: u64) -> Result<()> {
-        let mut observed = self.observed.lock().await;
+        let _transition = self.transitions.lock().await;
         let mut last_error = None;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let now_ms = self.load(&mut observed).await?;
+            let (observed, now_ms) = self.load().await?;
             let log = exact_open_log(&observed, log_epoch)?;
             if log.active() {
                 return Ok(());
             }
             match self.directory.activate_log(&observed, now_ms).await {
-                Ok(updated) => {
-                    *observed = updated;
+                Ok(_) => {
                     self.guard.check()?;
                     return Ok(());
                 }
@@ -169,10 +167,10 @@ impl PublishedNodeLogAuthority {
     }
 
     async fn advance_epoch_coverage(&self, log_epoch: u64, tiered_through: u64) -> Result<()> {
-        let mut observed = self.observed.lock().await;
+        let _transition = self.transitions.lock().await;
         let mut last_error = None;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let now_ms = self.load(&mut observed).await?;
+            let (observed, now_ms) = self.load().await?;
             let log = exact_open_log(&observed, log_epoch)?;
             if log.tiered_through() >= tiered_through {
                 return Ok(());
@@ -182,8 +180,7 @@ impl PublishedNodeLogAuthority {
                 .advance_log_coverage(&observed, tiered_through, now_ms)
                 .await
             {
-                Ok(updated) => {
-                    *observed = updated;
+                Ok(_) => {
                     self.guard.check()?;
                     return Ok(());
                 }
@@ -197,16 +194,16 @@ impl PublishedNodeLogAuthority {
     }
 
     async fn close_epoch(&self, barrier: &NodeLogRotationBarrier) -> Result<()> {
+        let _transition = self.transitions.lock().await;
         if barrier.leader_session() != self.session {
             return Err(Error::Node(
                 "node-log close barrier belongs to another session",
             ));
         }
-        let mut observed = self.observed.lock().await;
         let mut last_error = None;
         let mut attempted = false;
         for _ in 0..MAX_CAS_ATTEMPTS {
-            let now_ms = self.load(&mut observed).await?;
+            let (observed, now_ms) = self.load().await?;
             let Some(log) = observed.advertisement().log() else {
                 return if attempted {
                     Ok(())
@@ -219,8 +216,7 @@ impl PublishedNodeLogAuthority {
             }
             attempted = true;
             match self.directory.close_log(&observed, barrier, now_ms).await {
-                Ok(updated) => {
-                    *observed = updated;
+                Ok(_) => {
                     self.guard.check()?;
                     return Ok(());
                 }
