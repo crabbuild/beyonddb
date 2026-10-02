@@ -19,13 +19,35 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The latest refresh measured SQL commands at 1.271/0.640 ms on average in single/four-Cell fixtures. Durable follower append averaged 17.093/19.979 ms, enrollment reads 25.950/82.385 ms and fleet responses 108.108/366.078 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
+The latest refresh measured SQL commands at 0.833/0.745 ms on average in single/four-Cell fixtures. Durable follower append averaged 27.827/40.302 ms, enrollment reads 27.111/37.421 ms and fleet responses 159.179/233.072 ms. These populations include background work and overlap other scopes; they are evidence of I/O costs, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [fresh remote routing release comparison](../benchmarks/2026-10-02-read-routing-release/README.md) measures committed source `b285dae`. All **72 cases ran**, with one Single transaction-write throttling cancellation, one four-Cell transaction-read timeout and zero SQLite request errors. **The all-API SQLite performance goal remains unmet.** Only ListTables exceeds SQLite's eight-client request rate in both BeyondDB modes.
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 162.86 | 157.81 | 520.78 |
+| PutItem | 37.71 | 18.14 | 137.04 |
+| UpdateItem | 55.41 | 18.39 | 290.52 |
+| TransactGetItems | 118.85 | 0.80 | 299.70 |
+| TransactWriteItems | 0.72 | 1.97 | 403.02 |
+
+Transaction-write p95 is 9623.62/5522.40 ms for single/four Cells, versus SQLite's 46.15 ms. Completed requests are 7/16/2026, with one Single cancellation excluded from successful latency percentiles. Calls contain two items. The full report retains all API rates, tails, counts, errors and actual elapsed time.
+
+The [gated regression](../benchmarks/2026-10-02-read-routing-verification/README.md) proves fresh authority and owner enrollment reads overlap; neither read is skipped. A bounded session hint selects the probe, but fresh authority still decides ownership and lease expiry is rechecked after I/O. Changed owners get their own fresh enrollment read. The test checks current-owner probe failure, restoration on a third node and a signed strong read with SDK retries disabled. Existing drain/expiry cases, formatting, strict Clippy and all 28 library cases pass.
+
+**The measurement does not isolate an end-to-end speedup or regression.** Host load is single: 24.76→33.82; partitioned: 29.82→26.20; sqlite: 26.67→26.44, on 12 logical CPUs with about 42–43 GiB of swap in use. No task-local build, test or provider probe overlaps measurement. The temporary Python environment was recreated with the same boto3 version; the previous botocore version was not recorded. All seven fixture PIDs and both containers are absent, without forced BeyondDB cleanup.
+
+Single mode records a participant-capacity warning during SDK measurement and two follower-append warnings after it. Four-Cell owned logs are empty. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/36971574005) fails: native 48/48, peers 70/72 and process 7/8. Post-drain token replay, GSI ownership recovery and follower shutdown with the observed-stream EOF panic remain unresolved. Current-source full peer/process CI and old-root upgrades remain unqualified.
+
+[Participant capacity evidence](../benchmarks/2026-10-02-read-routing-verification/participant-capacity-evidence.json) identifies the next hypothesis: prepare advertises a roughly 4 MiB maximum reply while the runtime reserves that bound against a 16 MiB per-Cell mailbox. A correctly bounded metadata-only prepare path needs a regression with real replies held in flight; failure images and durable transaction rules must remain. No prepare change is included in this release.
+
+### Previous follower discovery release verification
 
 The [follower discovery release comparison](../benchmarks/2026-10-01-follower-discovery-release/README.md) measures committed source `d88f580`, with unchanged reviewed Cellule and ExtendDB pins. All **72 cases ran**, but four-Cell TransactGetItems has **nine SDK read timeouts**. Single mode and SQLite have zero request errors. **SQLite parity remains unmet; every eight-client API is below SQLite's request rate in this sample.**
 
