@@ -19,13 +19,31 @@ response                         durable receipt -> response
                                  async object tiering
 ```
 
-The latest refresh measured SQL commands at 1.628/0.637 ms on average in single/four-Cell fixtures. Durable follower append averaged 20.749/20.667 ms, enrollment observations 37.337/33.216 ms and command responses with follower durability 158.978/165.798 ms. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency.
+The successful single-Cell fixture in the latest attempt measured SQL commands at 0.859 ms on average. Durable follower append averaged 19.740 ms, enrollment observations 11.679 ms and command responses with follower durability 71.192 ms. These populations include background work and overlap other scopes; they are evidence of costs around SQL, not an additive explanation of request latency.
 
 Cross-Cell transactions add a durable coordinator admission, preparation, decision, participant resolution, and cleanup. A fresh coordinator shard can also require authority and catalog I/O. Boto3 automatically supplies an idempotency token for `TransactWriteItems`; BeyondDB preserves account-scoped replay and mismatch checks through the coordinator even when all items occupy one Cell.
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
 ## Latest release verification
+
+The [independent heartbeat release attempt](../benchmarks/2026-10-02-independent-heartbeat-release/README.md) measures committed source `e1f7664` with unchanged reviewed dependencies. All **72 cases run**. Single-Cell BeyondDB and SQLite complete their 24 cases with zero SDK errors; four-Cell BeyondDB records **72 errors across 16 cases**, loses its endpoint and exits fenced. **SQLite parity and runtime qualification remain unmet.**
+
+| API, eight clients | Single req/s | Four Cells req/s | SQLite req/s |
+| --- | ---: | ---: | ---: |
+| GetItem | 234.27 | 122.33 | 727.21 |
+| PutItem | 31.42 | 0.00* | 751.03 |
+| UpdateItem | 81.76 | 0.00* | 350.87 |
+| TransactGetItems | 215.46 | 0.00* | 665.99 |
+| TransactWriteItems | 4.54 | 0.00* | 278.76 |
+
+\* Cases contain errors after the four-Cell runtime fails; zero is not healthy capacity. Single-Cell transaction writes complete 29 requests with p95 **1,959.57 ms**, versus SQLite's 1,412 requests and **92.63 ms**. Calls contain two items. [Full tables and raw results](../benchmarks/2026-10-02-independent-heartbeat-release/tables.md) retain counts, errors, tails and actual elapsed time.
+
+The [regression](../benchmarks/2026-10-02-transaction-timeout-diagnosis/README.md) proves stalled log I/O held the heartbeat's shared mutex. The fix keeps a separate log-transition mutex and lets heartbeat renewal proceed; signed ETag retries preserve log state. Formatting, strict Clippy and 39 focused/library tests pass. The original fresh transaction diagnostic now completes 32 distinct writes with zero errors and verifies 64 items by strong reads. Resident coordinator waves are not consistently faster, so that diagnostic does not prove a coordinator-reuse speedup.
+
+**The fix does not resolve every fencing failure.** Four-Cell logs retain terminal Fenced errors; the precise remaining renewal phase is not yet isolated. SDK-window host load is single **33.50→28.05**, four Cells **52.76→69.93**, SQLite **69.45→54.44**, on 12 CPUs with about 36 GiB of swap. No local build, test or provider probe overlaps measurement. All ten fixture PIDs and three containers are absent; no forced cleanup is needed. Changing contention prevents attribution of an end-to-end speedup. Full recovery, larger single-Cell budgets, live conversion, sustained capacity and SQLite parity remain unfinished. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/37040618370) fails: native 48/48, peers 74/75 with missing GSI ownership, processes 7/8 with the observed-stream EOF shutdown panic.
+
+### Previous Cellule member-expiry release verification
 
 The [Cellule member-expiry release refresh](../benchmarks/2026-10-02-cellule-member-rotation-release/README.md) measures committed source `61a74a4`, pinning reviewed Cellule `0f4ca09`. All **72 cases run**. Four-Cell BeyondDB and SQLite complete 24 cases each with zero request errors; single-Cell BeyondDB records **eight timeouts** in its concurrent transaction-write case. **The all-API SQLite performance goal remains unmet.**
 
