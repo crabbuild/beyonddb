@@ -392,51 +392,78 @@ impl Command for PrepareAccountTransaction {
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let input = crate::transaction_transport::consume::<Self>(context, input)?;
-        let digest = blake3::hash(&serde_json::to_vec(&input)?);
-        if let Some(outcome) = participant::prepared(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-        )? {
-            return Ok(CommandResult::Rejected(Json(outcome)));
-        }
-        let staged = match stage(context, input.operations)? {
-            Ok(staged) => staged,
-            Err((index, reason)) => {
-                return Ok(CommandResult::Rejected(Json(
-                    PrepareTransactionOutcome::Rejected { index, reason },
-                )));
-            }
-        };
-        participant::record_prepare(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-            crate::participant::PreparedPayload {
-                bytes: serde_json::to_vec(&staged)?,
-                operations: staged.len(),
-                index_edits: staged.iter().map(|image| image.index_capacity.edits).sum(),
-                index_overflow_bytes: staged
-                    .iter()
-                    .map(|image| image.index_capacity.overflow_bytes)
-                    .sum(),
-            },
-            &input.coordinator_key,
-            staged
-                .iter()
-                .filter(|image| image.effect == StagedEffect::Read)
-                .map(|image| image.image.as_ref()),
-        )?;
-        for image in staged {
-            context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
-                vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;
-        }
-        Ok(CommandResult::Success(Json(
-            PrepareTransactionOutcome::Prepared,
-        )))
+        prepare_account(context, input)
     }
+}
+
+/// Prepare an inline participant with a bounded reply reservation.
+/// A durable WideRequired rejection permits retry through the wide command.
+pub struct PrepareAccountTransactionBounded;
+
+impl Command for PrepareAccountTransactionBounded {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 57;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PrepareAccountTransactionInput>;
+    type Output = Json<PrepareTransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let result = prepare_account(context, input)?;
+        crate::participant::bound_prepare_result(result)
+    }
+}
+
+fn prepare_account(
+    context: &mut CommandContext<'_, '_>,
+    input: PrepareAccountTransactionInput,
+) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {
+    let digest = blake3::hash(&serde_json::to_vec(&input)?);
+    if let Some(outcome) = participant::prepared(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+    )? {
+        return Ok(CommandResult::Rejected(Json(outcome)));
+    }
+    let staged = match stage(context, input.operations)? {
+        Ok(staged) => staged,
+        Err((index, reason)) => {
+            return Ok(CommandResult::Rejected(Json(
+                PrepareTransactionOutcome::Rejected { index, reason },
+            )));
+        }
+    };
+    participant::record_prepare(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+        crate::participant::PreparedPayload {
+            bytes: serde_json::to_vec(&staged)?,
+            operations: staged.len(),
+            index_edits: staged.iter().map(|image| image.index_capacity.edits).sum(),
+            index_overflow_bytes: staged
+                .iter()
+                .map(|image| image.index_capacity.overflow_bytes)
+                .sum(),
+        },
+        &input.coordinator_key,
+        staged
+            .iter()
+            .filter(|image| image.effect == StagedEffect::Read)
+            .map(|image| image.image.as_ref()),
+    )?;
+    for image in staged {
+        context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
+            vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;
+    }
+    Ok(CommandResult::Success(Json(
+        PrepareTransactionOutcome::Prepared,
+    )))
 }
 
 /// Apply a coordinator decision and release the account participant's locks atomically.

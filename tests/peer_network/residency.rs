@@ -12,6 +12,7 @@ mod forward_cache;
 mod index_splits;
 mod ownership_race;
 mod placement;
+mod prepare_capacity;
 mod pressure;
 mod provisioning;
 mod rebalance;

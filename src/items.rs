@@ -576,9 +576,10 @@ impl Command for TransactWriteNoReturn {
 
 pub(crate) mod transaction;
 pub use transaction::{
-    PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
-    ReadAccountTransactionResult, ReleaseAccountTransactionReads, ResolveAccountTransaction,
-    TransactRead, TransactReadQuery, TransactionReadOutcome, TransactionReadQueryOutput,
+    PrepareAccountTransaction, PrepareAccountTransactionBounded, PrepareAccountTransactionInput,
+    ReadAccountTransaction, ReadAccountTransactionResult, ReleaseAccountTransactionReads,
+    ResolveAccountTransaction, TransactRead, TransactReadQuery, TransactionReadOutcome,
+    TransactionReadQueryOutput,
 };
 
 mod scan;

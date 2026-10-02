@@ -2,6 +2,7 @@
 
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue, TransactionFailure};
+use cellule_runtime::codec::{BoundedEncoder, CodecError, WireValue};
 use cellule_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,40 @@ pub(crate) const fn phase_operation(id: u32) -> cellule_runtime::registry::Opera
         input_limit: 4096,
         output_limit: 4096,
         ..crate::operation(id)
+    }
+}
+
+// The adapter selects this path for payloads at most 32 KiB. The larger input
+// envelope leaves codec headroom and the result budget admits concurrent small
+// prepares without reserving 4 MiB per request in the 16 MiB Cell mailbox.
+pub(crate) const SMALL_PREPARE_BYTES: usize = 32 * 1024;
+const PREPARE_BYTES: u32 = 64 * 1024;
+
+pub(crate) const fn bounded_prepare_operation(
+    id: u32,
+) -> cellule_runtime::registry::OperationDescriptor {
+    cellule_runtime::registry::OperationDescriptor {
+        input_limit: PREPARE_BYTES,
+        output_limit: PREPARE_BYTES,
+        ..crate::operation(id)
+    }
+}
+
+pub(crate) fn bound_prepare_result(
+    result: CommandResult<Json<PrepareTransactionOutcome>>,
+) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {
+    let output = match &result {
+        CommandResult::Success(output) | CommandResult::Rejected(output) => output,
+    };
+    let mut encoder = BoundedEncoder::new(PREPARE_BYTES)?;
+    match output.encode(&mut encoder) {
+        Ok(()) => Ok(result),
+        // Cellule rolls back application changes before durably recording this
+        // rejected receipt. Do not truncate a condition failure's old image.
+        Err(CodecError::Limit) => Ok(CommandResult::Rejected(Json(
+            PrepareTransactionOutcome::WideRequired,
+        ))),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -46,6 +81,9 @@ pub enum PrepareTransactionOutcome {
     Sealed,
     NotReady,
     WrongPartition,
+    /// Bounded prepare rolled back; retry with the wide reply envelope.
+    /// Emitted only by the bounded prepare commands.
+    WideRequired,
 }
 
 /// A terminal coordinator decision for one participant.

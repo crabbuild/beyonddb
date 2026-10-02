@@ -262,6 +262,86 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         &infos,
     )
     .await;
+    // Exercise bounded prepares for both legacy account and routed data
+    // participants. A small conditional request can return a much larger old
+    // image. Losing its bounded rejection must stay uncertain, not fall back.
+    for (index, info) in infos.iter().enumerate() {
+        let old_key = Item::from([(
+            "id".into(),
+            AttributeValue::S(format!("wide-failure-{index}")),
+        )]);
+        let mut old = old_key.clone();
+        old.insert("payload".into(), AttributeValue::S("\0".repeat(384 * 1024)));
+        storage
+            // Seed through the wide command. The legacy account no-return
+            // PutItem envelope is 1 MiB; JSON escaping expands this valid item.
+            .put_item(info, old.clone(), true, None, &maps, None)
+            .await
+            .unwrap();
+        let new = Item::from([(
+            "id".into(),
+            AttributeValue::S(format!("wide-rollback-{index}")),
+        )]);
+        let operations = [
+            TransactWriteOp::Put {
+                key_info: info,
+                item: &new,
+                condition: None,
+                maps: &maps,
+                return_values_on_ccf: Default::default(),
+                stream: None,
+            },
+            TransactWriteOp::Put {
+                key_info: info,
+                item: &old_key,
+                condition: Some(&not_exists),
+                maps: &maps,
+                return_values_on_ccf: ReturnValuesOnConditionCheckFailure::AllOld,
+                stream: None,
+            },
+        ];
+        let dropped = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let uncertain = CellStorage::new(phase_client(1, dropped.clone()), "us-east-1")
+            .with_transaction_coordinators(provisioner.clone());
+        let token_value = format!("wide-condition-{index}");
+        let token = || IdempotencyKey {
+            account_id: "123456789012",
+            token: &token_value,
+            fingerprint: "wide-failure-image",
+        };
+        assert!(matches!(
+            uncertain
+                .transact_write_items(&operations, Some(token()))
+                .await,
+            Err(StorageError::Transient(_))
+        ));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), None);
+        assert_eq!(
+            storage.get_item(info, &old_key).await.unwrap(),
+            Some(old.clone())
+        );
+        assert!(matches!(
+            uncertain.transact_write_items(&operations, Some(token())).await,
+            Err(StorageError::TransactionCanceled(reasons))
+                if reasons[1].code == "ConditionalCheckFailed" && reasons[1].item == Some(old.clone())
+        ));
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), None);
+        // No prepared locks remain after the rejected attempt and ABORT.
+        storage
+            .delete_item(info, &old_key, false, None, &maps, None)
+            .await
+            .unwrap();
+        uncertain
+            .transact_write_items(&operations, Some(token()))
+            .await
+            .unwrap();
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), Some(new));
+        assert_eq!(
+            storage.get_item(info, &old_key).await.unwrap(),
+            Some(old_key)
+        );
+    }
     runtime.shutdown().await.unwrap();
 }
 

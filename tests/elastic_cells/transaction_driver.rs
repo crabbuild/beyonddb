@@ -348,7 +348,9 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             } else {
                 Arc::new(RefusePhase {
                     inner: transport,
-                    command: 12,
+                    // These scenarios send small participant payloads, so the
+                    // production adapter selects the bounded prepare opcode.
+                    command: 28,
                     persistent: scenario == 187,
                     winner: (scenario == 186).then(|| (client.clone(), transaction_id)),
                     refused: lost.clone(),
@@ -610,7 +612,7 @@ impl PeerRoundTrip for DropPhaseReplies {
                 Some(peer_request::Operation::Mutate(mutation)) => match &mutation.operation {
                     Some(mutation_request::Operation::CellCommand(command)) => {
                         match command.command_id {
-                            12 | 21 => 1,
+                            12 | 21 | 28 | 57 => 1,
                             3 | 11 => 2,
                             1 => 4,
                             13 | 22 => 8,

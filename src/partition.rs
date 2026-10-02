@@ -55,7 +55,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 27] = [
+static COMMANDS: [OperationDescriptor; 28] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -88,6 +88,7 @@ static COMMANDS: [OperationDescriptor; 27] = [
     crate::no_return_transaction_operation(24),
     update_batch::batch_operation(25),
     operation(26),
+    crate::participant::bounded_prepare_operation(28),
     OperationDescriptor {
         codec_version: 2,
         ..no_return_operation(52)
@@ -221,6 +222,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<BackfillPartitionTtl>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
+        registry.bind_command::<PreparePartitionTransactionBounded>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_command::<ReleasePartitionTransactionReads>()?;
         registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;

@@ -13,12 +13,14 @@ use crate::{
     CoordinatorDecision, CoordinatorParticipant, CoordinatorParticipantTarget,
     CoordinatorPhaseOutcome, CoordinatorPrepareReceipt, CrossCellTransactionStatus,
     DecideCrossCellTransaction, DecideCrossCellTransactionInput, DecideCrossCellTransactionOutcome,
-    Json, ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionInput,
-    PreparePartitionTransaction, PreparePartitionTransactionInput, PrepareTransactionOutcome,
-    ReadCoordinatorParticipantInput, ReadCoordinatorResume, ReadCrossCellTransaction,
-    ReadCrossCellTransactionInput, ReadTransactionInput, ReadUnresolvedCoordinatorParticipants,
-    TransactionCommandInput, TransactionFailure, TransactionOperation,
-    UnresolvedCoordinatorParticipant, account_target, coordinator_target, data_target,
+    Json, ParticipantTransactionState, PrepareAccountTransaction, PrepareAccountTransactionBounded,
+    PrepareAccountTransactionInput, PreparePartitionTransaction,
+    PreparePartitionTransactionBounded, PreparePartitionTransactionInput,
+    PrepareTransactionOutcome, ReadCoordinatorParticipantInput, ReadCoordinatorResume,
+    ReadCrossCellTransaction, ReadCrossCellTransactionInput, ReadTransactionInput,
+    ReadUnresolvedCoordinatorParticipants, TransactionCommandInput, TransactionFailure,
+    TransactionOperation, UnresolvedCoordinatorParticipant, account_target, coordinator_target,
+    data_target,
 };
 
 impl CellStorage {
@@ -293,6 +295,11 @@ impl CellStorage {
                         "participant transaction identity mismatch".into(),
                     ));
                 }
+                PrepareTransactionOutcome::WideRequired => {
+                    return Err(StorageError::Internal(
+                        "prepare reply fallback was not resolved".into(),
+                    ));
+                }
             };
             if let Some((index, reason)) = rejection {
                 let operation = payload.operations.get(index).ok_or_else(|| {
@@ -471,21 +478,23 @@ impl CellStorage {
         // the participant Cell. Avoid a separate state query on the normal
         // first-attempt path; only an ambiguous reply needs a follow-up read.
         let identity = mutation_identity()?;
-        let inline = match &input {
+        let input_bytes = match &input {
             ParticipantPrepare::Account(input) => serde_json::to_vec(input),
             ParticipantPrepare::Data(input) => serde_json::to_vec(input),
         }
         .map_err(|error| StorageError::Internal(error.to_string()))?
-        .len()
-            <= crate::transaction_transport::INLINE_BYTES;
+        .len();
+        let inline = input_bytes <= crate::transaction_transport::INLINE_BYTES;
+        let bounded = input_bytes <= crate::participant::SMALL_PREPARE_BYTES;
         let result = match input {
             ParticipantPrepare::Account(input) => {
                 if inline {
-                    self.client
-                        .command::<PrepareAccountTransaction>(
+                    self
+                        .prepare_inline::<PrepareAccountTransaction, PrepareAccountTransactionBounded>(
                             target,
                             identity,
-                            Json(TransactionCommandInput::Inline(input)),
+                            input,
+                            bounded,
                         )
                         .await
                 } else {
@@ -503,11 +512,12 @@ impl CellStorage {
             }
             ParticipantPrepare::Data(input) => {
                 if inline {
-                    self.client
-                        .command::<PreparePartitionTransaction>(
+                    self
+                        .prepare_inline::<PreparePartitionTransaction, PreparePartitionTransactionBounded>(
                             target,
                             identity,
-                            Json(TransactionCommandInput::Inline(input)),
+                            input,
+                            bounded,
                         )
                         .await
                 } else {
