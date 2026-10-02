@@ -186,6 +186,154 @@ impl cellule_runtime::fleet::telemetry::CellTelemetry for CoordinatorQueries {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_fresh_read_reuses_acknowledged_participants() {
+    let queries = Arc::new(CoordinatorQueries::default());
+    let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(
+        2,
+        Arc::new(InMemory::new()),
+        16,
+        false,
+        std::convert::identity,
+        Some(queries.clone()),
+    )
+    .await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let state = build_http_state(
+        &fixture.node,
+        remote.client(&fixture),
+        fixture.layout.clone(),
+        fixture.provisioner.clone(),
+        [38; 32],
+        "us-east-1",
+        endpoint.clone(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move {
+        extenddb_server::start_server(listener, state, None, None)
+            .await
+            .unwrap();
+    });
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk_without_retries(&fixture)
+            .config()
+            .to_builder()
+            .endpoint_url(endpoint)
+            .build(),
+    );
+    assert_eq!(fixture.data.len(), 2);
+    // Reverse request order relative to the durable participant ordering. The
+    // third key is absent: a saved None image must still fill its result slot.
+    let mut keys = fixture
+        .data
+        .iter()
+        .rev()
+        .map(|(_, item)| item["id"].clone())
+        .collect::<Vec<_>>();
+    keys.push(AwsAttributeValue::S("fresh-read-missing".into()));
+    let read = sdk.transact_get_items().set_transact_items(Some(
+        keys.iter()
+            .map(|key| {
+                TransactGetItem::builder()
+                    .get(
+                        Get::builder()
+                            .table_name("Residency")
+                            .key("id", key.clone())
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+            })
+            .collect(),
+    ));
+    queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let result = read.clone().send().await.unwrap();
+    let query_count = queries.0.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("fresh signed two-Cell read used {query_count} coordinator queries");
+    let images = result.responses.unwrap();
+    assert_eq!(images.len(), 3);
+    for (image, (_, expected)) in images.iter().zip(fixture.data.iter().rev()) {
+        assert_eq!(image.item.as_ref(), Some(expected));
+    }
+    assert!(images[2].item.is_none());
+    // Completed read cleanup must leave no locks after owner restoration.
+    for (handle, _) in &fixture.data {
+        handle.drain().await.unwrap();
+    }
+    let id = table_id(&fixture, "Residency").await;
+    for range in ranges(&fixture, "Residency").await {
+        fixture
+            .provisioner
+            .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
+            .await
+            .unwrap();
+    }
+    for (index, key) in keys.iter().take(2).enumerate() {
+        sdk.put_item()
+            .table_name("Residency")
+            .item("id", key.clone())
+            .item("value", AwsAttributeValue::N(index.to_string()))
+            .send()
+            .await
+            .unwrap();
+    }
+    let restored = read.send().await.unwrap().responses.unwrap();
+    for (index, image) in restored.iter().take(2).enumerate() {
+        assert_eq!(
+            image.item.as_ref().unwrap()["value"],
+            AwsAttributeValue::N(index.to_string())
+        );
+    }
+    assert!(restored[2].item.is_none());
+    // Large BEGIN payloads retain durable participant discovery. These legal
+    // partition keys exceed the shortcut's 32 KiB bound in aggregate.
+    queries.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let large = sdk
+        .transact_get_items()
+        .set_transact_items(Some(
+            (0..40)
+                .map(|index| {
+                    TransactGetItem::builder()
+                        .get(
+                            Get::builder()
+                                .table_name("Residency")
+                                .key(
+                                    "id",
+                                    AwsAttributeValue::S(format!(
+                                        "wide-read-{index}-{}",
+                                        "x".repeat(1_000)
+                                    )),
+                                )
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                })
+                .collect(),
+        ))
+        .send()
+        .await
+        .unwrap()
+        .responses
+        .unwrap();
+    assert_eq!(large.len(), 40);
+    assert!(large.iter().all(|image| image.item.is_none()));
+    assert!(
+        queries.0.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "oversized BEGIN must retain durable discovery"
+    );
+    server.abort();
+    let _ = server.await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+    assert_eq!(
+        query_count, 3,
+        "acknowledged BEGIN removes participant rediscovery; canonical completion retains three status/discovery queries"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sdk_fresh_transaction_reuses_acknowledged_write_completion() {
     let queries = Arc::new(CoordinatorQueries::default());
     let fixture = Fixture::with_store_capacity_cache_router_and_telemetry(

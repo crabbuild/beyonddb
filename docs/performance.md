@@ -25,6 +25,26 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 
 [Single-Cell placement](scaling.md#choose-a-tables-cell-model) removes cross-Cell work from eligible transaction reads and reduces the number of write participants. It retains follower durability and tokenized write coordination. Reaching SQLite write latency requires further work on durable I/O, batching, and coordinator admission, plus measurements with declared durability settings. It is not an established property of the new placement option.
 
+### Avoid repeating acknowledged transaction work
+
+For a fresh read transaction involving only routed data Cells whose BEGIN payload fits 32 KiB, an acknowledged BEGIN fixes the participant list and its ordering. BeyondDB retains that list while the existing prepare, COMMIT, and resolution path completes. It then uses the retained list to assemble responses from saved participant images, avoiding one coordinator payload query per participant. Canonical completion status and unresolved-participant checks remain.
+
+```text
+Durable BEGIN -> prepare participants -> record receipts + COMMIT
+                                               |
+                                  resolve participants + record receipts
+                                               |
+                                  fetch saved participant images
+                                               |
+                                  durably acknowledge assembled images
+                                               |
+                                  release images + record cleanup receipts
+                                               |
+                                           SDK response
+```
+
+The [signed two-Cell regression](../benchmarks/2026-10-02-acknowledged-read-verification/README.md) measures **five coordinator queries before this change and three afterward**. It checks response order, absent items, owner restoration, and subsequent writes. Oversized BEGIN payloads and transactions involving the legacy account Cell still use durable participant discovery. Token replay, uncertain replies, and recovery retain authoritative coordinator reads. Participant commands, durable decisions, saved-image reads, and cleanup receipts remain required. An earlier broader shortcut failed mixed-participant recovery verification and remains excluded; its investigation is retained. Removing queries is a measured reduction in work; it does not establish an end-to-end throughput gain or SQLite parity.
+
 ## Latest release verification
 
 The [independent heartbeat release attempt](../benchmarks/2026-10-02-independent-heartbeat-release/README.md) measures committed source `e1f7664` with unchanged reviewed dependencies. All **72 cases run**. Single-Cell BeyondDB and SQLite complete their 24 cases with zero SDK errors; four-Cell BeyondDB records **72 errors across 16 cases**, loses its endpoint and exits fenced. **SQLite parity and runtime qualification remain unmet.**

@@ -24,6 +24,8 @@ pub(super) struct AdmittedTransaction {
     pub decision: CoordinatorDecision,
     pub participant_count: u8,
     pub replay: bool,
+    /// Exact bounded BEGIN payload, retained only for fresh read assembly.
+    pub acknowledged_read_participants: Option<Vec<CoordinatorParticipant>>,
 }
 
 impl CellStorage {
@@ -191,6 +193,17 @@ impl CellStorage {
             Ok(result) => match result.output.0 {
                 BeginCrossCellTransactionOutcome::Begun => {
                     if let Some(participants) = acknowledged_participants {
+                        let acknowledged_read_participants = participants
+                            .iter()
+                            .all(|participant| {
+                                matches!(
+                                    participant.target,
+                                    CoordinatorParticipantTarget::Data { .. }
+                                ) && participant.operations.iter().all(|operation| {
+                                    matches!(operation.operation, TransactionOperation::Read(_))
+                                })
+                            })
+                            .then(|| participants.clone());
                         let identity = ReadCrossCellTransactionInput {
                             account_id: account_id.into(),
                             transaction_id: proposed_id,
@@ -204,6 +217,7 @@ impl CellStorage {
                             decision: status.decision,
                             participant_count: status.participant_count,
                             replay: false,
+                            acknowledged_read_participants,
                         });
                     }
                     (proposed_id, CoordinatorDecision::Begin)
@@ -278,6 +292,7 @@ impl CellStorage {
             decision: status.decision,
             participant_count: status.participant_count,
             replay: prior == CoordinatorDecision::Commit,
+            acknowledged_read_participants: None,
         })
     }
 

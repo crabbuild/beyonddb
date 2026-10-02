@@ -55,24 +55,48 @@ impl CellStorage {
         let identity = admitted.identity;
         let coordinator = coordinator_target(account_id, &identity.routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
-        let participant_inputs =
-            (0..admitted.participant_count).map(|position| ReadCoordinatorParticipantInput {
-                account_id: account_id.into(),
-                transaction_id: identity.transaction_id,
-                routing_key: identity.routing_key.clone(),
-                position,
-                chunk: 0,
-            });
-        let participant_results = stream::iter(participant_inputs.map(|input| async {
-            let position = input.position;
-            (
-                position,
-                self.coordinator_participant(&coordinator, input).await,
-            )
-        }))
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
+        let participant_results = if let Some(participants) =
+            admitted.acknowledged_read_participants
+        {
+            if participants.len() != usize::from(admitted.participant_count) {
+                return Err(StorageError::Internal(
+                    "acknowledged read participant count differs".into(),
+                ));
+            }
+            // The acknowledged fresh BEGIN fixes this exact ordering. Reuse
+            // only routing/operation metadata; images still come from durable
+            // participant snapshots, never from live items or current routes.
+            participants
+                .into_iter()
+                .enumerate()
+                .map(|(position, participant)| {
+                    u8::try_from(position)
+                        .map(|position| (position, Ok(Some(participant))))
+                        .map_err(|_| {
+                            StorageError::Internal("invalid read participant position".into())
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let participant_inputs =
+                (0..admitted.participant_count).map(|position| ReadCoordinatorParticipantInput {
+                    account_id: account_id.into(),
+                    transaction_id: identity.transaction_id,
+                    routing_key: identity.routing_key.clone(),
+                    position,
+                    chunk: 0,
+                });
+            stream::iter(participant_inputs.map(|input| async {
+                let position = input.position;
+                (
+                    position,
+                    self.coordinator_participant(&coordinator, input).await,
+                )
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await
+        };
         let mut image_reads: HashMap<[u8; 32], Vec<_>> = HashMap::new();
         let mut participant_targets = Vec::with_capacity(participant_results.len());
         for (participant_position, result) in participant_results {
