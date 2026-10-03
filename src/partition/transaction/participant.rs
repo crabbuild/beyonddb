@@ -256,3 +256,16 @@ impl Query for ReadPartitionTransactionResult {
         crate::participant::read_result(context, input)
     }
 }
+
+/// Read a saved partition image without reserving the wide item reply budget.
+pub struct ReadPartitionTransactionResultBounded;
+impl Query for ReadPartitionTransactionResultBounded {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 20;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = crate::BoundedTransactionReadResult;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::bounded_read_result(context, input)
+    }
+}

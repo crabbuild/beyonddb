@@ -19,6 +19,7 @@ mod provisioning;
 mod rebalance;
 mod reclamation;
 mod recovery;
+mod saved_images;
 mod splits;
 mod statistics;
 mod table_class;

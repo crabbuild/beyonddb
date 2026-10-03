@@ -97,6 +97,30 @@ Durable BEGIN -> prepare participants -> record receipts + COMMIT
 
 The signed two-Cell regression measures **five coordinator queries before this change and three afterward**. It checks response order, absent items, owner restoration, and subsequent writes. Oversized BEGIN payloads and transactions involving the legacy account Cell still use durable participant discovery. Token replay, uncertain replies, and recovery retain authoritative coordinator reads. Participant commands, durable decisions, saved-image reads, and cleanup receipts remain required. An earlier broader shortcut failed mixed-participant recovery verification and remains excluded; its investigation is retained. Removing queries is a measured reduction in work; it does not establish an end-to-end throughput gain or SQLite parity.
 
+### Reserve small replies for saved transaction images
+
+Each saved-image query first uses a 64 KiB compact reply envelope. It reads the immutable image captured by the participant, using the original coordinator identity and item position. A missing live item is a valid absent image; an unavailable saved image is an error for a committed response.
+
+```text
+committed saved image -> compact query
+                             |
+                  +----------+-----------+
+                  |                      |
+              complete item         WideRequired
+                  |                      |
+                  |               existing wide query
+                  |               same saved identity
+                  +----------+-----------+
+                             |
+                      assemble response
+                             |
+                 durable acknowledgement + cleanup
+```
+
+A large image returns an explicit `WideRequired` marker, then uses the existing wide query. Errors do not trigger fallback. Items are never truncated, and the read does not substitute current live data. Wide fallback adds a query round trip. Reads remain serial within each participant so multiple large images do not reserve several wide replies together.
+
+This reduces reserved reply memory for small items. The HTTP peer receiver also retains its own request buffer, so total in-flight memory exceeds the 64 KiB reply alone. End-to-end throughput, large-item latency and SQLite parity require separate release measurements. Existing query opcodes and persisted transaction/image formats remain available; upgrades of roots created by older application releases still need separate qualification.
+
 ## Latest release verification
 
 ### Coalesced prepares: release qualification fails

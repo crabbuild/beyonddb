@@ -95,7 +95,7 @@ static COMMANDS: [OperationDescriptor; 29] = [
         ..no_return_operation(52)
     },
 ];
-static QUERIES: [OperationDescriptor; 18] = [
+static QUERIES: [OperationDescriptor; 19] = [
     operation(1),
     operation(2),
     operation(3),
@@ -117,6 +117,7 @@ static QUERIES: [OperationDescriptor; 18] = [
         codec_version: 3,
         ..operation(19)
     },
+    crate::participant::bounded_read_result_operation(20),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -243,7 +244,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_query::<ReadPartitionTransaction>()?;
         registry.bind_query::<crate::ReadPartitionIndexChange>()?;
         registry.bind_query::<crate::ReadPartitionIndexChangeChunk>()?;
-        registry.bind_query::<ReadPartitionTransactionResult>()
+        registry.bind_query::<ReadPartitionTransactionResult>()?;
+        registry.bind_query::<ReadPartitionTransactionResultBounded>()
     }
 }
 

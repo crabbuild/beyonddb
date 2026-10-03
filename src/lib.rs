@@ -33,9 +33,9 @@ pub use expression_wire::WireCondition;
 pub use global_index::*;
 pub use items::*;
 pub use participant::{
-    ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
-    ReadTransactionResultInput, ResolveTransactionInput, ResolveTransactionOutcome,
-    TransactionReadConflict, TransactionReadResult,
+    BoundedTransactionReadResult, ParticipantTransactionState, PrepareTransactionOutcome,
+    ReadTransactionInput, ReadTransactionResultInput, ResolveTransactionInput,
+    ResolveTransactionOutcome, TransactionReadConflict, TransactionReadResult,
 };
 pub use partition::*;
 pub use provision::*;
@@ -238,7 +238,7 @@ static COMMANDS: [OperationDescriptor; 35] = [
     coordinator_registration_operation(56),
     participant::bounded_prepare_operation(57),
 ];
-static QUERIES: [OperationDescriptor; 32] = [
+static QUERIES: [OperationDescriptor; 33] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -292,6 +292,7 @@ static QUERIES: [OperationDescriptor; 32] = [
         codec_version: 3,
         ..operation(54)
     },
+    participant::bounded_read_result_operation(56),
 ];
 
 /// Statically linked account application.
@@ -503,6 +504,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<QueryAccountItems>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
+        registry.bind_query::<ReadAccountTransactionResultBounded>()?;
         registry.bind_query::<DescribeTable>()?;
         registry.bind_query::<ListTables>()?;
         registry.bind_query::<DescribeTableById>()?;

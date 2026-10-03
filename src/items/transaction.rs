@@ -562,6 +562,19 @@ impl Query for ReadAccountTransactionResult {
     }
 }
 
+/// Read a saved account image without reserving the wide item reply budget.
+pub struct ReadAccountTransactionResultBounded;
+impl Query for ReadAccountTransactionResultBounded {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 56;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = crate::BoundedTransactionReadResult;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::bounded_read_result(context, input)
+    }
+}
+
 /// Release assembled read images while retaining the account's terminal decision.
 pub struct ReleaseAccountTransactionReads;
 impl Command for ReleaseAccountTransactionReads {
