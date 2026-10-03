@@ -28,6 +28,16 @@ Normal resolution / eligible recovery
 
 A controlled restored-owner regression holds background hydration open while five signed foreground reads run, including one after cache expiry. The earlier resolver performs five receiver authority reads; the active-owner path performs zero. A separate owner-reacquisition regression rejects reuse of a cached handle from an earlier epoch of the same incarnation. These checks prove reduced metadata work and correct cache invalidation. They do not establish an end-to-end throughput improvement or resolve the remaining write/transaction durability costs.
 
+## Recovery verification and owner placement
+
+A range can release residency and publish an Idle root while its former node is still alive. Later recovery may acquire that root on another node. Recovery checks therefore compare the retained Cell ID, incarnation, code, schema, owner epoch and published commit sequence, followed by signed SDK item reads. A fixed owner name alone does not establish durable recovery.
+
+A focused transaction regression installs discovery before coordinator registration, leaves one participant completion receipt unrecorded, and verifies that recovery preserves the exact live-owner fence. After the owner's lease expires, the serving worker must record both participant resolutions before signed SDK reads confirm the recovered values.
+
+Authentication also restores a cataloged credential shard after its owner expires. This uses the existing fenced takeover path and requires a published root and fresh lease evidence. The regression covers enabled and disabled peer caches, refusal to replace a live owner, and an unknown access key that creates neither a catalog entry nor authority.
+
+The reviewed Cellule EOF fix keeps observed object streams finished after completion. Both new regressions reproduce the original panic before the fix. With the updated pin, the original follower durability process test passes, including withheld object publication, owner process kill, recovery, and graceful shutdown. This closes that local failure; full fleet recovery and sustained performance still require qualification.
+
 ## Why writes and transactions cost more than SQLite
 
 The pinned ExtendDB SQLite backend uses WAL with `synchronous=NORMAL`. SQLite documents that this mode does not synchronize the WAL after every commit; `FULL` adds a synchronization for each commit. BeyondDB waits for object-store publication or a durable follower receipt before acknowledging a mutation. The benchmark therefore compares different durability paths. [SQLite durability reference](https://www.sqlite.org/pragma.html#pragma_synchronous)

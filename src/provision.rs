@@ -548,8 +548,21 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
     ) -> Result<CellHandle, StorageError> {
         let target = credential_target(access_key_id).map_err(provision_error)?;
-        let proof = self.cataloged(&target, crate::credentials::MODULE).await?;
-        self.takeover_expired(&target, proof, nodes, initialize_credentials)
+        self.takeover_expired_credential_cell(&target, nodes).await
+    }
+
+    pub(crate) async fn takeover_expired_credential_cell(
+        &self,
+        target: &CellTarget,
+        nodes: &NodeDirectory,
+    ) -> Result<CellHandle, StorageError> {
+        if target.namespace() != crate::credentials::NAMESPACE {
+            return Err(StorageError::Validation(
+                "invalid credential namespace".into(),
+            ));
+        }
+        let proof = self.cataloged(target, crate::credentials::MODULE).await?;
+        self.takeover_expired(target, proof, nodes, initialize_credentials)
             .await
     }
 

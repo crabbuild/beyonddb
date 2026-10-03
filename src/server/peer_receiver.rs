@@ -240,7 +240,8 @@ impl LocalCellResolver for LocalResolver {
                     .and_then(|control| control.value().owner.as_ref())
                     .map(|owner| owner.session);
                 let expired = if let Some(placement) = &resolver.placement
-                    && super::placement::is_placeable_target(&target)
+                    && (super::placement::is_placeable_target(&target)
+                        || target.namespace() == credentials::NAMESPACE)
                     && let Some(control) = &control
                     && control.value().root.is_some()
                     && matches!(
@@ -320,6 +321,22 @@ impl LocalCellResolver for LocalResolver {
                 }
                 let control = control.ok_or(Error::CellNotActive)?;
                 let resolved = async {
+                    if expired
+                        && target.namespace() == credentials::NAMESPACE
+                        && let Some(placement) = &resolver.placement
+                    {
+                        // Authentication can outlive the node hosting its key
+                        // shard. Restore only a cataloged published root; the
+                        // takeover rechecks and fences the exact expired lease.
+                        return provisioner
+                            .takeover_expired_credential_cell(&target, &placement.directory)
+                            .await
+                            .map(Some)
+                            .map_err(|source| Error::PeerTransport {
+                                context: "BeyondDB credential owner recovery",
+                                source: Box::new(source),
+                            });
+                    }
                     if needs_placement
                         && super::placement::is_placeable_target(&target)
                         && let Some(placement) = &resolver.placement
