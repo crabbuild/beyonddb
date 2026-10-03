@@ -1,3 +1,4 @@
+mod active_owners;
 mod cell_models;
 mod codec;
 mod coordinator_admission;

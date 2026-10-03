@@ -112,12 +112,12 @@ impl LocalCellResolver for LocalResolver {
                     if cached.expires_at > Instant::now()
                         && resolver
                             .runtime
-                            .resident_handle(&target, CatalogRole::Sql)
+                            .active_handle(&target, CatalogRole::Sql)
                             .await?
-                            .is_some_and(|resident| {
-                                resident.incarnation() == cached.handle.incarnation()
-                                    && resident.code() == cached.handle.code()
-                                    && resident.schema() == cached.handle.schema()
+                            .is_some_and(|active| {
+                                active.owner_fence() == cached.handle.owner_fence()
+                                    && active.code() == cached.handle.code()
+                                    && active.schema() == cached.handle.schema()
                             })
                     {
                         return Ok(Some(cached.handle));
@@ -173,12 +173,13 @@ impl LocalCellResolver for LocalResolver {
             if let Some(cache) = resolver.handle_cache.as_ref()
                 && let Some(local) = resolver
                     .runtime
-                    .resident_handle(&target, CatalogRole::Sql)
+                    .active_handle(&target, CatalogRole::Sql)
                     .await?
             {
                 // The actor owns this capability and still fences drain,
                 // incarnation, code and schema at dispatch. Cache expiry
-                // need not read object storage for a resident owner.
+                // need not read object storage for an active owner, including
+                // sparse owners while background hydration is still running.
                 cache.write().await.insert(
                     cell,
                     CachedHandle {

@@ -44,7 +44,7 @@ impl Remote {
         fixture: &Fixture,
         wrap: impl FnOnce(axum::Router) -> axum::Router,
     ) -> Self {
-        Self::with_router_identity(fixture, wrap, SessionId::from_bytes([96; 16]), 98).await
+        Self::with_router_identity(fixture, wrap, SessionId::from_bytes([96; 16]), 98, false).await
     }
 
     pub(super) async fn with_identity(
@@ -52,7 +52,18 @@ impl Remote {
         session: SessionId,
         node_byte: u8,
     ) -> Self {
-        Self::with_router_identity(fixture, std::convert::identity, session, node_byte).await
+        Self::with_router_identity(fixture, std::convert::identity, session, node_byte, false).await
+    }
+
+    pub(super) async fn with_cache(fixture: &Fixture) -> Self {
+        Self::with_router_identity(
+            fixture,
+            std::convert::identity,
+            SessionId::from_bytes([96; 16]),
+            98,
+            true,
+        )
+        .await
     }
 
     async fn with_router_identity(
@@ -60,6 +71,7 @@ impl Remote {
         wrap: impl FnOnce(axum::Router) -> axum::Router,
         session: SessionId,
         node_byte: u8,
+        peer_cache: bool,
     ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
@@ -103,7 +115,7 @@ impl Remote {
             .unwrap()
             .with_peers(peers.clone()),
         );
-        let router = wrap(peers.router(provisioner.clone()));
+        let router = wrap(peers.router_with_cache(provisioner.clone(), peer_cache));
         let tls = LoadedPeerTls::load(
             &fixture._files.path().join("remote.crt"),
             &fixture._files.path().join("remote.key"),

@@ -158,7 +158,19 @@ async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
         let fixture =
             Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, enabled).await;
         let remote = super::provisioning::Remote::new(&fixture).await;
-        let handle = &fixture.data[0].0;
+        let table = fixture
+            .client
+            .query::<DescribeTable>(
+                &account_target("123456789012").unwrap(),
+                None,
+                Json("Residency".into()),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        let mut handle = fixture.data[0].0.clone();
         let entry = handle.catalog().entry();
         let target = CellTarget::new(
             account_target("123456789012").unwrap().tenant(),
@@ -301,6 +313,28 @@ async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
                 .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
                 .await
                 .unwrap();
+        }
+        if enabled {
+            // Keep the receiver's cached handle while the same Cell closes and
+            // reopens. Matching code/schema/incarnation cannot validate an old
+            // owner epoch; the next signed invocation needs the new capability.
+            let before = handle.owner_fence();
+            let started = std::time::Instant::now();
+            handle.drain().await.unwrap();
+            handle = fixture
+                .provisioner
+                .admit_existing_partition("123456789012", &table.id, &[0; 16])
+                .await
+                .unwrap();
+            assert_eq!(handle.owner_fence().incarnation, before.incarnation);
+            assert!(handle.owner_fence().epoch > before.epoch);
+            let reacquired = send(true).await;
+            println!(
+                "cached owner epoch reacquired in {:?}: succeeded={}",
+                started.elapsed(),
+                matches!(reacquired, Ok(wire::peer_reply::Outcome::Read(_)))
+            );
+            assert!(matches!(reacquired, Ok(wire::peer_reply::Outcome::Read(_))));
         }
         handle.drain().await.unwrap();
         let drained = send(true).await;

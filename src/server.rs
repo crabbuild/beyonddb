@@ -226,7 +226,7 @@ impl BeyonddbPeers {
         self.router_with_cache(provisioner, false)
     }
 
-    /// Build the authenticated peer route with the opt-in 500 ms resident handle cache.
+    /// Build the authenticated peer route with the opt-in 500 ms active owner handle cache.
     ///
     /// Cell handles still fence drained owners; peer enrollment and request
     /// authorization are checked for every invocation.

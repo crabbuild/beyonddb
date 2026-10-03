@@ -4,6 +4,30 @@ BeyondDB does not yet have a qualified production throughput or latency target. 
 
 Benchmark reports, raw logs and fixture snapshots are kept locally and excluded from Git. The summaries below retain measured revisions and limitations; durable behavior is checked by the committed integration tests.
 
+## Active owner lookup during restore
+
+The local handle cache validates the exact owner fence, code and schema against Cellule's active-owner capability. Sparse and hydrating owners can serve foreground work while background hydration continues. An expired cache entry can be rebuilt from that capability without an authority read. A miss follows the normal catalog and fresh-authority path; it does not authorize acquisition. Peer enrollment and request authorization are still checked for every invocation.
+
+```text
+Signed peer request
+        │
+        ▼
+Enrollment + authorization
+        │
+        ▼
+Active owner lookup ── found ──► Check fence / code / schema ──► Dispatch
+        │                                                        │
+      absent                                           Actor admission rechecks
+        │                                              lease, drain and ownership
+        ▼
+Catalog + fresh authority
+        │
+        ▼
+Normal resolution / eligible recovery
+```
+
+A controlled restored-owner regression holds background hydration open while five signed foreground reads run, including one after cache expiry. The earlier resolver performs five receiver authority reads; the active-owner path performs zero. A separate owner-reacquisition regression rejects reuse of a cached handle from an earlier epoch of the same incarnation. These checks prove reduced metadata work and correct cache invalidation. They do not establish an end-to-end throughput improvement or resolve the remaining write/transaction durability costs.
+
 ## Why writes and transactions cost more than SQLite
 
 The pinned ExtendDB SQLite backend uses WAL with `synchronous=NORMAL`. SQLite documents that this mode does not synchronize the WAL after every commit; `FULL` adds a synchronization for each commit. BeyondDB waits for object-store publication or a durable follower receipt before acknowledging a mutation. The benchmark therefore compares different durability paths. [SQLite durability reference](https://www.sqlite.org/pragma.html#pragma_synchronous)
