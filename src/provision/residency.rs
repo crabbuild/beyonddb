@@ -164,7 +164,7 @@ impl CellInitialPartitionProvisioner {
         if self.runtime.stats().active_cells() < self.runtime.stats().active_cell_capacity() {
             return Ok(());
         }
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         // Placement samples the local pool before activation. Apply the same
         // reclamation policy here so a full pool cannot hide a restorable root.
         self.reclaim_settled_capacity(target).await
@@ -250,7 +250,7 @@ impl CellInitialPartitionProvisioner {
         {
             return Ok(None);
         }
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority
             .load(target.cell_id())
@@ -356,7 +356,7 @@ impl CellInitialPartitionProvisioner {
             // Gather local state before metadata reads can restore owners and
             // release ranges. Admission excludes competing product reclamation;
             // remote discovery below must run without this recursive gate.
-            let _admission = self.admission.lock().await;
+            let _admission = self.admission.write().await;
             let stats = self.runtime.stats();
             if stats.active_cells() < stats.active_cell_capacity() {
                 return Ok(());
@@ -532,7 +532,7 @@ impl CellInitialPartitionProvisioner {
         };
         // Metadata lookup may itself restore an idle account. Hold the local
         // admission gate only for release, avoiding recursive admission waits.
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         let stats = self.runtime.stats();
         if stats.active_cells() < stats.active_cell_capacity() {
             return Ok(());

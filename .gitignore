@@ -4,3 +4,6 @@
 !.env.example
 *.log
 __pycache__/
+
+# Local benchmark reports, logs and fixtures.
+/benchmarks/

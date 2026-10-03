@@ -63,15 +63,33 @@ Driver or recovery worker: idempotent participant resolution
 
 | After prepare | Durable action | Caller-visible result |
 | --- | --- | --- |
-| Every participant prepared | Coordinator changes `BEGIN` to `COMMIT`. | Success follows durable apply and a resolution receipt from every participant. |
+| Every participant prepared | One coordinator command records prepare receipts and changes `BEGIN` to `COMMIT`. | Success follows durable apply and a resolution receipt from every participant. |
 | A condition definitively fails while still in `BEGIN` | Coordinator changes `BEGIN` to `ABORT`. | Return the ordered cancellation result after abort resolution. |
 | A reply or caller times out | Read the coordinator decision and participant state during retry or recovery. | The timeout alone does not establish `COMMIT` or `ABORT`. |
 
 `COMMIT` and `ABORT` are immutable. A participant that has not yet applied a
 durable `COMMIT` remains locked until resolution.
 
-Two keys in the same Cell share one prepare and one resolution. The public
-adapter uses this protocol even when every key belongs to one Cell.
+The normal successful path uses `CommitPreparedTransaction` to publish the
+prepare receipts and COMMIT together. It still verifies that every participant
+has durable prepare evidence; an incomplete or mismatched receipt set cannot
+commit. Existing phase commands remain available for recovery and older driver
+paths. A lost response requires reading the authoritative decision before
+resolving participants. The [driver regression](../tests/elastic_cells/transaction_driver.rs)
+and [commit assertions](../tests/elastic_cells/transaction_commit.rs) cover
+partial/wrong receipts, one coordinator commit, replay, coordinator restoration,
+competing drivers, and lost replies.
+
+### One Cell and multiple Cell requests
+
+A table created with `beyonddb:cell-model=single` keeps its base items in one dedicated Cell. Small transaction reads whose operations all resolve to that Cell use one atomic query. Cross-table requests and reads requiring saved images can still need coordination. GSIs remain asynchronous and separate.
+
+Two write keys in the same Cell share one prepare and one resolution. Without a
+client token, a write whose operations all route to one Cell uses one atomic
+local command. Requests with a client token retain the durable coordinator. A
+single-Cell `TransactGetItems` instead uses one atomic Cell query with a compact
+internal response; outputs that exceed its envelope use the durable saved-image
+fallback.
 
 ### Atomicity includes what concurrent readers can observe
 
@@ -82,7 +100,7 @@ return a retryable error. It must not return B's old image. The lock check and
 item read occur inside one Cell query, including when the item does not yet
 exist. The coordinator's durable COMMIT is the logical write serialization point.
 
-`TransactGetItems` prepares shared locks and immutable read images in every
+Cross-Cell `TransactGetItems` prepares shared locks and immutable read images in every
 participant. Once the last shared prepare succeeds, all captured keys remain
 locked and those images coexist; this supplies its serialization point. Read
 resolution releases locks but preserves the saved images for response assembly.
@@ -146,7 +164,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Safety qualification | Deterministic failure tests cover selected schedules | Exercise concurrent transfers, conditional write skew, read transactions, owner replacement, and lost replies with a recorded-history checker. Check conservation, serializability, and no duplicate effects at every injected phase cut. |
 | Bounded history | Completed decisions, participant markers, and committed read images are retained | Design an acknowledged retirement boundary that rejects late phase messages before deleting tombstones; include split/backup pins and outstanding read fetches. Ten-minute client token expiry alone cannot authorize deletion. Prove storage reaches a steady state under a soak workload. |
 | Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages before index/journal claims and payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
-| Latency | Sequential prepare; up to four terminal resolutions in flight per call; at least `5P + 3` durable commands for single-chunk inputs | Measure publication and RPC time by participant count. Evaluate prepare parallelism and batched coordinator progress with renewed crash/concurrency proof before changing those phases. |
+| Latency | Up to eight prepares and four terminal resolutions overlap. Prepare receipts and COMMIT share one coordinator command; provisioning, payload uploads, resolution receipts, and read-result cleanup add work. | Measure cold admission separately from warm phase execution, by participant count. The combined decision removes one publication; end-to-end SQLite parity still requires measurement and further work. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
 | Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
 | API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; committed writes append stream records locally. Non-ALL LSIs, online GSI lifecycle, Streams policy transitions, and aggregate evaluated Update-size semantics remain incomplete or unqualified. | Complete the engine read contract, index lifecycle, and Streams qualification; compare size and error semantics with AWS before claiming compatibility. |
@@ -204,14 +222,63 @@ finish a terminal decision across account and data Cell participants, using part
 state after an ambiguous reply and recording each resolution durably.
 
 A transaction driver can also resume a published `BEGIN`: it reads the
-immutable participant payloads, prepares in Cell order, records receipts,
+immutable participant payloads, prepares with bounded concurrency, records receipts,
 publishes one decision, and finishes resolution before returning that decision.
+
+For small transactions, one coordinator query observes the durable status and
+all unprepared participant payloads together. This replaces separate status,
+participant-list and payload requests. It accepts at most 32 KiB of saved
+payload bytes and keeps the complete encoded reply within 64 KiB. Large or
+multi-chunk inputs use the existing chunk protocol. Prepared participants need
+no payload reload; terminal decisions return status only.
+
+```text
+Coordinator query: status + small immutable payloads
+                       |
+                       v
+Participant prepares (up to eight concurrently)
+                       |
+                       v
+Durable prepare evidence + COMMIT
+                       |
+                       v
+Participant resolution + final coordinator status
+```
+
+The combined query changes preparation discovery only. It retains published
+BEGIN, immutable targets, idempotent participant commands, durable decision and
+resolution checks. The compiled coordinator code and query contract include
+this operation; peers must use the matching compiled release. Stored schemas
+and payload formats are unchanged.
 
 Concurrent resumes and lost prepare/decision replies use durable state as the
 authority. Definitive condition, lock, or routing failures request an abort;
 an already-published terminal decision wins. Transport uncertainty leaves
 recoverable work and never becomes cancellation. Shard admission now registers a fixed shard number in the account Cell before it
 returns to a caller.
+
+Fresh coordinator Cells can bootstrap concurrently when residency has spare
+slots. A fixed set of 64 local gates serializes the same Cell; collisions can
+also delay independent Cells. Each bootstrap holds shared admission and a
+pending-slot reservation until Cellule accounts for activation or the caller
+finishes. Cellule's active-slot count includes in-flight activations, so a
+cancelled caller does not make a still-running activation disappear from
+capacity accounting. Published-owner restore, transfer, and reclamation retain
+exclusive admission. If no spare slot can be reserved, the caller takes that
+exclusive path before claiming authority.
+
+```text
+Coordinator A: reserve -> authority CAS -> bootstrap + publish -> register A -> BEGIN A
+Coordinator B: reserve -> authority CAS -> bootstrap + publish -> register B -> BEGIN B
+               shared bounded slot accounting; independent requests can overlap
+```
+
+Each request waits for its own published coordinator root and durable account
+registration before BEGIN. Concurrency does not change lease fences, authority
+CAS, initial publication, participant prepare, or coordinator decision rules.
+The [SDK regression](../tests/peer_network/residency/coordinator_admission.rs)
+checks overlapping distinct Cells, serialized token replay, last-slot admission,
+cancellation, durable registration, and restoration.
 
 On startup, the server pages that account-owned registry,
 recovers idle shards and shards whose owner lease expired, including when the
@@ -932,6 +999,16 @@ after fenced recovery resolves every abort.
 SQL query plans use the token and transaction-ID indexes rather than scanning
 coordinator history.
 
+### Repeated admission of resident coordinators
+
+After durable registration, the provisioner retains a bounded in-memory receipt.
+It skips repeated registration and authority lookups only while the account and
+coordinator are both resident with the same incarnations and compiled code/schema.
+A registration learned through a query must be covered by the published account
+root before it can populate this cache. Drain, remote ownership, a missing receipt,
+or a new provisioner uses canonical admission. The shortcut does not change
+BEGIN, durable decisions, participant resolution, or dispatch fencing.
+
 ## Serving-time recovery
 
 `CellInitialPartitionProvisioner::install_transaction_recovery_loop` installs
@@ -945,6 +1022,11 @@ from one configured account. Accounts rotate even after failed lookups; each
 account's cursor advances before owner activation and wraps to find later
 registrations. Live remote owners stay in place. Idle or expired owners use the
 same catalog validation, node fencing, and Cell authority CAS as startup.
+
+Discovery first restores the account Cell that stores the shard registry if its
+owner is Idle or expired. Otherwise, losing that owner would prevent the worker
+from learning which new coordinator shards need recovery. A live account owner
+continues to serve the registry query; takeover still requires the normal fence.
 
 A cached empty-work receipt skips an Idle shard only when its incarnation and
 published commit sequence match. Unknown or changed roots must be inspected;

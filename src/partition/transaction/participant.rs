@@ -52,88 +52,115 @@ impl Command for PreparePartitionTransaction {
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let input = crate::transaction_transport::consume::<Self>(context, input)?;
-        let digest = blake3::hash(&serde_json::to_vec(&input)?);
-        if let Some(outcome) = crate::participant::prepared(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-        )? {
-            return Ok(prepare_rejected(outcome));
+        prepare_partition(context, input)
+    }
+}
+
+/// Prepare an inline participant with a bounded reply reservation.
+/// A durable WideRequired rejection permits retry through the wide command.
+pub struct PreparePartitionTransactionBounded;
+
+impl Command for PreparePartitionTransactionBounded {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 28;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PreparePartitionTransactionInput>;
+    type Output = Json<PrepareTransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let result = prepare_partition(context, input)?;
+        crate::participant::bound_prepare_result(result)
+    }
+}
+
+pub(super) fn prepare_partition(
+    context: &mut CommandContext<'_, '_>,
+    input: PreparePartitionTransactionInput,
+) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {
+    let digest = blake3::hash(&serde_json::to_vec(&input)?);
+    if let Some(outcome) = crate::participant::prepared(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+    )? {
+        return Ok(prepare_rejected(outcome));
+    }
+    let Some(spec) = super::super::indexes::command_spec(context)? else {
+        return Ok(prepare_rejected(PrepareTransactionOutcome::NotInstalled));
+    };
+    if spec.table.id != input.table_id || spec.epoch != input.epoch {
+        return Ok(prepare_rejected(PrepareTransactionOutcome::StaleRoute));
+    }
+    match command_access(context)? {
+        AccessState::Serving => {}
+        AccessState::Sealed => {
+            return Ok(prepare_rejected(PrepareTransactionOutcome::Sealed));
         }
-        let Some(spec) = super::super::indexes::command_spec(context)? else {
-            return Ok(prepare_rejected(PrepareTransactionOutcome::NotInstalled));
-        };
-        if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(prepare_rejected(PrepareTransactionOutcome::StaleRoute));
+        AccessState::Importing => {
+            return Ok(prepare_rejected(PrepareTransactionOutcome::NotReady));
         }
-        match command_access(context)? {
-            AccessState::Serving => {}
-            AccessState::Sealed => {
-                return Ok(prepare_rejected(PrepareTransactionOutcome::Sealed));
-            }
-            AccessState::Importing => {
-                return Ok(prepare_rejected(PrepareTransactionOutcome::NotReady));
-            }
-        }
-        if input.operations.is_empty() || input.operations.len() > 100 {
-            return Ok(prepare_validation(
-                0,
-                "transaction operation count is outside 1..=100",
-            ));
-        }
-        let staged = match stage_operations(context, &spec, input.operations)? {
-            Ok(staged) => staged,
-            Err(reason) => return Ok(prepare_rejected(reason.prepare_outcome())),
-        };
-        let prepared = PreparedPartition {
-            table_id: input.table_id,
-            epoch: input.epoch,
-            images: staged,
-        };
-        crate::participant::record_prepare(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-            crate::participant::PreparedPayload {
-                bytes: serde_json::to_vec(&prepared)?,
-                operations: prepared.images.len(),
-                index_edits: prepared
-                    .images
-                    .iter()
-                    .map(|image| image.index_capacity.edits)
-                    .sum(),
-                index_overflow_bytes: prepared
-                    .images
-                    .iter()
-                    .map(|image| image.index_capacity.overflow_bytes)
-                    .sum(),
-            },
-            &input.coordinator_key,
-            prepared
+    }
+    if input.operations.is_empty() || input.operations.len() > 100 {
+        return Ok(prepare_validation(
+            0,
+            "transaction operation count is outside 1..=100",
+        ));
+    }
+    let staged = match stage_operations(context, &spec, input.operations)? {
+        Ok(staged) => staged,
+        Err(reason) => return Ok(prepare_rejected(reason.prepare_outcome())),
+    };
+    let prepared = PreparedPartition {
+        table_id: input.table_id,
+        epoch: input.epoch,
+        images: staged,
+    };
+    crate::participant::record_prepare(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+        crate::participant::PreparedPayload {
+            bytes: serde_json::to_vec(&prepared)?,
+            operations: prepared.images.len(),
+            index_edits: prepared
                 .images
                 .iter()
-                .filter(|image| image.effect == StagedEffect::Read)
-                .map(|image| image.image.as_ref()),
-        )?;
-        for image in prepared.images {
-            context.sql(&statement(
-                "INSERT OR IGNORE INTO ddb_partition_transaction_locks \
-                 (item_key, partition_key, sort_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4, ?5)",
-                vec![
-                    SqlValue::Blob(image.key),
-                    SqlValue::Blob(image.partition_key),
-                    SqlValue::Blob(image.sort_key),
-                    SqlValue::Blob(input.transaction_id.to_vec()),
-                    SqlValue::Integer(i64::from(image.effect != StagedEffect::Read)),
-                ],
-            ))?;
-        }
-        Ok(CommandResult::Success(Json(
-            PrepareTransactionOutcome::Prepared,
-        )))
+                .map(|image| image.index_capacity.edits)
+                .sum(),
+            index_overflow_bytes: prepared
+                .images
+                .iter()
+                .map(|image| image.index_capacity.overflow_bytes)
+                .sum(),
+        },
+        &input.coordinator_key,
+        prepared
+            .images
+            .iter()
+            .filter(|image| image.effect == StagedEffect::Read)
+            .map(|image| image.image.as_ref()),
+    )?;
+    for image in prepared.images {
+        context.sql(&statement(
+            "INSERT OR IGNORE INTO ddb_partition_transaction_locks \
+             (item_key, partition_key, sort_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4, ?5)",
+            vec![
+                SqlValue::Blob(image.key),
+                SqlValue::Blob(image.partition_key),
+                SqlValue::Blob(image.sort_key),
+                SqlValue::Blob(input.transaction_id.to_vec()),
+                SqlValue::Integer(i64::from(image.effect != StagedEffect::Read)),
+            ],
+        ))?;
     }
+    Ok(CommandResult::Success(Json(
+        PrepareTransactionOutcome::Prepared,
+    )))
 }
 
 fn prepare_rejected(
@@ -227,5 +254,18 @@ impl Query for ReadPartitionTransactionResult {
     type Output = Json<crate::TransactionReadResult>;
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         crate::participant::read_result(context, input)
+    }
+}
+
+/// Read a saved partition image without reserving the wide item reply budget.
+pub struct ReadPartitionTransactionResultBounded;
+impl Query for ReadPartitionTransactionResultBounded {
+    const MODULE: &'static str = DATA_MODULE;
+    const ID: u32 = 20;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = crate::BoundedTransactionReadResult;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::bounded_read_result(context, input)
     }
 }

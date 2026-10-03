@@ -9,6 +9,47 @@ use crate::{
     TableRecord, TableRoute, account_target,
 };
 
+pub(super) const CELL_MODEL_TAG: &str = "beyonddb:cell-model";
+
+/// Interpret the opt-in creation tag at the protocol/backend boundary.
+pub(super) fn placement(
+    configured_partitions: Option<u16>,
+    tags: &[extenddb_core::types::Tag],
+) -> Result<crate::TablePlacement, StorageError> {
+    let mut models = tags.iter().filter(|tag| tag.key == CELL_MODEL_TAG);
+    let Some(model) = models.next() else {
+        return Ok(
+            configured_partitions.map_or(crate::TablePlacement::Account, |count| {
+                crate::TablePlacement::Routed {
+                    initial_partitions: count,
+                }
+            }),
+        );
+    };
+    if models.next().is_some() {
+        return Err(StorageError::Validation(
+            "duplicate beyonddb:cell-model tag".into(),
+        ));
+    }
+    let Some(count) = configured_partitions else {
+        return Err(StorageError::Validation(
+            "cell model selection requires data Cell provisioning".into(),
+        ));
+    };
+    match model.value.as_str() {
+        "single" => Ok(crate::TablePlacement::Single),
+        "auto" => Ok(crate::TablePlacement::Routed {
+            initial_partitions: 1,
+        }),
+        "partitioned" => Ok(crate::TablePlacement::Routed {
+            initial_partitions: count.max(2),
+        }),
+        _ => Err(StorageError::Validation(
+            "beyonddb:cell-model must be single, auto, or partitioned".into(),
+        )),
+    }
+}
+
 pub(crate) async fn publish_initial_routes(
     provisioner: &dyn InitialPartitionProvisioner,
     client: &CellClient,

@@ -55,6 +55,10 @@ partition-key ranges. A GSI is maintained asynchronously from a journal
 committed with the base item. Cross-Cell transactions use a durable
 coordinator decision and idempotent participant resolution.
 
+### Choose placement per table
+
+Set the `CreateTable` tag `beyonddb:cell-model` to `single`, `auto`, or `partitioned`. Keep one base data Cell for a table that fits its resource budgets, start at one and permit growth, or provision multiple ranges immediately. Omitting the tag preserves `initial_partitions`. GSIs use separate Cells; changing the tag later does not migrate the table. Live model conversion is not implemented. See [Cell model selection](docs/scaling.md#choose-a-tables-cell-model) and the [AWS CLI example](docs/user-guide.md#create-a-table-and-wait-for-it).
+
 ### When a write becomes durable
 
 ![Sequence of a signed PutItem: ExtendDB validates, BeyondDB routes, Cellule commits and publishes LTX, then the response returns](diagram/beyonddb-architecture/durable-write.svg)
@@ -64,11 +68,13 @@ stream intent commit in one Cell command. The successful response follows
 durable publication. [PNG version](diagram/beyonddb-architecture/durable-write@2x.png) ·
 [Detailed architecture and recovery design](docs/architecture.md)
 
-The serving binary currently waits for object-store publication on each
-durable write. Cellule's follower-log mode is not enabled in BeyondDB. An
-opt-in persistent follower store and authenticated peer transport exist, but
-the durability provider is not installed in serving and successor recovery
-is unfinished. See the [follower durability design](docs/follower-durability.md).
+The default serving path waits for object-store publication on each durable
+write. Experimental `follower_durability_enabled` installs Cellule's node-log
+provider and can acknowledge after every enrolled follower fsyncs the commit.
+A three-process signed SDK test verifies item mutations, same-partition
+transaction replay, and stream records after an owner kill with object uploads
+withheld. Broader fault and performance qualification remains open. See the
+[follower durability guide](docs/follower-durability.md).
 
 ## Current capability boundary
 

@@ -2,12 +2,12 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use cellule_runtime::node::{NodeAdvertisement, NodeDirectory, VersionedNodeAdvertisement};
 use cellule_runtime::{Error, NodeLeaseGuard, Result};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 // Use the runtime's maximum advertisement lifetime for storage refresh headroom.
@@ -18,6 +18,50 @@ const RETRY: Duration = Duration::from_millis(500);
 const FENCE_MARGIN: Duration = Duration::from_secs(1);
 
 type SignAdvertisement = dyn Fn(i64, i64) -> Result<NodeAdvertisement> + Send + Sync;
+
+#[derive(Clone, Copy)]
+struct RenewalProgress {
+    phase: &'static str,
+    started: Instant,
+}
+
+fn renewal_phase(progress: &watch::Sender<RenewalProgress>, phase: &'static str) {
+    progress.send_replace(RenewalProgress {
+        phase,
+        started: Instant::now(),
+    });
+}
+
+/// Latest completed canonical observation of this publisher's own boot session.
+///
+/// This is an ETag hint for a conditional write, never a liveness or authority
+/// cache. No provider I/O holds the watch lock. Late responses cannot replace a
+/// newer generation; unseen changes still require the directory's CAS rebase.
+#[derive(Clone)]
+pub(super) struct SessionObservation(watch::Sender<VersionedNodeAdvertisement>);
+
+impl SessionObservation {
+    fn new(observed: VersionedNodeAdvertisement) -> Self {
+        Self(watch::channel(observed).0)
+    }
+
+    fn latest(&self) -> VersionedNodeAdvertisement {
+        self.0.borrow().clone()
+    }
+
+    pub(super) fn record(&self, observed: &VersionedNodeAdvertisement) {
+        self.0.send_if_modified(|current| {
+            if observed.advertisement().session() == current.advertisement().session()
+                && observed.advertisement().generation() > current.advertisement().generation()
+            {
+                current.clone_from(observed);
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
 
 /// Publishes signed node advertisements into the authoritative object-store directory.
 pub struct NodeLeasePublisher {
@@ -44,7 +88,7 @@ impl NodeLeasePublisher {
     /// Publish the initial lease before installing it in a Cell node.
     pub async fn publish(self) -> Result<PublishedNodeLease> {
         let now_ms = unix_time_ms()?;
-        let advertisement = self.advertisement(now_ms).await?;
+        let advertisement = self.advertisement(now_ms, None).await?;
         let observed = self.directory.create(advertisement, now_ms).await?;
         // Object-store publication can take time; lease the remaining
         // authoritative window, not a fresh window after the response.
@@ -52,23 +96,34 @@ impl NodeLeasePublisher {
         Ok(PublishedNodeLease {
             publisher: self,
             session: observed.advertisement().session(),
-            observed: Arc::new(Mutex::new(observed)),
+            observed: SessionObservation::new(observed),
+            log_transitions: Arc::new(Mutex::new(())),
             guard,
             fence_on_drop: true,
         })
     }
 
-    async fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
+    async fn advertisement(
+        &self,
+        now_ms: i64,
+        progress: Option<&watch::Sender<RenewalProgress>>,
+    ) -> Result<NodeAdvertisement> {
         let expires = lease_expiry(now_ms)?;
         let sign = Arc::clone(&self.sign);
+        let progress = progress.cloned();
         // Only one sample is in flight per publisher. Its timestamp precedes
         // dispatch, so queue/probe latency cannot extend the signed lease.
-        tokio::task::spawn_blocking(move || sign(now_ms, expires))
-            .await
-            .map_err(|source| Error::Facility {
-                name: "node-capacity-signing",
-                source: Box::new(source),
-            })?
+        tokio::task::spawn_blocking(move || {
+            if let Some(progress) = &progress {
+                renewal_phase(progress, "capacity-signing");
+            }
+            sign(now_ms, expires)
+        })
+        .await
+        .map_err(|source| Error::Facility {
+            name: "node-capacity-signing",
+            source: Box::new(source),
+        })?
     }
 }
 
@@ -76,7 +131,8 @@ impl NodeLeasePublisher {
 pub struct PublishedNodeLease {
     publisher: NodeLeasePublisher,
     session: cellule_runtime::identity::SessionId,
-    observed: Arc<Mutex<VersionedNodeAdvertisement>>,
+    observed: SessionObservation,
+    log_transitions: Arc<Mutex<()>>,
     guard: NodeLeaseGuard,
     fence_on_drop: bool,
 }
@@ -98,7 +154,8 @@ impl PublishedNodeLease {
             self.publisher.directory.clone(),
             self.session,
             self.guard.clone(),
-            Arc::clone(&self.observed),
+            Arc::clone(&self.log_transitions),
+            self.observed.clone(),
         )
     }
 
@@ -109,6 +166,10 @@ impl PublishedNodeLease {
     /// serving composition retires the session through `shutdown_serving_node`.
     pub async fn run(mut self, cancellation: &CancellationToken) -> Result<()> {
         let guard = self.guard.clone();
+        let (progress, observed_progress) = watch::channel(RenewalProgress {
+            phase: "heartbeat-timer",
+            started: Instant::now(),
+        });
         // A storage request can outlive the lease or shutdown. Dropping its
         // future cannot revoke a remote CAS, but must never renew this guard.
         tokio::select! {
@@ -116,51 +177,77 @@ impl PublishedNodeLease {
                 self.fence_on_drop = false;
                 Ok(())
             },
-            () = guard.wait_fenced() => Err(Error::Fenced),
-            result = self.renew() => result,
+            () = guard.wait_fenced() => {
+                let observed = *observed_progress.borrow();
+                tracing::warn!(
+                    diagnostic = "node-lease-renewal-phase",
+                    session = ?self.session,
+                    phase = observed.phase,
+                    phase_elapsed_ms = observed.started.elapsed().as_secs_f64() * 1000.0,
+                    "serving node lease fenced while waiting for renewal",
+                );
+                Err(Error::Fenced)
+            },
+            result = self.renew(&progress) => result,
         }
     }
 
-    async fn renew(&mut self) -> Result<()> {
+    async fn renew(&mut self, progress: &watch::Sender<RenewalProgress>) -> Result<()> {
         let mut ticks = tokio::time::interval(HEARTBEAT);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticks.tick().await;
         loop {
+            renewal_phase(progress, "heartbeat-timer");
             ticks.tick().await;
             loop {
-                match self.refresh().await {
+                match self.refresh(progress).await {
                     Ok(()) => break,
-                    Err(error) if self.guard.remaining() > FENCE_MARGIN => {
-                        tokio::time::sleep(RETRY).await;
-                        self.guard.check()?;
-                        if self.guard.remaining() <= FENCE_MARGIN {
+                    Err(error) => {
+                        let observed = *progress.borrow();
+                        tracing::warn!(
+                            diagnostic = "node-lease-renewal-phase",
+                            session = ?self.session,
+                            phase = observed.phase,
+                            phase_elapsed_ms = observed.started.elapsed().as_secs_f64() * 1000.0,
+                            lease_remaining_ms = self.guard.remaining().as_secs_f64() * 1000.0,
+                            error = %error,
+                            "serving node lease refresh failed",
+                        );
+                        if self.guard.remaining() > FENCE_MARGIN {
+                            renewal_phase(progress, "retry-delay");
+                            tokio::time::sleep(RETRY).await;
+                            self.guard.check()?;
+                            if self.guard.remaining() <= FENCE_MARGIN {
+                                self.guard.fence();
+                                return Err(error);
+                            }
+                        } else {
                             self.guard.fence();
                             return Err(error);
                         }
-                    }
-                    Err(error) => {
-                        self.guard.fence();
-                        return Err(error);
                     }
                 }
             }
         }
     }
 
-    async fn refresh(&mut self) -> Result<()> {
+    async fn refresh(&mut self, progress: &watch::Sender<RenewalProgress>) -> Result<()> {
         self.guard.check()?;
         let now_ms = unix_time_ms()?;
-        let next = self.publisher.advertisement(now_ms).await?;
-        let mut observed = self.observed.lock().await;
+        renewal_phase(progress, "capacity-queue");
+        let next = self.publisher.advertisement(now_ms, Some(progress)).await?;
         self.guard.check()?;
+        renewal_phase(progress, "directory-refresh");
+        let observed = self.observed.latest();
         let renewed = self
             .publisher
             .directory
             .refresh(&observed, next, now_ms)
             .await?;
+        renewal_phase(progress, "guard-renewal");
         self.guard
             .renew(unix_time_ms()?, renewed.advertisement().expires_at_ms())?;
-        *observed = renewed;
+        self.observed.record(&renewed);
         Ok(())
     }
 }

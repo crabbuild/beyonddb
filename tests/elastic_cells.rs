@@ -50,12 +50,15 @@ mod elastic_cells {
     mod read_release;
     mod read_resolution;
     mod recovery_admission;
+    mod table_key_cache;
     mod table_residency;
     mod transaction_capacity;
+    mod transaction_commit;
     mod transaction_driver;
     mod transaction_reads;
     mod transaction_recovery;
     mod transaction_resolution;
+    mod transaction_resume;
     mod transaction_transport;
     pub(crate) mod transaction_visibility;
     mod transaction_write_skew;

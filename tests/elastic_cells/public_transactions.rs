@@ -19,36 +19,98 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         registry.release_digest(),
         SigningKey::from_bytes(&[221; 32]),
     );
-    let lost = Arc::new(std::sync::atomic::AtomicU8::new(0));
-    let transport = DropPhaseReplies {
-        verifier: Arc::new(PeerVerifier::new(
-            session,
-            registry.release_digest(),
-            signer.verifying_key(),
-        )),
-        dispatcher: Arc::new(PeerDispatcher::new(
+    let signer = Arc::new(signer);
+    let verifier = Arc::new(PeerVerifier::new(
+        session,
+        registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        registry.clone(),
+        Arc::new(LocalRuntimePeerResolver {
+            runtime: owner.runtime(),
+            layout: layout.clone(),
+        }),
+        Arc::new(TestPeerAuthorizer),
+    ));
+    let phase_client = |enabled, lost| {
+        CellClient::runtime_with_peer(
             registry.clone(),
-            Arc::new(LocalRuntimePeerResolver {
-                runtime: owner.runtime(),
-                layout: layout.clone(),
+            runtime.clone(),
+            layout.clone(),
+            signer.clone(),
+            PeerPrincipal {
+                issuer: "admission-test".into(),
+                subject: "admission".into(),
+                actions: vec!["beyonddb.cell.invoke".into()],
+            },
+            Arc::new(DropPhaseReplies {
+                verifier: verifier.clone(),
+                dispatcher: dispatcher.clone(),
+                lost,
+                enabled,
             }),
-            Arc::new(TestPeerAuthorizer),
-        )),
-        lost: lost.clone(),
-        enabled: 127,
+        )
     };
-    let client = CellClient::runtime_with_peer(
-        registry,
-        runtime.clone(),
-        layout,
-        Arc::new(signer),
-        PeerPrincipal {
-            issuer: "admission-test".into(),
-            subject: "admission".into(),
-            actions: vec!["beyonddb.cell.invoke".into()],
-        },
-        Arc::new(transport),
-    );
+    // Drop only completion replies so BEGIN and COMMIT are acknowledged and
+    // the fresh-write shortcut is exercised. A missing participant reply can
+    // be recovered by observing its durable state; a missing coordinator
+    // receipt must leave the first call uncertain until token replay.
+    for phase in [8, 128] {
+        let dropped = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let fresh = CellStorage::new(phase_client(phase, dropped.clone()), "us-east-1")
+            .with_transaction_coordinators(provisioner.clone());
+        let item = Item::from([
+            (
+                "id".into(),
+                AttributeValue::S(format!("fresh-completion-{phase}")),
+            ),
+            ("value".into(), AttributeValue::N("7".into())),
+        ]);
+        let maps = ExpressionMaps::default();
+        let ops = infos
+            .iter()
+            .map(|info| TransactWriteOp::Put {
+                key_info: info,
+                item: &item,
+                condition: None,
+                maps: &maps,
+                return_values_on_ccf: Default::default(),
+                stream: None,
+            })
+            .collect::<Vec<_>>();
+        let token_text = format!("fresh-completion-{phase}");
+        let token = || IdempotencyKey {
+            account_id: "123456789012",
+            token: &token_text,
+            fingerprint: "two-participant-write",
+        };
+        let result = fresh.transact_write_items(&ops, Some(token())).await;
+        if phase == 8 {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(StorageError::Transient(_))),
+                "lost coordinator receipt cannot prove completion: {result:?}"
+            );
+        }
+        assert_eq!(dropped.load(Ordering::SeqCst), phase);
+        assert!(matches!(
+            fresh.transact_write_items(&ops, Some(token())).await,
+            Err(StorageError::IdempotentReplay)
+        ));
+        for info in &infos {
+            assert_eq!(
+                fresh
+                    .get_item(info, &Item::from([("id".into(), item["id"].clone())]))
+                    .await
+                    .unwrap(),
+                Some(item.clone())
+            );
+        }
+    }
+    let lost = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let client = phase_client(127, lost.clone());
     // The adapter must keep transaction decisions and intent barriers on the
     // owner even when its caller supplies a snapshot-read capability.
     let storage = CellStorage::new(
@@ -200,6 +262,86 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
         &infos,
     )
     .await;
+    // Exercise bounded prepares for both legacy account and routed data
+    // participants. A small conditional request can return a much larger old
+    // image. Losing its bounded rejection must stay uncertain, not fall back.
+    for (index, info) in infos.iter().enumerate() {
+        let old_key = Item::from([(
+            "id".into(),
+            AttributeValue::S(format!("wide-failure-{index}")),
+        )]);
+        let mut old = old_key.clone();
+        old.insert("payload".into(), AttributeValue::S("\0".repeat(384 * 1024)));
+        storage
+            // Seed through the wide command. The legacy account no-return
+            // PutItem envelope is 1 MiB; JSON escaping expands this valid item.
+            .put_item(info, old.clone(), true, None, &maps, None)
+            .await
+            .unwrap();
+        let new = Item::from([(
+            "id".into(),
+            AttributeValue::S(format!("wide-rollback-{index}")),
+        )]);
+        let operations = [
+            TransactWriteOp::Put {
+                key_info: info,
+                item: &new,
+                condition: None,
+                maps: &maps,
+                return_values_on_ccf: Default::default(),
+                stream: None,
+            },
+            TransactWriteOp::Put {
+                key_info: info,
+                item: &old_key,
+                condition: Some(&not_exists),
+                maps: &maps,
+                return_values_on_ccf: ReturnValuesOnConditionCheckFailure::AllOld,
+                stream: None,
+            },
+        ];
+        let dropped = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let uncertain = CellStorage::new(phase_client(1, dropped.clone()), "us-east-1")
+            .with_transaction_coordinators(provisioner.clone());
+        let token_value = format!("wide-condition-{index}");
+        let token = || IdempotencyKey {
+            account_id: "123456789012",
+            token: &token_value,
+            fingerprint: "wide-failure-image",
+        };
+        assert!(matches!(
+            uncertain
+                .transact_write_items(&operations, Some(token()))
+                .await,
+            Err(StorageError::Transient(_))
+        ));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), None);
+        assert_eq!(
+            storage.get_item(info, &old_key).await.unwrap(),
+            Some(old.clone())
+        );
+        assert!(matches!(
+            uncertain.transact_write_items(&operations, Some(token())).await,
+            Err(StorageError::TransactionCanceled(reasons))
+                if reasons[1].code == "ConditionalCheckFailed" && reasons[1].item == Some(old.clone())
+        ));
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), None);
+        // No prepared locks remain after the rejected attempt and ABORT.
+        storage
+            .delete_item(info, &old_key, false, None, &maps, None)
+            .await
+            .unwrap();
+        uncertain
+            .transact_write_items(&operations, Some(token()))
+            .await
+            .unwrap();
+        assert_eq!(storage.get_item(info, &new).await.unwrap(), Some(new));
+        assert_eq!(
+            storage.get_item(info, &old_key).await.unwrap(),
+            Some(old_key)
+        );
+    }
     runtime.shutdown().await.unwrap();
 }
 

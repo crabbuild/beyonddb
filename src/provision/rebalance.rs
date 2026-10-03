@@ -178,7 +178,7 @@ impl CellInitialPartitionProvisioner {
             {
                 // Serialize release with local restore and reclamation. The actor
                 // rechecks generation and settled work against foreground races.
-                let _admission = self.admission.lock().await;
+                let _admission = self.admission.write().await;
                 if let Err(error) = self
                     .runtime
                     .release_idle_cell(intent.cell, self.session, intent.generation)

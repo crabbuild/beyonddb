@@ -8,6 +8,7 @@ mod directory;
 mod expression_wire;
 mod global_index;
 mod item_storage;
+mod item_wire;
 mod items;
 mod participant;
 mod partition;
@@ -32,17 +33,17 @@ pub use expression_wire::WireCondition;
 pub use global_index::*;
 pub use items::*;
 pub use participant::{
-    ParticipantTransactionState, PrepareTransactionOutcome, ReadTransactionInput,
-    ReadTransactionResultInput, ResolveTransactionInput, ResolveTransactionOutcome,
-    TransactionReadConflict, TransactionReadResult,
+    BoundedTransactionReadResult, ParticipantTransactionState, PrepareTransactionOutcome,
+    ReadTransactionInput, ReadTransactionResultInput, ResolveTransactionInput,
+    ResolveTransactionOutcome, TransactionReadConflict, TransactionReadResult,
 };
 pub use partition::*;
 pub use provision::*;
 pub use routing::*;
 pub use server::{
     BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PeerNodeDurabilityProvider,
-    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, build_http_state,
-    build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
+    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, RuntimeMetrics,
+    build_http_state, build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
     shutdown_serving_node,
 };
 pub use split::*;
@@ -139,6 +140,15 @@ const fn operation(id: u32) -> OperationDescriptor {
     }
 }
 
+const fn coordinator_registration_operation(id: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        // Only an account ID (at most 128 bytes) and shard numbers; no images.
+        input_limit: 4096,
+        output_limit: 4096,
+        ..operation(id)
+    }
+}
+
 const fn no_return_operation(id: u32) -> OperationDescriptor {
     OperationDescriptor {
         id,
@@ -172,7 +182,7 @@ const fn no_return_transaction_operation(id: u32) -> OperationDescriptor {
     }
 }
 
-static COMMANDS: [OperationDescriptor; 33] = [
+static COMMANDS: [OperationDescriptor; 35] = [
     operation(1),
     operation(2),
     operation(3),
@@ -190,7 +200,7 @@ static COMMANDS: [OperationDescriptor; 33] = [
     operation(17),
     operation(18),
     operation(19),
-    operation(20),
+    coordinator_registration_operation(20),
     operation(21),
     participant::phase_operation(22),
     crate::transaction_transport::upload_operation(23),
@@ -225,8 +235,10 @@ static COMMANDS: [OperationDescriptor; 33] = [
     operation(52),
     no_return_transaction_operation(53),
     no_return_operation(55),
+    coordinator_registration_operation(56),
+    participant::bounded_prepare_operation(57),
 ];
-static QUERIES: [OperationDescriptor; 32] = [
+static QUERIES: [OperationDescriptor; 33] = [
     operation(4),
     operation(7),
     OperationDescriptor {
@@ -251,7 +263,7 @@ static QUERIES: [OperationDescriptor; 32] = [
         ..operation(24)
     },
     participant::phase_operation(25),
-    operation(26),
+    coordinator_registration_operation(26),
     operation(27),
     operation(28),
     OperationDescriptor {
@@ -276,7 +288,11 @@ static QUERIES: [OperationDescriptor; 32] = [
     operation(47),
     operation(48),
     operation(49),
-    operation(54),
+    OperationDescriptor {
+        codec_version: 3,
+        ..operation(54)
+    },
+    participant::bounded_read_result_operation(56),
 ];
 
 /// Statically linked account application.
@@ -458,6 +474,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<TransactWriteNoReturn>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PrepareAccountTransaction>>()?;
         registry.bind_command::<PrepareAccountTransaction>()?;
+        registry.bind_command::<PrepareAccountTransactionBounded>()?;
         registry.bind_command::<ResolveAccountTransaction>()?;
         registry.bind_command::<ReleaseAccountTransactionReads>()?;
         registry.bind_command::<DeleteTable>()?;
@@ -479,6 +496,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_command::<ttl::AdvanceTtlSweep>()?;
         registry.bind_command::<ttl::AdvanceTtlSchedule>()?;
         registry.bind_command::<RegisterCoordinatorShard>()?;
+        registry.bind_command::<RegisterCoordinatorShards>()?;
         registry.bind_command::<transaction_coordinator::RecordSettledCoordinators>()?;
         registry.bind_command::<ActivateGlobalIndexRoute>()?;
         registry.bind_command::<RecordAccountIndexDelivery>()?;
@@ -486,6 +504,7 @@ impl cellule_runtime::registry::CellModule for AccountModule {
         registry.bind_query::<QueryAccountItems>()?;
         registry.bind_query::<ReadAccountTransaction>()?;
         registry.bind_query::<ReadAccountTransactionResult>()?;
+        registry.bind_query::<ReadAccountTransactionResultBounded>()?;
         registry.bind_query::<DescribeTable>()?;
         registry.bind_query::<ListTables>()?;
         registry.bind_query::<DescribeTableById>()?;
@@ -510,6 +529,48 @@ impl cellule_runtime::registry::CellModule for AccountModule {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Json<T>(pub T);
 
+// Compact images avoid JSON binary/escape expansion across peer hops. Keep an
+// explicit saved-image fallback when even the compact aggregate exceeds the
+// operation envelope; non-item outcomes retain canonical JSON.
+fn encode_read_query<T: Serialize>(
+    value: &T,
+    images: Option<&[Option<Item>]>,
+    fallback: &T,
+    encoder: &mut BoundedEncoder,
+) -> std::result::Result<(), CodecError> {
+    let json = if let Some(images) = images {
+        match item_wire::images_size(images) {
+            Ok(size) if size < OPERATION_BYTES as usize => {
+                encoder.write_u8(1)?;
+                return item_wire::encode_images(images, encoder);
+            }
+            Ok(_) | Err(CodecError::Limit) => fallback,
+            Err(error) => return Err(error),
+        }
+    } else {
+        value
+    };
+    let mut bytes = serde_json::to_vec(json)
+        .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
+    // The JSON envelope has a tag and a four-byte length prefix.
+    if bytes.len() > OPERATION_BYTES as usize - 5 {
+        bytes = serde_json::to_vec(fallback)
+            .map_err(|_| CodecError::Invalid("DynamoDB value failed to encode"))?;
+    }
+    encoder.write_u8(0)?;
+    encoder.write_bytes(&bytes)
+}
+
+fn decode_read_query_images(
+    decoder: &mut BoundedDecoder<'_>,
+) -> std::result::Result<Option<Vec<Option<Item>>>, CodecError> {
+    match decoder.read_u8()? {
+        0 => Ok(None),
+        1 => item_wire::decode_images(decoder).map(Some),
+        _ => Err(CodecError::Invalid("unknown transaction read envelope")),
+    }
+}
+
 impl<T> WireValue for Json<T>
 where
     T: Serialize + DeserializeOwned + Send + 'static,
@@ -530,5 +591,162 @@ where
             return Err(CodecError::Invalid("noncanonical DynamoDB JSON value"));
         }
         Ok(Self(value))
+    }
+}
+
+#[cfg(test)]
+mod transaction_read_codec_tests {
+    use super::*;
+    use extenddb_core::types::AttributeValue;
+
+    fn roundtrip<T: WireValue>(value: T) -> T {
+        let mut encoder = BoundedEncoder::new(OPERATION_BYTES).unwrap();
+        value.encode(&mut encoder).unwrap();
+        let bytes = encoder.finish();
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        let result = T::decode(&mut decoder).unwrap();
+        decoder.finish().unwrap();
+        result
+    }
+
+    #[test]
+    fn compact_read_preserves_nested_attributes_and_all_outcomes() {
+        use std::collections::BTreeSet;
+        let attributes = Item::from([
+            (
+                "string".into(),
+                AttributeValue::S(['\0', '\n', '\\', '"', '界'].into_iter().collect()),
+            ),
+            ("number".into(), AttributeValue::N("-123.456".into())),
+            ("binary".into(), AttributeValue::B(vec![0, 128, 255])),
+            (
+                "strings".into(),
+                AttributeValue::SS(BTreeSet::from(["a".into(), "界".into()])),
+            ),
+            (
+                "numbers".into(),
+                AttributeValue::NS(BTreeSet::from([
+                    "-2".into(),
+                    "10000000000000000000000000000000000000".into(),
+                ])),
+            ),
+            (
+                "binaries".into(),
+                AttributeValue::BS(BTreeSet::from([vec![0], vec![255]])),
+            ),
+            ("boolean".into(), AttributeValue::Bool(true)),
+            ("null".into(), AttributeValue::Null),
+            (
+                "list".into(),
+                AttributeValue::L(vec![
+                    AttributeValue::Bool(false),
+                    AttributeValue::M(Item::from([("nested".into(), AttributeValue::B(vec![]))])),
+                ]),
+            ),
+            (
+                "map".into(),
+                AttributeValue::M(Item::from([("value".into(), AttributeValue::S("".into()))])),
+            ),
+        ]);
+        let images = vec![Some(attributes), None, Some(Item::new())];
+        let account = TransactionReadOutcome::Applied(images.clone());
+        let partition = PartitionTransactReadOutcome::Applied(images);
+        assert_eq!(
+            roundtrip(TransactionReadQueryOutput(account.clone())).0,
+            account
+        );
+        assert_eq!(
+            roundtrip(PartitionTransactReadQueryOutput(partition.clone())).0,
+            partition
+        );
+        for outcome in [
+            PartitionTransactReadOutcome::NotInstalled,
+            PartitionTransactReadOutcome::StaleRoute,
+            PartitionTransactReadOutcome::Sealed,
+            PartitionTransactReadOutcome::NotReady,
+            PartitionTransactReadOutcome::WrongPartition,
+            PartitionTransactReadOutcome::SavedImagesRequired,
+            PartitionTransactReadOutcome::Rejected {
+                index: 3,
+                reason: TransactionFailure::Conflict,
+            },
+        ] {
+            assert_eq!(
+                roundtrip(PartitionTransactReadQueryOutput(outcome.clone())).0,
+                outcome
+            );
+        }
+        let rejected = TransactionReadOutcome::Rejected {
+            index: 2,
+            reason: TransactionFailure::Validation("invalid read".into()),
+        };
+        assert_eq!(
+            roundtrip(TransactionReadQueryOutput(rejected.clone())).0,
+            rejected
+        );
+    }
+
+    #[test]
+    fn read_images_reject_noncanonical_json_envelopes() {
+        let mut encoder = BoundedEncoder::new(OPERATION_BYTES).unwrap();
+        encoder.write_u8(0).unwrap();
+        Json(TransactionReadOutcome::Applied(vec![]))
+            .encode(&mut encoder)
+            .unwrap();
+        let bytes = encoder.finish();
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        assert!(TransactionReadQueryOutput::decode(&mut decoder).is_err());
+        let mut decoder = BoundedDecoder::new(&bytes, OPERATION_BYTES).unwrap();
+        assert!(PartitionTransactReadQueryOutput::decode(&mut decoder).is_err());
+    }
+
+    #[test]
+    fn compact_read_keeps_large_escaped_strings_inside_the_query_envelope() {
+        let images = vec![
+            Some(Item::from([(
+                "payload".into(),
+                AttributeValue::S("\0".repeat(380 * 1024))
+            )]));
+            10
+        ];
+        let value = TransactionReadOutcome::Applied(images);
+        assert!(roundtrip(TransactionReadQueryOutput(value.clone())).0 == value);
+    }
+
+    #[test]
+    fn transaction_read_codecs_preserve_legal_aggregates_and_bound_output() {
+        for (count, size, oversized) in [
+            (1, 100, false),
+            (10, 380 * 1024, false),
+            (12, 380 * 1024, true),
+        ] {
+            let images = vec![
+                Some(Item::from([(
+                    "payload".into(),
+                    AttributeValue::B(vec![0xa5; size]),
+                )]));
+                count
+            ];
+            let account = TransactionReadOutcome::Applied(images.clone());
+            let partition = PartitionTransactReadOutcome::Applied(images);
+            let account_result = roundtrip(TransactionReadQueryOutput(account.clone())).0;
+            let partition_result = roundtrip(PartitionTransactReadQueryOutput(partition.clone())).0;
+            if oversized {
+                assert_eq!(account_result, TransactionReadOutcome::SavedImagesRequired);
+                assert_eq!(
+                    partition_result,
+                    PartitionTransactReadOutcome::SavedImagesRequired
+                );
+            } else {
+                assert!(
+                    account_result == account,
+                    "legal account aggregate must retain all items"
+                );
+                assert!(
+                    partition_result == partition,
+                    "legal partition aggregate must retain all items"
+                );
+            }
+        }
     }
 }

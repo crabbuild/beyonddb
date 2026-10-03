@@ -28,6 +28,12 @@ The [implementation record](implementation-status.md#current-verified-slice)
 maps these paths to tests. The full upstream protocol suite remains an
 [acceptance gate](implementation-status.md#acceptance-proof-for-a-server-claim).
 
+### Creation-time Cell model extension
+
+`CreateTable.Tags` accepts `beyonddb:cell-model` with `single`, `auto`, or `partitioned`. `single` fixes the base table to one data Cell; `auto` starts at one and permits splitting; `partitioned` starts at the configured count, with a minimum of two. Omitting the tag retains existing behavior. The choice is durable table-generation metadata, not an AWS DynamoDB setting.
+
+Later tag operations change metadata only. They do not change placement, and `UpdateTable` does not convert models. GSIs stay separate; LSIs stay with their base items. Read [Cell model limits](scaling.md#choose-a-tables-cell-model) and the [CLI creation example](user-guide.md#create-a-table-and-wait-for-it).
+
 ## Indexes
 
 Local secondary indexes (LSIs) share a base Cell's atomic mutation. Global secondary indexes (GSIs) have separate owner Cells and receive base changes asynchronously.

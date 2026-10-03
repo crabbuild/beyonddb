@@ -12,14 +12,30 @@ use cellule_runtime::{
 pub(super) struct Remote {
     pub(super) node: CellNode,
     _tasks: Arc<CellNodeTaskGroup>,
-    provisioner: Arc<CellInitialPartitionProvisioner>,
+    pub(super) provisioner: Arc<CellInitialPartitionProvisioner>,
     pub(super) session: SessionId,
     endpoint: String,
-    lease: CancellationToken,
+    pub(super) lease: CancellationToken,
     server: tokio::task::JoinHandle<()>,
 }
 
 impl Remote {
+    pub(super) fn client(&self, fixture: &Fixture) -> CellClient {
+        self.client_with_cache(fixture, false)
+    }
+
+    pub(super) fn client_with_cache(&self, fixture: &Fixture, enabled: bool) -> CellClient {
+        BeyonddbPeers::new(
+            &self.node,
+            fixture.layout.clone(),
+            fixture.directory.clone(),
+            self.session,
+            &fixture.remote_tls,
+        )
+        .unwrap()
+        .client_with_cache(self.provisioner.clone(), enabled)
+    }
+
     pub(super) async fn new(fixture: &Fixture) -> Self {
         Self::with_router(fixture, std::convert::identity).await
     }
@@ -28,9 +44,37 @@ impl Remote {
         fixture: &Fixture,
         wrap: impl FnOnce(axum::Router) -> axum::Router,
     ) -> Self {
+        Self::with_router_identity(fixture, wrap, SessionId::from_bytes([96; 16]), 98, false).await
+    }
+
+    pub(super) async fn with_identity(
+        fixture: &Fixture,
+        session: SessionId,
+        node_byte: u8,
+    ) -> Self {
+        Self::with_router_identity(fixture, std::convert::identity, session, node_byte, false).await
+    }
+
+    pub(super) async fn with_cache(fixture: &Fixture) -> Self {
+        Self::with_router_identity(
+            fixture,
+            std::convert::identity,
+            SessionId::from_bytes([96; 16]),
+            98,
+            true,
+        )
+        .await
+    }
+
+    async fn with_router_identity(
+        fixture: &Fixture,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+        session: SessionId,
+        node_byte: u8,
+        peer_cache: bool,
+    ) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("https://{}", listener.local_addr().unwrap());
-        let session = SessionId::from_bytes([96; 16]);
         let lease = CancellationToken::new();
         let (remote, _tasks) = start_node(
             fixture.application.clone(),
@@ -39,7 +83,7 @@ impl Remote {
             session,
             endpoint.clone(),
             &fixture.remote_tls,
-            98,
+            node_byte,
             lease.clone(),
         )
         .await;
@@ -60,14 +104,18 @@ impl Remote {
                 fixture.layout.clone(),
                 session,
                 endpoint.clone(),
-                fixture._files.path().join("remote-data"),
+                fixture._files.path().join(if node_byte == 98 {
+                    "remote-data".into()
+                } else {
+                    format!("remote-data-{node_byte}")
+                }),
             )
             .unwrap()
             .with_initial_partition_count(2)
             .unwrap()
             .with_peers(peers.clone()),
         );
-        let router = wrap(peers.router(provisioner.clone()));
+        let router = wrap(peers.router_with_cache(provisioner.clone(), peer_cache));
         let tls = LoadedPeerTls::load(
             &fixture._files.path().join("remote.crt"),
             &fixture._files.path().join("remote.key"),
@@ -178,8 +226,151 @@ pub(super) fn sdk_without_retries(fixture: &Fixture) -> aws_sdk_dynamodb::Client
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sdk_read_recovers_expired_directory_and_data_owners() {
+async fn large_transaction_read_from_remote_owner_keeps_read_only_snapshot() {
+    use aws_sdk_dynamodb::types::{Get, TransactGetItem};
+
     let fixture = Fixture::with_partition_count(1).await;
+    let sdk = sdk_without_retries(&fixture);
+    let mut reads = Vec::new();
+    let mut expected = Vec::new();
+    // The DynamoDB aggregate is below 4 MiB, but base64 exceeds the Cell wire limit.
+    for index in 0..10 {
+        let key = std::collections::HashMap::from([(
+            "id".into(),
+            AwsAttributeValue::S(format!("large-{index}")),
+        )]);
+        let mut item = key.clone();
+        item.insert(
+            "payload".into(),
+            AwsAttributeValue::B(vec![0xa5; 380 * 1024].into()),
+        );
+        sdk.put_item()
+            .table_name("Residency")
+            .set_item(Some(item.clone()))
+            .send()
+            .await
+            .unwrap();
+        reads.push(
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .set_key(Some(key))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+        expected.push(item);
+    }
+    let remote = Remote::new(&fixture).await;
+    let table_id = table_id(&fixture, "Residency").await;
+    fixture.data[0].0.drain().await.unwrap();
+    remote
+        .provisioner
+        .admit_existing_partition("123456789012", &table_id, &[0; 16])
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let owner = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.value().owner.as_ref().unwrap().session,
+        remote.session
+    );
+    reads.reverse();
+    expected.reverse();
+    let result = sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.responses().len(), expected.len());
+    for (response, item) in result.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
+    }
+    let after = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.value().root,
+        owner.value().root,
+        "large binary read must not publish participant mutations"
+    );
+    // Rewrite through the returning PutItem path, whose declared input envelope
+    // can carry a legal item expanded by JSON escaping.
+    for item in &mut expected {
+        item.insert(
+            "payload".into(),
+            AwsAttributeValue::S("\0".repeat(380 * 1024)),
+        );
+        sdk.put_item()
+            .table_name("Residency")
+            .set_item(Some(item.clone()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .unwrap();
+    }
+    let before = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let reads = expected
+        .iter()
+        .map(|item| {
+            TransactGetItem::builder()
+                .get(
+                    Get::builder()
+                        .table_name("Residency")
+                        .key("id", item["id"].clone())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+        })
+        .collect::<Vec<_>>();
+    let read = sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    for (response, item) in read.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
+    }
+    let after = authority
+        .load(fixture.data[0].0.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.value().root,
+        before.value().root,
+        "escaped string read must not publish participant mutations"
+    );
+    remote.shutdown().await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sdk_read_recovers_expired_directory_and_data_owners() {
+    for enabled in [false, true] {
+        read_recovers_expired_directory_and_data_owners(enabled).await;
+    }
+}
+
+async fn read_recovers_expired_directory_and_data_owners(enabled: bool) {
+    println!("owner-expiry recovery: cache enabled={enabled}");
+    let fixture =
+        Fixture::with_store_capacity_and_peer_cache(1, Arc::new(InMemory::new()), 8, enabled).await;
     let remote = Remote::new(&fixture).await;
     let sdk = sdk_without_retries(&fixture);
     let table_id = table_id(&fixture, "Residency").await;

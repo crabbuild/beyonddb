@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::types::{
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
-async fn oversized_single_cell_transaction_read_uses_saved_images() {
+async fn large_single_cell_transaction_read_survives_owner_restart() {
     let mut fixture = crate::process_fixture_with_cache(1, true).await;
     let table = "ProcessLargeRead";
     fixture
@@ -67,13 +67,28 @@ async fn oversized_single_cell_transaction_read_uses_saved_images() {
     let result = fixture
         .sdk
         .transact_get_items()
-        .set_transact_items(Some(reads))
+        .set_transact_items(Some(reads.clone()))
         .send()
         .await
         .unwrap();
     assert_eq!(result.responses().len(), expected.len());
-    for (response, item) in result.responses().iter().zip(expected) {
-        assert_eq!(response.item(), Some(&item));
+    for (response, item) in result.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
     }
+    fixture.child.kill().unwrap();
+    fixture.child.wait().unwrap();
+    fixture.child = crate::start(&fixture.config, &fixture.log, false, fixture.s3);
+    crate::wait_healthy(&mut fixture.child, fixture.public, &fixture.log);
+    let restored = fixture
+        .sdk
+        .transact_get_items()
+        .set_transact_items(Some(reads))
+        .send()
+        .await
+        .unwrap();
+    for (response, item) in restored.responses().iter().zip(&expected) {
+        assert_eq!(response.item(), Some(item));
+    }
+    assert_eq!(restored.responses().len(), expected.len());
     crate::stop(&mut fixture.child, &fixture.log);
 }

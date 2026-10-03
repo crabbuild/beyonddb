@@ -5,6 +5,7 @@ mod batch;
 mod data;
 mod global_index;
 mod metadata_cache;
+mod prepare_batch;
 mod recovery;
 mod remaining;
 mod statistics;
@@ -14,6 +15,7 @@ pub(crate) mod table_creation;
 mod transaction;
 mod transaction_read;
 mod transaction_transport;
+mod update_batch;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -42,6 +44,8 @@ use extenddb_storage::{BoxedFuture, TableEngine};
 
 use batch::NoReturnBatcher;
 use metadata_cache::MetadataCache;
+use prepare_batch::PrepareBatcher;
+use update_batch::UpdateBatcher;
 
 /// Installs an initial table's data Cells before its route becomes visible.
 pub trait InitialPartitionProvisioner: Send + Sync {
@@ -90,6 +94,8 @@ pub trait CoordinatorProvisioner: Send + Sync {
 pub struct CellStorage {
     client: CellClient,
     no_return_batcher: Arc<NoReturnBatcher>,
+    update_batcher: Arc<UpdateBatcher>,
+    prepare_batcher: Arc<PrepareBatcher>,
     region: String,
     initial_partitions: Option<Arc<dyn InitialPartitionProvisioner>>,
     coordinators: Option<Arc<dyn CoordinatorProvisioner>>,
@@ -126,6 +132,8 @@ impl CellStorage {
         let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         Self {
             no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
+            update_batcher: Arc::new(UpdateBatcher::new(client.clone())),
+            prepare_batcher: Arc::new(PrepareBatcher::new(client.clone())),
             client,
             region: region.into(),
             initial_partitions: None,
@@ -331,12 +339,12 @@ impl TableEngine for CellStorage {
             let name = input.table_name.clone();
             let spec = TableSpec {
                 table_class: table_class(input.table_class.as_deref())?.unwrap_or_default(),
-                placement: self.initial_partitions.as_ref().map_or(
-                    TablePlacement::Account,
-                    |provisioner| TablePlacement::Routed {
-                        initial_partitions: provisioner.initial_partition_count(),
-                    },
-                ),
+                placement: table_creation::placement(
+                    self.initial_partitions
+                        .as_ref()
+                        .map(|provisioner| provisioner.initial_partition_count()),
+                    input.tags.as_deref().unwrap_or_default(),
+                )?,
                 table_name: input.table_name,
                 key_schema: input.key_schema,
                 attribute_definitions: input.attribute_definitions,
@@ -353,6 +361,10 @@ impl TableEngine for CellStorage {
                 )),
                 stream,
             };
+            let explicit_model = spec
+                .initial_tags
+                .iter()
+                .any(|tag| tag.key == table_creation::CELL_MODEL_TAG);
             let submitted = spec.clone();
             let record = match self
                 .client
@@ -378,6 +390,7 @@ impl TableEngine for CellStorage {
                             return Err(StorageError::TableAlreadyExists(name));
                         };
                         if existing.placement == TablePlacement::Account
+                            || (explicit_model && submitted.placement != existing.placement)
                             || !submitted.matches_record(&existing)
                             || self.route_active_for(&account_id, &existing.id).await?
                         {
@@ -506,7 +519,7 @@ impl TableEngine for CellStorage {
                 }
                 crate::TableLifecycle::Deleting(record) => (record, TableStatus::Deleting),
                 crate::TableLifecycle::Live(record) => {
-                    let status = if matches!(record.placement, TablePlacement::Routed { .. })
+                    let status = if record.placement.is_routed()
                         && !self.route_active_for(&account_id, &record.id).await?
                     {
                         TableStatus::Creating
@@ -669,13 +682,24 @@ impl TableEngine for CellStorage {
         let account_id = account_id.to_owned();
         let table_name = table_name.to_owned();
         Box::pin(async move {
+            // Batch APIs can bypass ExtendDB's HTTP table-info cache. Reuse
+            // the same opt-in backend policy; item access still checks table ID
+            // and partition epoch, so a stale entry cannot alias a new table.
+            if self.route_cache_enabled
+                && let Some(cached) = self.metadata_cache.key_info(&account_id, &table_name)
+            {
+                return Ok(cached);
+            }
+            let generation = self
+                .route_cache_enabled
+                .then(|| self.metadata_cache.generation());
             let record = self.record(&account_id, &table_name).await?;
-            if matches!(record.placement, TablePlacement::Routed { .. })
+            if record.placement.is_routed()
                 && !self.route_active_for(&account_id, &record.id).await?
             {
                 return Err(StorageError::TableNotActive(table_name));
             }
-            Ok(TableKeyInfo {
+            let info = TableKeyInfo {
                 has_lsi: !record.local_secondary_indexes.is_empty(),
                 local_secondary_indexes: record
                     .local_secondary_indexes
@@ -698,7 +722,16 @@ impl TableEngine for CellStorage {
                 key_schema: record.key_schema,
                 attribute_definitions: record.attribute_definitions,
                 ..TableKeyInfo::default()
-            })
+            };
+            if let Some(generation) = generation {
+                self.metadata_cache.insert_key_info(
+                    &info.account_id,
+                    table_name,
+                    generation,
+                    info.clone(),
+                );
+            }
+            Ok(info)
         })
     }
 

@@ -1,0 +1,547 @@
+use super::*;
+use cellule_runtime::{
+    codec::{BoundedEncoder, WireValue},
+    identity::CellTarget,
+    peer::{PeerOperation, decode_peer_reply, wire},
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Debug, Default)]
+pub(super) struct CountedAuthority {
+    inner: Arc<InMemory>,
+    get_paths: std::sync::Mutex<HashMap<object_store::path::Path, usize>>,
+    failed_get_paths: std::sync::Mutex<std::collections::HashSet<object_store::path::Path>>,
+    pub(super) path: std::sync::Mutex<Option<object_store::path::Path>>,
+    pub(super) reads: AtomicUsize,
+    pub(super) all_reads: AtomicUsize,
+    pub(super) creation_gate: std::sync::Mutex<Option<CreationGate>>,
+    pub(super) read_gate: std::sync::Mutex<Option<CreationGate>>,
+    pub(super) publication_gate: std::sync::Mutex<Option<CreationGate>>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CreationGate {
+    pub(super) paths: std::collections::HashSet<object_store::path::Path>,
+    pub(super) entered: Arc<tokio::sync::Semaphore>,
+    pub(super) release: Arc<tokio::sync::Semaphore>,
+}
+
+impl std::fmt::Display for CountedAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CountedAuthority")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for CountedAuthority {
+    async fn put_opts(
+        &self,
+        location: &object_store::path::Path,
+        payload: object_store::PutPayload,
+        options: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        let gate = self
+            .creation_gate
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|gate| {
+                matches!(options.mode, object_store::PutMode::Create)
+                    && gate.paths.contains(location)
+            })
+            .or_else(|| {
+                self.publication_gate
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .filter(|gate| {
+                        matches!(options.mode, object_store::PutMode::Update(_))
+                            && gate.paths.contains(location)
+                    })
+            });
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
+        self.inner.put_opts(location, payload, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        *self
+            .get_paths
+            .lock()
+            .unwrap()
+            .entry(location.clone())
+            .or_default() += 1;
+        let gate = {
+            let mut gate = self.read_gate.lock().unwrap();
+            if gate
+                .as_ref()
+                .is_some_and(|gate| gate.paths.contains(location))
+            {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
+        if self.failed_get_paths.lock().unwrap().contains(location) {
+            return Err(object_store::Error::Generic {
+                store: "CountedAuthority",
+                source: std::io::Error::other("injected fresh enrollment read failure").into(),
+            });
+        }
+        self.all_reads.fetch_add(1, Ordering::SeqCst);
+        let counted = self.path.lock().unwrap().as_ref() == Some(location);
+        if counted {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: futures_util::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+    {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signed_forward_cache_skips_authority_io_and_rejects_drained_owner() {
+    for enabled in [false, true] {
+        let store = Arc::new(CountedAuthority::default());
+        let fixture =
+            Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, enabled).await;
+        let remote = super::provisioning::Remote::new(&fixture).await;
+        let table = fixture
+            .client
+            .query::<DescribeTable>(
+                &account_target("123456789012").unwrap(),
+                None,
+                Json("Residency".into()),
+            )
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        let mut handle = fixture.data[0].0.clone();
+        let entry = handle.catalog().entry();
+        let target = CellTarget::new(
+            account_target("123456789012").unwrap().tenant(),
+            beyonddb::APPLICATION_ID,
+            entry.namespace(),
+            entry.partition(),
+        )
+        .unwrap();
+        let expected = wire::CellDescription {
+            cell_id: handle.cell_id().as_bytes().to_vec(),
+            incarnation: handle.incarnation().as_bytes().to_vec(),
+            code: handle.code().as_bytes().to_vec(),
+            schema: handle.schema(),
+        };
+        let transport = PeerHttpRoundTrip::new(
+            Arc::new(BeyonddbPeerScope),
+            CellAuthority::new(fixture.layout.clone()),
+            fixture.directory.clone(),
+            Arc::new(fixture.remote_tls.client_identity()),
+            remote.session,
+        );
+        let signer = PeerSigner::new(
+            remote.session,
+            fixture.application.registry().release_digest(),
+            fixture.remote_tls.signing_key().clone(),
+        );
+        let principal = PeerPrincipal {
+            issuer: format!(
+                "beyonddb-peer:{}",
+                fixture
+                    .directory
+                    .fleet()
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+            subject: remote
+                .session
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            actions: vec!["beyonddb.cell.invoke".into()],
+        };
+        let destination = fixture
+            .directory
+            .load(fixture.session, now_ms())
+            .await
+            .unwrap()
+            .unwrap()
+            .advertisement()
+            .clone();
+        let mut encoder = BoundedEncoder::new(64).unwrap();
+        Json(()).encode(&mut encoder).unwrap();
+        let input = encoder.finish();
+        let send = |authorized: bool| {
+            let mut principal = principal.clone();
+            if !authorized {
+                principal.actions = vec!["beyonddb.cell.invalid".into()];
+            }
+            let now = now_ms();
+            let request = signer
+                .sign(
+                    principal,
+                    now,
+                    now + 60_000,
+                    30_000,
+                    PeerOperation::Read(wire::ReadRequest {
+                        target: Some(wire::Target {
+                            tenant_id: target.tenant().as_bytes().to_vec(),
+                            application_id: target.application().as_bytes().to_vec(),
+                            namespace_id: target.namespace().as_bytes().to_vec(),
+                            partition: target.partition().to_vec(),
+                        }),
+                        timeout_ms: 30_000,
+                        minimum: None,
+                        expected: Some(expected.clone()),
+                        operation: Some(wire::read_request::Operation::CellQuery(
+                            wire::CellQuery {
+                                query_id: 4,
+                                codec_version: 1,
+                                input: input.clone(),
+                            },
+                        )),
+                    }),
+                )
+                .unwrap();
+            let transport = &transport;
+            let target = target.clone();
+            let destination = destination.clone();
+            async move {
+                let reply = transport
+                    .send_to_node(target, destination, request, 30_000)
+                    .await?;
+                Ok::<_, cellule_runtime::Error>(decode_peer_reply(&reply)?.outcome.unwrap())
+            }
+        };
+        *store.path.lock().unwrap() =
+            Some(fixture.layout.control_path(handle.cell_id().as_bytes()));
+        let warm = send(true).await.unwrap();
+        assert!(
+            matches!(warm, wire::peer_reply::Outcome::Read(_)),
+            "warm read: {warm:?}"
+        );
+        store.reads.store(0, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        for _ in 0..4 {
+            assert!(matches!(
+                send(true).await.unwrap(),
+                wire::peer_reply::Outcome::Read(_)
+            ));
+        }
+        let reads = store.reads.load(Ordering::SeqCst);
+        println!(
+            "peer cache enabled={enabled}: four signed SQL reads in {:?}, authority reads={reads}",
+            started.elapsed()
+        );
+        assert_eq!(reads, if enabled { 0 } else { 4 });
+        assert!(
+            matches!(send(false).await.unwrap(), wire::peer_reply::Outcome::Error(error)
+            if error.code == wire::error::Code::PermissionDenied as i32)
+        );
+        if enabled {
+            tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+            store.reads.store(0, Ordering::SeqCst);
+            assert!(matches!(
+                send(true).await.unwrap(),
+                wire::peer_reply::Outcome::Read(_)
+            ));
+            assert_eq!(
+                store.reads.load(Ordering::SeqCst),
+                0,
+                "expired cache should resolve the still-resident actor without authority I/O"
+            );
+        }
+        if enabled {
+            fixture
+                .client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+                .unwrap();
+        }
+        if enabled {
+            // Keep the receiver's cached handle while the same Cell closes and
+            // reopens. Matching code/schema/incarnation cannot validate an old
+            // owner epoch; the next signed invocation needs the new capability.
+            let before = handle.owner_fence();
+            let started = std::time::Instant::now();
+            handle.drain().await.unwrap();
+            handle = fixture
+                .provisioner
+                .admit_existing_partition("123456789012", &table.id, &[0; 16])
+                .await
+                .unwrap();
+            assert_eq!(handle.owner_fence().incarnation, before.incarnation);
+            assert!(handle.owner_fence().epoch > before.epoch);
+            let reacquired = send(true).await;
+            println!(
+                "cached owner epoch reacquired in {:?}: succeeded={}",
+                started.elapsed(),
+                matches!(reacquired, Ok(wire::peer_reply::Outcome::Read(_)))
+            );
+            assert!(matches!(reacquired, Ok(wire::peer_reply::Outcome::Read(_))));
+        }
+        handle.drain().await.unwrap();
+        let drained = send(true).await;
+        assert!(
+            matches!(drained, Err(cellule_runtime::Error::CellNotActive)),
+            "drained read: {drained:?}"
+        );
+        let owner = CellAuthority::new(fixture.layout.clone())
+            .load(handle.cell_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            owner.value().owner.is_none(),
+            "forwarded invocation must not acquire a drained Cell"
+        );
+        if enabled {
+            fixture
+                .client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+                .unwrap();
+            let restored = CellAuthority::new(fixture.layout.clone())
+                .load(handle.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(restored.value().owner.is_some());
+            assert!(restored.value().root.is_some());
+            assert_eq!(
+                restored.value().state,
+                cellule_runtime::control::ControlState::Serving
+            );
+        }
+        *store.path.lock().unwrap() = None;
+        remote.shutdown().await;
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_read_overlaps_fresh_authority_and_owner_enrollment() {
+    let store = Arc::new(CountedAuthority::default());
+    let fixture = Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 8, true).await;
+    let remote = super::provisioning::Remote::new(&fixture).await;
+    // Only the sender uses this observer; owner heartbeats and receiver
+    // authorization use the original store and cannot satisfy the probe.
+    let sender_store = Arc::new(CountedAuthority {
+        inner: store.inner.clone(),
+        ..CountedAuthority::default()
+    });
+    let account = account_target("123456789012").unwrap();
+    let layout = CellStorageLayout::new(
+        Store::new(sender_store.clone()),
+        object_store::path::Path::from("beyonddb-residency"),
+        *account.application().as_bytes(),
+    );
+    let directory = NodeDirectory::new(
+        layout.clone(),
+        fixture.directory.fleet(),
+        Digest::from_bytes([90; 32]),
+        fixture.application.registry().release_digest(),
+    );
+    let peers = BeyonddbPeers::new(
+        &remote.node,
+        layout.clone(),
+        directory,
+        remote.session,
+        &fixture.remote_tls,
+    )
+    .unwrap();
+    let client = peers.client_with_cache(remote.provisioner.clone(), true);
+    let handle = &fixture.data[0].0;
+    let entry = handle.catalog().entry();
+    let target = CellTarget::new(
+        account.tenant(),
+        beyonddb::APPLICATION_ID,
+        entry.namespace(),
+        entry.partition(),
+    )
+    .unwrap();
+    let expected = client
+        .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+        .await
+        .unwrap()
+        .output;
+    let owner_path = layout.node_path(fixture.session.as_bytes());
+    let before = sender_store
+        .get_paths
+        .lock()
+        .unwrap()
+        .get(&owner_path)
+        .copied()
+        .unwrap_or_default();
+    let gate = CreationGate {
+        paths: std::collections::HashSet::from([layout.control_path(handle.cell_id().as_bytes())]),
+        entered: Arc::new(tokio::sync::Semaphore::new(0)),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    *sender_store.read_gate.lock().unwrap() = Some(gate.clone());
+    let read = tokio::spawn({
+        let client = client.clone();
+        let target = target.clone();
+        async move {
+            client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let overlap = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            if sender_store
+                .get_paths
+                .lock()
+                .unwrap()
+                .get(&owner_path)
+                .copied()
+                .unwrap_or_default()
+                > before
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    gate.release.add_permits(1);
+    let actual = read.await.unwrap().unwrap().output;
+    assert_eq!(actual, expected);
+    let after = sender_store
+        .get_paths
+        .lock()
+        .unwrap()
+        .get(&owner_path)
+        .copied()
+        .unwrap_or_default();
+    sender_store
+        .failed_get_paths
+        .lock()
+        .unwrap()
+        .insert(owner_path.clone());
+    let failed = client
+        .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+        .await;
+    assert!(
+        failed.is_err(),
+        "a current owner's fresh probe must fail closed"
+    );
+    let replacement =
+        super::provisioning::Remote::with_identity(&fixture, SessionId::from_bytes([97; 16]), 100)
+            .await;
+
+    // Keep the failed old-session probe, but change authority while its read
+    // is gated. The new remote owner must not inherit that obsolete failure.
+    *sender_store.read_gate.lock().unwrap() = Some(gate.clone());
+    let moved_read = tokio::spawn({
+        let client = client.clone();
+        let target = target.clone();
+        async move {
+            client
+                .query::<beyonddb::ReadPartitionState>(&target, None, Json(()))
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), gate.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let spec = &expected.0.as_ref().unwrap().spec;
+    handle.drain().await.unwrap();
+    replacement
+        .provisioner
+        .admit_existing_partition("123456789012", &spec.table.id, &spec.partition_id)
+        .await
+        .unwrap();
+    gate.release.add_permits(1);
+    assert_eq!(moved_read.await.unwrap().unwrap().output, expected);
+    let owner = CellAuthority::new(fixture.layout.clone())
+        .load(handle.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owner.value().owner.as_ref().unwrap().session,
+        replacement.session
+    );
+    let item = super::provisioning::sdk_without_retries(&fixture)
+        .get_item()
+        .table_name("Residency")
+        .key("id", fixture.data[0].1["id"].clone())
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(item.item.as_ref(), Some(&fixture.data[0].1));
+    replacement.shutdown().await;
+    remote.shutdown().await;
+    fixture.shutdown().await;
+    println!(
+        "fresh owner enrollment entered during gated authority read={overlap}; sender owner GETs {before}->{after}"
+    );
+    assert!(overlap, "fresh owner enrollment waited for authority I/O");
+}

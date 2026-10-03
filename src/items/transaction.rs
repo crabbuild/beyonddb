@@ -210,6 +210,8 @@ pub(super) fn without_old_image(reason: TransactionFailure) -> TransactionFailur
 pub enum TransactionReadOutcome {
     /// Every requested image was read from one Cell snapshot.
     Applied(Vec<Option<Item>>),
+    /// The encoded aggregate requires reading durable participant images individually.
+    SavedImagesRequired,
     /// No image was returned because one operation failed validation or locking.
     Rejected {
         /// Position of the failing read.
@@ -254,21 +256,57 @@ impl Command for TransactRead {
 /// serialized with commands while avoiding a durable mutation publication.
 pub struct TransactReadQuery;
 
+/// Compact read images with an explicit fallback for oversized aggregates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransactionReadQueryOutput(pub TransactionReadOutcome);
+
+impl WireValue for TransactionReadQueryOutput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
+        encode_read_query(
+            &self.0,
+            match &self.0 {
+                TransactionReadOutcome::Applied(images) => Some(images),
+                _ => None,
+            },
+            &TransactionReadOutcome::SavedImagesRequired,
+            encoder,
+        )
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
+        Ok(Self(
+            if let Some(images) = crate::decode_read_query_images(decoder)? {
+                TransactionReadOutcome::Applied(images)
+            } else {
+                let outcome = Json::<TransactionReadOutcome>::decode(decoder)?.0;
+                if matches!(outcome, TransactionReadOutcome::Applied(_)) {
+                    return Err(CodecError::Invalid("read images require compact envelope"));
+                }
+                outcome
+            },
+        ))
+    }
+}
+
 impl Query for TransactReadQuery {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 54;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<TransactWriteInput>;
-    type Output = Json<TransactionReadOutcome>;
+    type Output = TransactionReadQueryOutput;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         let images = match query_stage(context, input.operations)? {
             Ok(images) => images,
             Err((index, reason)) => {
-                return Ok(Json(TransactionReadOutcome::Rejected { index, reason }));
+                return Ok(TransactionReadQueryOutput(
+                    TransactionReadOutcome::Rejected { index, reason },
+                ));
             }
         };
-        Ok(Json(TransactionReadOutcome::Applied(images)))
+        Ok(TransactionReadQueryOutput(TransactionReadOutcome::Applied(
+            images,
+        )))
     }
 }
 
@@ -354,51 +392,78 @@ impl Command for PrepareAccountTransaction {
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
         let input = crate::transaction_transport::consume::<Self>(context, input)?;
-        let digest = blake3::hash(&serde_json::to_vec(&input)?);
-        if let Some(outcome) = participant::prepared(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-        )? {
-            return Ok(CommandResult::Rejected(Json(outcome)));
-        }
-        let staged = match stage(context, input.operations)? {
-            Ok(staged) => staged,
-            Err((index, reason)) => {
-                return Ok(CommandResult::Rejected(Json(
-                    PrepareTransactionOutcome::Rejected { index, reason },
-                )));
-            }
-        };
-        participant::record_prepare(
-            context,
-            input.transaction_id,
-            input.coordinator_cell,
-            digest,
-            crate::participant::PreparedPayload {
-                bytes: serde_json::to_vec(&staged)?,
-                operations: staged.len(),
-                index_edits: staged.iter().map(|image| image.index_capacity.edits).sum(),
-                index_overflow_bytes: staged
-                    .iter()
-                    .map(|image| image.index_capacity.overflow_bytes)
-                    .sum(),
-            },
-            &input.coordinator_key,
-            staged
-                .iter()
-                .filter(|image| image.effect == StagedEffect::Read)
-                .map(|image| image.image.as_ref()),
-        )?;
-        for image in staged {
-            context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
-                vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;
-        }
-        Ok(CommandResult::Success(Json(
-            PrepareTransactionOutcome::Prepared,
-        )))
+        prepare_account(context, input)
     }
+}
+
+/// Prepare an inline participant with a bounded reply reservation.
+/// A durable WideRequired rejection permits retry through the wide command.
+pub struct PrepareAccountTransactionBounded;
+
+impl Command for PrepareAccountTransactionBounded {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 57;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<PrepareAccountTransactionInput>;
+    type Output = Json<PrepareTransactionOutcome>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        let result = prepare_account(context, input)?;
+        crate::participant::bound_prepare_result(result)
+    }
+}
+
+fn prepare_account(
+    context: &mut CommandContext<'_, '_>,
+    input: PrepareAccountTransactionInput,
+) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {
+    let digest = blake3::hash(&serde_json::to_vec(&input)?);
+    if let Some(outcome) = participant::prepared(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+    )? {
+        return Ok(CommandResult::Rejected(Json(outcome)));
+    }
+    let staged = match stage(context, input.operations)? {
+        Ok(staged) => staged,
+        Err((index, reason)) => {
+            return Ok(CommandResult::Rejected(Json(
+                PrepareTransactionOutcome::Rejected { index, reason },
+            )));
+        }
+    };
+    participant::record_prepare(
+        context,
+        input.transaction_id,
+        input.coordinator_cell,
+        digest,
+        crate::participant::PreparedPayload {
+            bytes: serde_json::to_vec(&staged)?,
+            operations: staged.len(),
+            index_edits: staged.iter().map(|image| image.index_capacity.edits).sum(),
+            index_overflow_bytes: staged
+                .iter()
+                .map(|image| image.index_capacity.overflow_bytes)
+                .sum(),
+        },
+        &input.coordinator_key,
+        staged
+            .iter()
+            .filter(|image| image.effect == StagedEffect::Read)
+            .map(|image| image.image.as_ref()),
+    )?;
+    for image in staged {
+        context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
+            vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;
+    }
+    Ok(CommandResult::Success(Json(
+        PrepareTransactionOutcome::Prepared,
+    )))
 }
 
 /// Apply a coordinator decision and release the account participant's locks atomically.
@@ -494,6 +559,19 @@ impl Query for ReadAccountTransactionResult {
     type Output = Json<crate::TransactionReadResult>;
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         crate::participant::read_result(context, input)
+    }
+}
+
+/// Read a saved account image without reserving the wide item reply budget.
+pub struct ReadAccountTransactionResultBounded;
+impl Query for ReadAccountTransactionResultBounded {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 56;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<crate::ReadTransactionResultInput>;
+    type Output = crate::BoundedTransactionReadResult;
+    fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
+        crate::participant::bounded_read_result(context, input)
     }
 }
 

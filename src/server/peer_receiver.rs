@@ -47,12 +47,14 @@ pub(super) struct LocalResolver {
     registry: Arc<Registry>,
     catalog_cache: Arc<RwLock<HashMap<CellId, cellule_runtime::cell::catalog::CatalogProof>>>,
     handle_cache: Option<Arc<RwLock<HashMap<CellId, CachedHandle>>>>,
+    remote_owner_hints: Option<Arc<RwLock<HashMap<CellId, SessionId>>>>,
     provisioner: Option<Arc<crate::CellInitialPartitionProvisioner>>,
     placement: Option<Arc<super::placement::RangePlacement>>,
     bootstrap: Option<NodeDirectory>,
 }
 
 const LOCAL_HANDLE_CACHE_TTL: Duration = Duration::from_millis(500);
+const MAX_REMOTE_OWNER_HINTS: usize = 4_096;
 
 #[derive(Clone)]
 struct CachedHandle {
@@ -79,6 +81,7 @@ impl LocalResolver {
             registry: peers.registry.clone(),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
             handle_cache: handle_cache_enabled.then(|| Arc::new(RwLock::new(HashMap::new()))),
+            remote_owner_hints: handle_cache_enabled.then(|| Arc::new(RwLock::new(HashMap::new()))),
             provisioner: Some(provisioner),
             placement: None,
             bootstrap: None,
@@ -106,7 +109,17 @@ impl LocalCellResolver for LocalResolver {
             if let Some(cache) = resolver.handle_cache.as_ref() {
                 let cached = cache.read().await.get(&cell).cloned();
                 if let Some(cached) = cached {
-                    if cached.expires_at > Instant::now() {
+                    if cached.expires_at > Instant::now()
+                        && resolver
+                            .runtime
+                            .active_handle(&target, CatalogRole::Sql)
+                            .await?
+                            .is_some_and(|active| {
+                                active.owner_fence() == cached.handle.owner_fence()
+                                    && active.code() == cached.handle.code()
+                                    && active.schema() == cached.handle.schema()
+                            })
+                    {
                         return Ok(Some(cached.handle));
                     }
                     cache.write().await.remove(&cell);
@@ -157,9 +170,51 @@ impl LocalCellResolver for LocalResolver {
             {
                 return Err(Error::CatalogCollision);
             }
+            if let Some(cache) = resolver.handle_cache.as_ref()
+                && let Some(local) = resolver
+                    .runtime
+                    .active_handle(&target, CatalogRole::Sql)
+                    .await?
+            {
+                // The actor owns this capability and still fences drain,
+                // incarnation, code and schema at dispatch. Cache expiry
+                // need not read object storage for an active owner, including
+                // sparse owners while background hydration is still running.
+                cache.write().await.insert(
+                    cell,
+                    CachedHandle {
+                        handle: local.clone(),
+                        expires_at: Instant::now() + LOCAL_HANDLE_CACHE_TTL,
+                    },
+                );
+                return Ok(Some(local));
+            }
             let authority = CellAuthority::new(resolver.layout.clone());
             for attempt in 0..2 {
-                let control = authority.load(target.cell_id()).await?;
+                let hinted_owner = if super::placement::is_placeable_target(&target)
+                    && resolver.placement.is_some()
+                    && let Some(hints) = &resolver.remote_owner_hints
+                {
+                    hints.read().await.get(&cell).copied()
+                } else {
+                    None
+                };
+                let (control, owner_probe) = if let Some(hinted_owner) = hinted_owner
+                    && let Some(placement) = &resolver.placement
+                {
+                    // A session hint selects only which fresh canonical read to
+                    // start early. It never supplies ownership or enrollment.
+                    let observed_at_ms = unix_time_ms()?;
+                    let (control, enrollment) = tokio::join!(
+                        authority.load(cell),
+                        placement
+                            .directory
+                            .load_if_live(hinted_owner, observed_at_ms),
+                    );
+                    (control?, Some((hinted_owner, enrollment)))
+                } else {
+                    (authority.load(cell).await?, None)
+                };
                 if let Some(control) = &control
                     && let Some(local) = resolver
                         .runtime
@@ -185,7 +240,8 @@ impl LocalCellResolver for LocalResolver {
                     .and_then(|control| control.value().owner.as_ref())
                     .map(|owner| owner.session);
                 let expired = if let Some(placement) = &resolver.placement
-                    && super::placement::is_placeable_target(&target)
+                    && (super::placement::is_placeable_target(&target)
+                        || target.namespace() == credentials::NAMESPACE)
                     && let Some(control) = &control
                     && control.value().root.is_some()
                     && matches!(
@@ -195,10 +251,47 @@ impl LocalCellResolver for LocalResolver {
                     && let Some(owner) = owner
                     && owner != placement.session
                 {
-                    !placement.directory.is_live(owner, unix_time_ms()?).await?
+                    match owner_probe {
+                        Some((hinted_owner, enrollment)) if hinted_owner == owner => {
+                            let enrollment = enrollment?;
+                            // Authority I/O may outlast the observed lease. A
+                            // completed probe must still be live at this check.
+                            let now_ms = unix_time_ms()?;
+                            !enrollment.is_some_and(|enrollment| {
+                                enrollment.advertisement().expires_at_ms() > now_ms
+                            })
+                        }
+                        // A changed owner requires its own fresh enrollment;
+                        // errors for the obsolete hint are irrelevant.
+                        _ => !placement.directory.is_live(owner, unix_time_ms()?).await?,
+                    }
                 } else {
                     false
                 };
+                if let Some(hints) = &resolver.remote_owner_hints {
+                    let mut hints = hints.write().await;
+                    if super::placement::is_placeable_target(&target)
+                        && !expired
+                        && resolver.placement.as_ref().is_some_and(|placement| {
+                            owner.is_some_and(|owner| owner != placement.session)
+                        })
+                        && control.as_ref().is_some_and(|control| {
+                            control.value().root.is_some()
+                                && control.value().state == ControlState::Serving
+                        })
+                        && let Some(owner) = owner
+                    {
+                        if !hints.contains_key(&cell)
+                            && hints.len() >= MAX_REMOTE_OWNER_HINTS
+                            && let Some(evicted) = hints.keys().next().copied()
+                        {
+                            hints.remove(&evicted);
+                        }
+                        hints.insert(cell, owner);
+                    } else {
+                        hints.remove(&cell);
+                    }
+                }
                 let needs_placement = expired
                     || control.as_ref().is_some_and(|control| {
                         control.value().root.is_some()
@@ -228,6 +321,22 @@ impl LocalCellResolver for LocalResolver {
                 }
                 let control = control.ok_or(Error::CellNotActive)?;
                 let resolved = async {
+                    if expired
+                        && target.namespace() == credentials::NAMESPACE
+                        && let Some(placement) = &resolver.placement
+                    {
+                        // Authentication can outlive the node hosting its key
+                        // shard. Restore only a cataloged published root; the
+                        // takeover rechecks and fences the exact expired lease.
+                        return provisioner
+                            .takeover_expired_credential_cell(&target, &placement.directory)
+                            .await
+                            .map(Some)
+                            .map_err(|source| Error::PeerTransport {
+                                context: "BeyondDB credential owner recovery",
+                                source: Box::new(source),
+                            });
+                    }
                     if needs_placement
                         && super::placement::is_placeable_target(&target)
                         && let Some(placement) = &resolver.placement
@@ -342,6 +451,7 @@ struct Receiver {
 pub(super) fn peer_router(
     peers: &super::BeyonddbPeers,
     provisioner: Arc<crate::CellInitialPartitionProvisioner>,
+    handle_cache_enabled: bool,
 ) -> Router {
     let runtime = peers.runtime.clone();
     let directory = peers.placement.directory.clone();
@@ -352,7 +462,8 @@ pub(super) fn peer_router(
             layout: peers.layout.clone(),
             registry: peers.registry.clone(),
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
-            handle_cache: None,
+            handle_cache: handle_cache_enabled.then(|| Arc::new(RwLock::new(HashMap::new()))),
+            remote_owner_hints: None,
             // The sender selects ownership before forwarding. A receiver may
             // only dispatch to that active owner; a raced release must reject.
             provisioner: None,

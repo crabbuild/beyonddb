@@ -1,12 +1,18 @@
 //! Bounded phase inputs and immutable coordinator payload retrieval.
 
-use cellule_runtime::{MutationIdentity, client::InvocationError, identity::CellTarget};
+use cellule_runtime::{
+    MutationIdentity,
+    client::{Committed, InvocationError},
+    identity::{CellTarget, RequestId},
+    registry::Command,
+};
 use extenddb_storage::error::StorageError;
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
-    CoordinatorParticipant, Json, MultipartTransactionCommand, ReadCoordinatorParticipant,
-    ReadCoordinatorParticipantInput, TransactionPayloadRef, UploadTransactionPayload,
+    CoordinatorParticipant, Json, MultipartTransactionCommand, PrepareTransactionOutcome,
+    ReadCoordinatorParticipant, ReadCoordinatorParticipantInput, TransactionCommandInput,
+    TransactionPayloadRef, UploadTransactionPayload,
 };
 
 // Preserve proven capacity refusal until the transaction driver can decide
@@ -50,6 +56,54 @@ impl From<PhaseError> for StorageError {
 }
 
 impl CellStorage {
+    pub(super) async fn prepare_inline<C, B>(
+        &self,
+        target: &CellTarget,
+        identity: MutationIdentity,
+        input: C::Payload,
+        bounded: bool,
+    ) -> Result<
+        Committed<Json<PrepareTransactionOutcome>>,
+        InvocationError<Json<PrepareTransactionOutcome>>,
+    >
+    where
+        C: MultipartTransactionCommand<Output = Json<PrepareTransactionOutcome>>,
+        C::Payload: Clone + Send,
+        B: Command<Input = Json<C::Payload>, Output = Json<PrepareTransactionOutcome>>,
+    {
+        let identity = if bounded {
+            let result = self
+                .client
+                .command::<B>(target, identity, Json(input.clone()))
+                .await;
+            if !matches!(
+                &result,
+                Err(InvocationError::Rejected(committed))
+                    if committed.output.0 == PrepareTransactionOutcome::WideRequired
+            ) {
+                // Pending, invalid results and capacity errors retain their
+                // original meaning. Only a durable rejected receipt permits
+                // fallback; never infer rollback from a missing participant.
+                return result;
+            }
+            MutationIdentity {
+                // A different opcode has a different mutation digest. Retain
+                // the phase deadline but never reuse its request identity.
+                request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+                ..identity
+            }
+        } else {
+            identity
+        };
+        self.client
+            .command::<C>(
+                target,
+                identity,
+                Json(TransactionCommandInput::Inline(input)),
+            )
+            .await
+    }
+
     pub(super) async fn upload_transaction<C: MultipartTransactionCommand>(
         &self,
         target: &CellTarget,

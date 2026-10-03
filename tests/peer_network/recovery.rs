@@ -299,3 +299,34 @@ fn identity() -> cellule_runtime::MutationIdentity {
         expires_at_ms: issued_at_ms + 60_000,
     }
 }
+
+// Residency can change after recovery returns. Validate retained identity and
+// durable progress while accepting either the live peer or this replacement.
+pub(crate) fn assert_retained_range(
+    before: &cellule_runtime::control::Control,
+    after: &cellule_runtime::control::Control,
+    replacement: cellule_runtime::identity::SessionId,
+    live_peer: cellule_runtime::identity::SessionId,
+) {
+    assert_eq!(after.cell, before.cell);
+    assert_eq!(after.incarnation, before.incarnation);
+    assert_eq!(after.code, before.code);
+    assert_eq!(after.schema, before.schema);
+    assert!(after.epoch >= before.epoch);
+    assert!(
+        after.root.as_ref().unwrap().commit_sequence
+            >= before.root.as_ref().unwrap().commit_sequence
+    );
+    if let Some(owner) = &after.owner {
+        assert!(owner.session == replacement || owner.session == live_peer);
+        if before
+            .owner
+            .as_ref()
+            .is_none_or(|previous| previous.session != owner.session)
+        {
+            assert!(after.epoch > before.epoch);
+        }
+    } else {
+        assert_eq!(after.state, cellule_runtime::control::ControlState::Idle);
+    }
+}

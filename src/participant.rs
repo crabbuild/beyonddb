@@ -2,6 +2,7 @@
 
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue, TransactionFailure};
+use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 use cellule_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,40 @@ pub(crate) const fn phase_operation(id: u32) -> cellule_runtime::registry::Opera
         input_limit: 4096,
         output_limit: 4096,
         ..crate::operation(id)
+    }
+}
+
+// The adapter selects this path for payloads at most 32 KiB. The larger input
+// envelope leaves codec headroom and the result budget admits concurrent small
+// prepares without reserving 4 MiB per request in the 16 MiB Cell mailbox.
+pub(crate) const SMALL_PREPARE_BYTES: usize = 32 * 1024;
+const PREPARE_BYTES: u32 = 64 * 1024;
+
+pub(crate) const fn bounded_prepare_operation(
+    id: u32,
+) -> cellule_runtime::registry::OperationDescriptor {
+    cellule_runtime::registry::OperationDescriptor {
+        input_limit: PREPARE_BYTES,
+        output_limit: PREPARE_BYTES,
+        ..crate::operation(id)
+    }
+}
+
+pub(crate) fn bound_prepare_result(
+    result: CommandResult<Json<PrepareTransactionOutcome>>,
+) -> Result<CommandResult<Json<PrepareTransactionOutcome>>> {
+    let output = match &result {
+        CommandResult::Success(output) | CommandResult::Rejected(output) => output,
+    };
+    let mut encoder = BoundedEncoder::new(PREPARE_BYTES)?;
+    match output.encode(&mut encoder) {
+        Ok(()) => Ok(result),
+        // Cellule rolls back application changes before durably recording this
+        // rejected receipt. Do not truncate a condition failure's old image.
+        Err(CodecError::Limit) => Ok(CommandResult::Rejected(Json(
+            PrepareTransactionOutcome::WideRequired,
+        ))),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -46,6 +81,9 @@ pub enum PrepareTransactionOutcome {
     Sealed,
     NotReady,
     WrongPartition,
+    /// Bounded prepare rolled back; retry with the wide reply envelope.
+    /// Emitted only by the bounded prepare commands.
+    WideRequired,
 }
 
 /// A terminal coordinator decision for one participant.
@@ -370,6 +408,77 @@ pub enum TransactionReadResult {
     Item(Option<Item>),
 }
 
+const READ_RESULT_BYTES: u32 = 64 * 1024;
+
+pub(crate) const fn bounded_read_result_operation(
+    id: u32,
+) -> cellule_runtime::registry::OperationDescriptor {
+    cellule_runtime::registry::OperationDescriptor {
+        input_limit: 4096,
+        output_limit: READ_RESULT_BYTES,
+        ..crate::operation(id)
+    }
+}
+
+/// Compact immutable participant image with an explicit wide-query fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundedTransactionReadResult {
+    /// No committed saved image exists for this identity and position.
+    Unavailable,
+    /// The complete saved image, including an absent item.
+    Item(Option<Item>),
+    /// Fetch the same saved image through the existing wide query.
+    WideRequired,
+}
+
+impl WireValue for BoundedTransactionReadResult {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
+        match self {
+            Self::Unavailable => encoder.write_u8(0),
+            Self::WideRequired => encoder.write_u8(2),
+            Self::Item(item) => {
+                let images = std::slice::from_ref(item);
+                match crate::item_wire::images_size(images) {
+                    Ok(size) if size < READ_RESULT_BYTES as usize => {
+                        encoder.write_u8(1)?;
+                        crate::item_wire::encode_images(images, encoder)
+                    }
+                    Ok(_) | Err(CodecError::Limit) => encoder.write_u8(2),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
+        match decoder.read_u8()? {
+            0 => Ok(Self::Unavailable),
+            1 => {
+                let mut images = crate::item_wire::decode_images(decoder)?;
+                if images.len() != 1 {
+                    return Err(CodecError::Invalid("saved read requires one image"));
+                }
+                images
+                    .pop()
+                    .map(Self::Item)
+                    .ok_or(CodecError::Invalid("missing saved image"))
+            }
+            2 => Ok(Self::WideRequired),
+            _ => Err(CodecError::Invalid("unknown saved read envelope")),
+        }
+    }
+}
+
+pub(crate) fn bounded_read_result(
+    context: &QueryContext<'_>,
+    input: ReadTransactionResultInput,
+) -> Result<BoundedTransactionReadResult> {
+    Ok(match read_result(context, input)?.0 {
+        TransactionReadResult::Unavailable => BoundedTransactionReadResult::Unavailable,
+        TransactionReadResult::Item(item) => BoundedTransactionReadResult::Item(item),
+    })
+}
+
 pub(crate) fn read_result(
     context: &QueryContext<'_>,
     input: ReadTransactionResultInput,
@@ -441,4 +550,64 @@ pub(crate) fn read(
         _ => return Err(Error::Command("invalid participant transaction state")),
     };
     Ok(Json(outcome))
+}
+
+#[cfg(test)]
+mod saved_read_tests {
+    use super::*;
+    use extenddb_core::types::AttributeValue;
+
+    fn encode(value: &BoundedTransactionReadResult) -> Vec<u8> {
+        let mut encoder = BoundedEncoder::new(READ_RESULT_BYTES).unwrap();
+        value.encode(&mut encoder).unwrap();
+        encoder.finish()
+    }
+
+    fn decode(bytes: &[u8]) -> std::result::Result<BoundedTransactionReadResult, CodecError> {
+        let mut decoder = BoundedDecoder::new(bytes, READ_RESULT_BYTES)?;
+        let value = BoundedTransactionReadResult::decode(&mut decoder)?;
+        decoder.finish()?;
+        Ok(value)
+    }
+
+    #[test]
+    fn saved_read_exact_limit_preserves_image_and_larger_reply_requests_fallback() {
+        let image = |size| {
+            BoundedTransactionReadResult::Item(Some(Item::from([(
+                "value".into(),
+                AttributeValue::B(vec![0xa5; size]),
+            )])))
+        };
+        let largest = image(65_512);
+        let bytes = encode(&largest);
+        assert_eq!(bytes.len(), READ_RESULT_BYTES as usize);
+        assert_eq!(decode(&bytes).unwrap(), largest);
+        assert_eq!(encode(&image(65_513)), vec![2]);
+        assert_eq!(
+            decode(&[2]).unwrap(),
+            BoundedTransactionReadResult::WideRequired
+        );
+    }
+
+    #[test]
+    fn saved_read_rejects_malformed_envelopes_and_preserves_absent_item() {
+        for count in [0, 2] {
+            let mut encoder = BoundedEncoder::new(64).unwrap();
+            encoder.write_u8(1).unwrap();
+            encoder.write_count(count).unwrap();
+            for _ in 0..count {
+                encoder.write_bool(false).unwrap();
+            }
+            assert!(decode(&encoder.finish()).is_err());
+        }
+        for bytes in [&[255][..], &[2, 0][..], &[1][..]] {
+            assert!(decode(bytes).is_err());
+        }
+        let absent = BoundedTransactionReadResult::Item(None);
+        assert_eq!(decode(&encode(&absent)).unwrap(), absent);
+        assert_ne!(
+            encode(&absent),
+            encode(&BoundedTransactionReadResult::Unavailable)
+        );
+    }
 }

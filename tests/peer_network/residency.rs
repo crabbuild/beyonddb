@@ -1,18 +1,32 @@
+mod active_owners;
+mod cell_models;
 mod codec;
+mod coordinator_admission;
+mod coordinator_discovery;
+mod coordinator_registration;
 mod creation;
+mod credential_failover;
 mod deletion;
 mod directories;
 mod discovery;
+mod follower_durability;
+mod forward_cache;
 mod index_splits;
+mod live_owner_failover;
 mod ownership_race;
 mod placement;
+mod prepare_batch;
+mod prepare_capacity;
+mod pressure;
 mod provisioning;
 mod rebalance;
 mod reclamation;
 mod recovery;
+mod saved_images;
 mod splits;
 mod statistics;
 mod table_class;
+mod update_batch;
 mod usage;
 
 use crate::*;
@@ -61,6 +75,51 @@ impl Fixture {
         partitions: u16,
         store: Arc<dyn object_store::ObjectStore>,
         cell_capacity: usize,
+    ) -> Self {
+        Self::with_store_capacity_and_peer_cache(partitions, store, cell_capacity, false).await
+    }
+
+    async fn with_store_capacity_and_peer_cache(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
+    ) -> Self {
+        Self::with_store_capacity_cache_and_router(
+            partitions,
+            store,
+            cell_capacity,
+            peer_cache,
+            std::convert::identity,
+        )
+        .await
+    }
+
+    async fn with_store_capacity_cache_and_router(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+    ) -> Self {
+        Self::with_store_capacity_cache_router_and_telemetry(
+            partitions,
+            store,
+            cell_capacity,
+            peer_cache,
+            wrap,
+            None,
+        )
+        .await
+    }
+
+    async fn with_store_capacity_cache_router_and_telemetry(
+        partitions: u16,
+        store: Arc<dyn object_store::ObjectStore>,
+        cell_capacity: usize,
+        peer_cache: bool,
+        wrap: impl FnOnce(axum::Router) -> axum::Router,
+        telemetry: Option<Arc<dyn cellule_runtime::fleet::telemetry::CellTelemetry>>,
     ) -> Self {
         // SDK errors deliberately hide storage details. Retain server warnings
         // in the test output so CI failures identify the underlying boundary.
@@ -114,6 +173,9 @@ impl Fixture {
             lease.clone(),
         )
         .await;
+        if let Some(telemetry) = telemetry {
+            node.install_telemetry(telemetry).unwrap();
+        }
         let peers = Arc::new(
             BeyonddbPeers::new(&node, layout.clone(), directory.clone(), session, &tls).unwrap(),
         );
@@ -156,7 +218,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let client = peers.client(provisioner.clone());
+        let client = peers.client_with_cache(provisioner.clone(), peer_cache);
         CellAuthorizationStore::new(client.clone())
             .put_user_policy(
                 "123456789012",
@@ -174,7 +236,7 @@ impl Fixture {
             )
             .await
             .unwrap();
-        let router = peers.router(provisioner.clone());
+        let router = wrap(peers.router_with_cache(provisioner.clone(), peer_cache));
         let peer_server = tokio::spawn(async move {
             axum::serve(
                 tls.listener(listener),

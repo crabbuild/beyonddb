@@ -157,7 +157,8 @@ mod tests {
     use cellule_app::CellApplication;
     use cellule_ltx::rusqlite::{Connection, params};
     use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
-    use cellule_runtime::identity::{CellTarget, Digest, TenantId};
+    use cellule_runtime::control::OwnerFence;
+    use cellule_runtime::identity::{CellTarget, Digest, IncarnationId, TenantId};
     use cellule_runtime::registry::{BuildDescriptor, CommandInvocation, QueryInvocation};
 
     use super::*;
@@ -249,6 +250,10 @@ mod tests {
                             codec_version: 1,
                             schema: 1,
                             target: target.clone(),
+                            owner_fence: OwnerFence {
+                                incarnation: IncarnationId::from_bytes([1; 16]),
+                                epoch: 1,
+                            },
                             sequence,
                             now_ms: RETENTION_MS + 1_000,
                             input: &input,

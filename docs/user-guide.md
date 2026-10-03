@@ -33,6 +33,7 @@ Create `Notes`, then wait for its route to become active before writing. This ex
 ```sh
 aws dynamodb create-table \
   --table-name Notes \
+  --tags Key=beyonddb:cell-model,Value=single \
   --attribute-definitions AttributeName=pk,AttributeType=S \
   --key-schema AttributeName=pk,KeyType=HASH \
   --billing-mode PAY_PER_REQUEST \
@@ -47,7 +48,18 @@ aws dynamodb describe-table \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only. The node's `max_active_cells` budget must include those data Cells plus account, coordinator, and management Cells; if the budget is too small, provisioning remains pending until capacity is available. `sql_workers` is an optional override for the SQL worker count (maximum sixteen); the default follows host parallelism. Use it for multi-partition workloads after measuring CPU and memory headroom. It improves independent Cell scheduling, while a single hot Cell remains serialized for ordering and durable publication.
+This example keeps the table in one base data Cell. Choose a model at creation:
+
+| `beyonddb:cell-model` value | Behavior |
+| --- | --- |
+| `single` | One base data Cell; no base splits |
+| `auto` | Start with one base data Cell; allow splits |
+| `partitioned` | Start with at least two base data Cells, using the configured count |
+| Omitted | Use the server's existing `initial_partitions` default |
+
+The selector is a BeyondDB extension. Changing tags after creation does not change placement. GSIs remain separate and can grow independently; LSIs share base storage. Live model conversion is unfinished. Read [Cell model selection and limits](scaling.md#choose-a-tables-cell-model) before choosing a fixed single Cell.
+
+Without the selector, the serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only. The node's `max_active_cells` budget must include those data Cells plus account, coordinator, and management Cells; if the budget is too small, provisioning remains pending until capacity is available. `sql_workers` is an optional override for the SQL worker count (maximum sixteen); the default follows host parallelism. Use it for multi-partition workloads after measuring CPU and memory headroom. It improves independent Cell scheduling, while a single hot Cell remains serialized for ordering and durable publication.
 
 ## Write and read an item
 

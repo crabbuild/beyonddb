@@ -8,9 +8,10 @@ use std::{
 };
 
 use cellule_host::CellNodeTaskGroup;
+use cellule_runtime::cell::catalog::CatalogRole;
 use cellule_runtime::client::CellClient;
 use cellule_runtime::control::{ControlState, authority::CellAuthority};
-use cellule_runtime::identity::CellTarget;
+use cellule_runtime::identity::{CellTarget, IncarnationId};
 use cellule_runtime::node::NodeDirectory;
 use cellule_runtime::partition_for_shard;
 use extenddb_storage::error::StorageError;
@@ -34,6 +35,17 @@ type Initialize =
 #[derive(Default)]
 pub(super) struct CoordinatorRecovery {
     shards: RwLock<BTreeMap<[u8; 32], RecoveryShard>>,
+    registrations: RwLock<HashMap<[u8; 32], ResidentRegistration>>,
+}
+
+// Registrations are monotonic within an account incarnation. This receipt only
+// removes repeated admission reads; actor dispatch retains its normal fences.
+const MAX_RESIDENT_REGISTRATIONS: usize = 4_096;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ResidentRegistration {
+    account: IncarnationId,
+    coordinator: IncarnationId,
 }
 
 #[derive(Clone)]
@@ -44,6 +56,97 @@ struct RecoveryShard {
 }
 
 impl CellInitialPartitionProvisioner {
+    async fn resident_registration(
+        &self,
+        account: &CellTarget,
+        coordinator: &CellTarget,
+    ) -> Result<Option<ResidentRegistration>, StorageError> {
+        let (account_handle, coordinator_handle) = tokio::try_join!(
+            self.runtime.resident_handle(account, CatalogRole::Sql),
+            self.runtime.resident_handle(coordinator, CatalogRole::Sql),
+        )
+        .map_err(provision_error)?;
+        let (Some(account_handle), Some(coordinator_handle)) = (account_handle, coordinator_handle)
+        else {
+            return Ok(None);
+        };
+        let registry = self.application.registry();
+        if Some(account_handle.code()) != registry.module_code(crate::MODULE)
+            || Some(coordinator_handle.code())
+                != registry.module_code(crate::transaction_coordinator::MODULE)
+            || account_handle.schema() != 1
+            || coordinator_handle.schema() != 1
+        {
+            return Ok(None);
+        }
+        Ok(Some(ResidentRegistration {
+            account: account_handle.incarnation(),
+            coordinator: coordinator_handle.incarnation(),
+        }))
+    }
+
+    async fn has_resident_registration(
+        &self,
+        account: &CellTarget,
+        coordinator: &CellTarget,
+    ) -> Result<bool, StorageError> {
+        let cached = self
+            .transaction_recovery
+            .registrations
+            .read()
+            .map_err(|_| StorageError::Internal("coordinator registration cache poisoned".into()))?
+            .get(coordinator.cell_id().as_bytes())
+            .copied();
+        let Some(cached) = cached else {
+            return Ok(false);
+        };
+        if self.resident_registration(account, coordinator).await? == Some(cached) {
+            return Ok(true);
+        }
+        let mut registrations = self
+            .transaction_recovery
+            .registrations
+            .write()
+            .map_err(|_| {
+                StorageError::Internal("coordinator registration cache poisoned".into())
+            })?;
+        // A concurrent admission may have recorded a newer incarnation.
+        if registrations.get(coordinator.cell_id().as_bytes()) == Some(&cached) {
+            registrations.remove(coordinator.cell_id().as_bytes());
+        }
+        Ok(false)
+    }
+
+    pub(super) async fn remember_coordinator_registration(
+        &self,
+        account: &CellTarget,
+        coordinator: &CellTarget,
+        account_incarnation: IncarnationId,
+    ) -> Result<(), StorageError> {
+        let Some(resident) = self.resident_registration(account, coordinator).await? else {
+            return Ok(());
+        };
+        if resident.account != account_incarnation {
+            return Ok(());
+        }
+        let mut registrations = self
+            .transaction_recovery
+            .registrations
+            .write()
+            .map_err(|_| {
+                StorageError::Internal("coordinator registration cache poisoned".into())
+            })?;
+        let cell = *coordinator.cell_id().as_bytes();
+        if registrations.len() >= MAX_RESIDENT_REGISTRATIONS
+            && !registrations.contains_key(&cell)
+            && let Some(evicted) = registrations.keys().next().copied()
+        {
+            registrations.remove(&evicted);
+        }
+        registrations.insert(cell, resident);
+        Ok(())
+    }
+
     pub(super) fn track_coordinator(&self, target: &CellTarget) -> Result<(), StorageError> {
         if target.namespace() != crate::transaction_coordinator::NAMESPACE {
             return Ok(());
@@ -208,6 +311,11 @@ impl CellInitialPartitionProvisioner {
         after: &mut Option<u32>,
     ) -> Result<(), StorageError> {
         let account = account_target(account_id).map_err(provision_error)?;
+        // The index can be owned by the same failed node as the unknown shard.
+        // Restore Idle/expired account authority before routing its discovery
+        // query; a live remote owner remains in place under the normal fence.
+        self.recover_discovered_owner(&account, crate::MODULE, initialize_account, nodes)
+            .await?;
         let page = client
             .query::<ListCoordinatorShards>(
                 &account,
@@ -675,6 +783,9 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             let account = account_target(account_id).map_err(provision_error)?;
             let target =
                 crate::coordinator_target(account_id, routing_key).map_err(provision_error)?;
+            if self.has_resident_registration(&account, &target).await? {
+                return Ok(());
+            }
             let shard = u32::from_be_bytes(
                 target
                     .partition()
@@ -687,23 +798,21 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             };
             // Registration is discovery, not residency. A released shard must
             // restore its published root before token lookup or a new BEGIN.
-            // These reads use independent stores: the registration is in the
-            // account Cell and the authority record is local node metadata.
-            // Start them together so admission pays for the slower read once.
-            let (registered, observed) = tokio::try_join!(
+            // Registration, authority and immutable catalog publication are
+            // independent. Start them together; bootstrap still requires the
+            // published catalog proof, and BEGIN still waits for registration.
+            let missing_generation = self.coordinator_bootstrap.generation(&target);
+            let ((registered, registration_receipt), observed, proof) = tokio::try_join!(
                 async {
-                    Ok::<_, StorageError>(
-                        client
-                            .query::<crate::ReadCoordinatorRegistration>(
-                                &account,
-                                None,
-                                Json(input.clone()),
-                            )
-                            .await
-                            .map_err(cell_error)?
-                            .output
-                            .0,
-                    )
+                    let registration = client
+                        .query::<crate::ReadCoordinatorRegistration>(
+                            &account,
+                            None,
+                            Json(input.clone()),
+                        )
+                        .await
+                        .map_err(cell_error)?;
+                    Ok::<_, StorageError>((registration.output.0, registration.receipt))
                 },
                 async {
                     CellAuthority::new(self.layout.clone())
@@ -711,6 +820,7 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                         .await
                         .map_err(provision_error)
                 },
+                self.provision_module_catalog(&target, crate::transaction_coordinator::MODULE),
             )?;
             if registered
                 && observed
@@ -724,10 +834,9 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
             if observed.as_ref().is_some_and(|record| {
                 record.value().owner.is_some() && record.value().root.is_some()
             }) {
-                // Another node may have published this shard before registration.
+                // Catalog provision validates the exact immutable entry even
+                // when another node published this shard before registration.
                 // Keep its authority; the routed client will reach that owner.
-                self.cataloged(&target, crate::transaction_coordinator::MODULE)
-                    .await?;
                 if observed
                     .as_ref()
                     .and_then(|record| record.value().owner.as_ref())
@@ -737,24 +846,51 @@ impl crate::CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 }
             } else {
                 self.reclaim_retired_ranges(client, &account, None).await?;
-                self.admit_module(
-                    &target,
-                    crate::transaction_coordinator::MODULE,
-                    initialize_coordinator,
-                )
-                .await?;
+                if observed.is_none() {
+                    self.admit_missing_coordinator(&target, missing_generation, proof)
+                        .await?;
+                } else {
+                    self.admit_initialized(&target, proof, initialize_coordinator)
+                        .await
+                        .map_err(provision_error)?;
+                }
             }
             if registered {
+                // A query can observe a registration while publication is still
+                // in flight. Cache it only when the account's published root
+                // covers that observation; otherwise use normal admission again.
+                if self
+                    .resident_registration(&account, &target)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(());
+                }
+                let published = CellAuthority::new(self.layout.clone())
+                    .load(account.cell_id())
+                    .await
+                    .map_err(provision_error)?;
+                if published.as_ref().is_some_and(|control| {
+                    control.value().incarnation == registration_receipt.incarnation
+                        && control.value().root.as_ref().is_some_and(|root| {
+                            root.commit_sequence >= registration_receipt.commit_sequence
+                        })
+                }) {
+                    self.remember_coordinator_registration(
+                        &account,
+                        &target,
+                        registration_receipt.incarnation,
+                    )
+                    .await?;
+                }
                 return Ok(());
             }
-            client
-                .command::<crate::RegisterCoordinatorShard>(
-                    &account,
-                    crate::backend::mutation_identity()?,
-                    Json(input),
-                )
-                .await
-                .map_err(cell_error)?;
+            let account_incarnation = self
+                .coordinator_registrations
+                .register(client, &account, account_id, shard)
+                .await?;
+            self.remember_coordinator_registration(&account, &target, account_incarnation)
+                .await?;
             Ok(())
         })
     }

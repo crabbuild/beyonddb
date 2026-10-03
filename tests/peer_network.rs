@@ -954,6 +954,31 @@ async fn run_signed_sdk_network_recovery() {
     };
     let (restart_coordinator, _) =
         recovery::abandon_commit(&provisioner, &client, restart_id, "changed-endpoint").await;
+    // Retain the published range identity/progress before losing this owner.
+    // Capacity reclamation may already have left a range Idle on either node.
+    let mut range_baselines = HashMap::new();
+    for name in ["NetworkData", "RemoteTable"] {
+        let table = client
+            .query::<DescribeTable>(&account, None, Json(name.into()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        let route = crate::single_leaf_route(&client, &account, &table.id)
+            .await
+            .unwrap();
+        for partition in route.partitions {
+            let target =
+                beyonddb::data_target("123456789012", &table.id, &partition.partition_id).unwrap();
+            let control = CellAuthority::new(layout.clone())
+                .load(target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            range_baselines.insert(target.cell_id(), control.value().clone());
+        }
+    }
     shutdown_tx.send(()).unwrap();
     server.await.unwrap().unwrap();
     owner_lease.cancel();
@@ -1049,9 +1074,11 @@ async fn run_signed_sdk_network_recovery() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            current.value().owner.as_ref().unwrap().session,
-            replacement_session
+        recovery::assert_retained_range(
+            &range_baselines[&target.cell_id()],
+            current.value(),
+            replacement_session,
+            remote_session,
         );
     }
     let table = replacement_client
@@ -1074,9 +1101,11 @@ async fn run_signed_sdk_network_recovery() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            authority.value().owner.as_ref().unwrap().session,
-            remote_session
+        recovery::assert_retained_range(
+            &range_baselines[&target.cell_id()],
+            authority.value(),
+            replacement_session,
+            remote_session,
         );
     }
     // A live peer may already own a credential shard. Only the failed owner's
@@ -1280,95 +1309,26 @@ async fn run_signed_sdk_network_recovery() {
     index_recovery
         .assert_settled(&replacement_sdk, &replacement_client, "before")
         .await;
-    index_recovery
+    let index_fences = index_recovery
         .assert_owner(&CellAuthority::new(layout.clone()), remote_session)
         .await;
-    // Install before this shard exists. Discovery must see later registrations
-    // without taking a live owner, then recover after that owner stops renewing.
-    replacement_provisioner
-        .install_transaction_recovery_loop(
-            &replacement_tasks,
-            beyonddb::CellStorage::new(replacement_client.clone(), "us-east-1"),
-            peer_directory.clone(),
-            vec!["123456789012".into()],
-        )
-        .unwrap();
-    let failover_id = loop {
-        let id = *uuid::Uuid::now_v7().as_bytes();
-        let target = beyonddb::coordinator_target("123456789012", &id).unwrap();
-        if CellAuthority::new(layout.clone())
-            .load(target.cell_id())
-            .await
-            .unwrap()
-            .is_none()
-        {
-            break id;
-        }
-    };
-    let (failover_coordinator, _) = recovery::abandon_commit(
-        &remote_provisioner,
-        &replacement_client,
-        failover_id,
-        "serving-failover",
-    )
-    .await;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let live = CellAuthority::new(layout.clone())
-        .load(failover_coordinator.cell_id())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(live.value().owner.as_ref().unwrap().session, remote_session);
+    // Live-coordinator preservation and discovery after expiry are qualified
+    // separately by residency::live_owner_failover with an unfinished decision.
     public_server.abort();
     remote_shutdown.send(()).unwrap();
     remote_server.await.unwrap().unwrap();
     remote_lease.cancel();
-    tokio::time::timeout(std::time::Duration::from_secs(45), async {
-        loop {
-            if let Ok(status) = replacement_client
-                .query::<beyonddb::ReadCrossCellTransaction>(
-                    &failover_coordinator,
-                    None,
-                    Json(beyonddb::ReadCrossCellTransactionInput {
-                        account_id: "123456789012".into(),
-                        transaction_id: failover_id,
-                        routing_key: failover_id.to_vec(),
-                    }),
-                )
-                .await
-            {
-                let status = status.output.0.unwrap();
-                assert_eq!(status.decision, beyonddb::CoordinatorDecision::Commit);
-                if status.resolved_count == 2 {
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("serving worker must discover and resolve the failed owner's transaction");
-    for table in ["NetworkData", "RemoteTable"] {
-        let result = replacement_sdk
-            .get_item()
-            .table_name(table)
-            .key("id", AwsAttributeValue::S("serving-failover".into()))
-            .consistent_read(true)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            result.item().unwrap().get("value"),
-            Some(&AwsAttributeValue::S("recovered".into()))
-        );
-    }
     // Recovery runs on the already-serving replacement. Empty journals must
     // not hide the failed index owner; its old image must survive takeover.
     index_recovery
         .assert_settled(&replacement_sdk, &replacement_client, "before")
         .await;
     index_recovery
-        .assert_owner(&CellAuthority::new(layout.clone()), replacement_session)
+        .assert_recovered_authority(
+            &CellAuthority::new(layout.clone()),
+            replacement_session,
+            &index_fences,
+        )
         .await;
     peer_network::global_indexes::IndexRecovery::write(&replacement_sdk, "after").await;
     index_recovery

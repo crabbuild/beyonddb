@@ -5,6 +5,7 @@ mod support;
 mod server_binary {
     mod capacity;
     mod coordinator_recovery;
+    mod follower_durability;
     pub(super) mod global_indexes;
     mod large_reads;
     pub(super) mod local_indexes;
@@ -210,13 +211,32 @@ fn stop(child: &mut Child, log: &Path) {
 struct RustfsContainer {
     name: String,
     log: PathBuf,
+    data_dir: Option<PathBuf>,
 }
 
 impl RustfsContainer {
     fn start(address: SocketAddr, log: PathBuf) -> Self {
+        let name = format!("beyonddb-test-{}", uuid::Uuid::now_v7());
+        // Colima can share the host home while its own volume disk is full.
+        // Each test owns a fresh child of the explicitly selected bind root.
+        let data_dir = std::env::var_os("BEYONDDB_TEST_RUSTFS_BIND_ROOT").map(|root| {
+            let path = PathBuf::from(root).join(&name);
+            fs::create_dir_all(&path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+            }
+            path
+        });
+        let volume = data_dir.as_ref().map_or_else(
+            || "/data".to_owned(),
+            |path| format!("{}:/data", path.display()),
+        );
         let container = Self {
-            name: format!("beyonddb-test-{}", uuid::Uuid::now_v7()),
+            name,
             log,
+            data_dir,
         };
         run(Command::new("docker").args([
             "run",
@@ -234,7 +254,7 @@ impl RustfsContainer {
             "--env",
             "RUSTFS_OBS_LOG_DIRECTORY=/data/logs",
             "--volume",
-            "/data",
+            &volume,
             "ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858",
         ]));
         container
@@ -261,11 +281,20 @@ impl Drop for RustfsContainer {
             // Failed recovery fixtures retain their object data for startup
             // replay. Stop serving, but preserve the named container and volume.
             eprintln!("retained RustFS container for replay: {}", self.name);
+            if let Some(path) = &self.data_dir {
+                eprintln!("retained RustFS bind data: {}", path.display());
+            }
             command.args(["stop", &self.name]);
         } else {
             command.args(["rm", "--force", "--volumes", &self.name]);
         }
-        let _ = command.output();
+        let removed = command.output().is_ok_and(|output| output.status.success());
+        if removed
+            && !std::thread::panicking()
+            && let Some(path) = &self.data_dir
+        {
+            let _ = fs::remove_dir_all(path);
+        }
     }
 }
 

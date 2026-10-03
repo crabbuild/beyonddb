@@ -3,6 +3,7 @@
 use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
+use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
@@ -123,6 +124,8 @@ fn execute_write(
 pub enum PartitionTransactReadOutcome {
     /// Every requested image was read from one Cell snapshot.
     Applied(Vec<Option<Item>>),
+    /// The encoded aggregate requires reading durable participant images individually.
+    SavedImagesRequired,
     /// No image was returned because one operation failed validation or locking.
     Rejected {
         /// Position of the failing read.
@@ -201,12 +204,44 @@ impl Command for PartitionTransactRead {
 /// Read a transaction batch through Cellule's read-only query path.
 pub struct PartitionTransactReadQuery;
 
+/// Compact read images with an explicit fallback for oversized aggregates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartitionTransactReadQueryOutput(pub PartitionTransactReadOutcome);
+
+impl WireValue for PartitionTransactReadQueryOutput {
+    fn encode(&self, encoder: &mut BoundedEncoder) -> std::result::Result<(), CodecError> {
+        crate::encode_read_query(
+            &self.0,
+            match &self.0 {
+                PartitionTransactReadOutcome::Applied(images) => Some(images),
+                _ => None,
+            },
+            &PartitionTransactReadOutcome::SavedImagesRequired,
+            encoder,
+        )
+    }
+
+    fn decode(decoder: &mut BoundedDecoder<'_>) -> std::result::Result<Self, CodecError> {
+        Ok(Self(
+            if let Some(images) = crate::decode_read_query_images(decoder)? {
+                PartitionTransactReadOutcome::Applied(images)
+            } else {
+                let outcome = Json::<PartitionTransactReadOutcome>::decode(decoder)?.0;
+                if matches!(outcome, PartitionTransactReadOutcome::Applied(_)) {
+                    return Err(CodecError::Invalid("read images require compact envelope"));
+                }
+                outcome
+            },
+        ))
+    }
+}
+
 impl Query for PartitionTransactReadQuery {
     const MODULE: &'static str = DATA_MODULE;
     const ID: u32 = 19;
-    const CODEC_VERSION: u32 = 1;
+    const CODEC_VERSION: u32 = 3;
     type Input = Json<PartitionTransactWriteInput>;
-    type Output = Json<PartitionTransactReadOutcome>;
+    type Output = PartitionTransactReadQueryOutput;
 
     fn execute(context: &mut QueryContext<'_>, Json(input): Self::Input) -> Result<Self::Output> {
         let rows = context.sql(&statement(
@@ -214,28 +249,42 @@ impl Query for PartitionTransactReadQuery {
             vec![],
         ))?;
         let Some(spec) = super::decode_spec(&rows[0])? else {
-            return Ok(Json(PartitionTransactReadOutcome::NotInstalled));
+            return Ok(PartitionTransactReadQueryOutput(
+                PartitionTransactReadOutcome::NotInstalled,
+            ));
         };
         if spec.table.id != input.table_id || spec.epoch != input.epoch {
-            return Ok(Json(PartitionTransactReadOutcome::StaleRoute));
+            return Ok(PartitionTransactReadQueryOutput(
+                PartitionTransactReadOutcome::StaleRoute,
+            ));
         }
         match super::query_access(context)? {
             AccessState::Serving => {}
-            AccessState::Sealed => return Ok(Json(PartitionTransactReadOutcome::Sealed)),
-            AccessState::Importing => return Ok(Json(PartitionTransactReadOutcome::NotReady)),
+            AccessState::Sealed => {
+                return Ok(PartitionTransactReadQueryOutput(
+                    PartitionTransactReadOutcome::Sealed,
+                ));
+            }
+            AccessState::Importing => {
+                return Ok(PartitionTransactReadQueryOutput(
+                    PartitionTransactReadOutcome::NotReady,
+                ));
+            }
         }
         if input.operations.is_empty() || input.operations.len() > 100 {
-            return Ok(Json(PartitionTransactReadOutcome::Rejected {
-                index: 0,
-                reason: TransactionFailure::Validation(
-                    "transaction operation count is outside 1..=100".into(),
-                ),
-            }));
+            return Ok(PartitionTransactReadQueryOutput(
+                PartitionTransactReadOutcome::Rejected {
+                    index: 0,
+                    reason: TransactionFailure::Validation(
+                        "transaction operation count is outside 1..=100".into(),
+                    ),
+                },
+            ));
         }
         let images = match query_stage_operations(context, &spec, input.operations)? {
             Ok(images) => images,
             Err(error) => {
-                return Ok(Json(match error {
+                return Ok(PartitionTransactReadQueryOutput(match error {
                     StageError::StaleRoute => PartitionTransactReadOutcome::StaleRoute,
                     StageError::WrongPartition => PartitionTransactReadOutcome::WrongPartition,
                     StageError::Rejected { index, reason } => {
@@ -244,7 +293,9 @@ impl Query for PartitionTransactReadQuery {
                 }));
             }
         };
-        Ok(Json(PartitionTransactReadOutcome::Applied(images)))
+        Ok(PartitionTransactReadQueryOutput(
+            PartitionTransactReadOutcome::Applied(images),
+        ))
     }
 }
 
@@ -534,6 +585,8 @@ fn apply_staged(
 
 mod participant;
 pub use participant::*;
+mod prepare_batch;
+pub use prepare_batch::*;
 
 pub(super) fn key_locked(context: &mut CommandContext<'_, '_>, key: &[u8]) -> Result<bool> {
     Ok(!context.sql(&lock_query(key, false))?[0].rows.is_empty())

@@ -1,7 +1,8 @@
 use crate::*;
 use beyonddb::{
-    ReadAccountTransactionResult, ReadPartitionTransactionResult, ReadTransactionResultInput,
-    TransactionReadResult,
+    BoundedTransactionReadResult, ReadAccountTransactionResult,
+    ReadAccountTransactionResultBounded, ReadPartitionTransactionResult,
+    ReadPartitionTransactionResultBounded, ReadTransactionResultInput, TransactionReadResult,
 };
 use extenddb_core::types::TableKeyInfo;
 
@@ -258,7 +259,23 @@ async fn saved(
         },
         position: 0,
     });
-    match participant {
+    let bounded = match participant {
+        CoordinatorParticipantTarget::Account => {
+            client
+                .query::<ReadAccountTransactionResultBounded>(target, None, input.clone())
+                .await
+                .unwrap()
+                .output
+        }
+        CoordinatorParticipantTarget::Data { .. } => {
+            client
+                .query::<ReadPartitionTransactionResultBounded>(target, None, input.clone())
+                .await
+                .unwrap()
+                .output
+        }
+    };
+    let wide = match participant {
         CoordinatorParticipantTarget::Account => {
             client
                 .query::<ReadAccountTransactionResult>(target, None, input)
@@ -275,5 +292,17 @@ async fn saved(
                 .output
                 .0
         }
+    };
+    match bounded {
+        BoundedTransactionReadResult::Unavailable => {
+            assert_eq!(wide, TransactionReadResult::Unavailable)
+        }
+        BoundedTransactionReadResult::Item(item) => {
+            assert_eq!(wide, TransactionReadResult::Item(item))
+        }
+        BoundedTransactionReadResult::WideRequired => {
+            assert!(matches!(wide, TransactionReadResult::Item(Some(_))))
+        }
     }
+    wide
 }

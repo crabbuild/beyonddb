@@ -310,26 +310,16 @@ impl CellInitialPartitionProvisioner {
                     .await
                     .map_err(cell_error)?;
             }
-            if !self
-                .retire_directory_step(client, account_id, &spec)
+            let Some(sequence) = self
+                .retire_directory_receipt(client, account_id, &spec)
                 .await?
-            {
+            else {
                 return Ok(false);
-            }
-            let directory = directory_target(account_id, &spec).map_err(provision_error)?;
-            let observed = client
-                .query::<ReadDirectory>(&directory, None, Json(()))
-                .await
-                .map_err(cell_error)?;
-            if !observed
-                .output
-                .0
-                .is_some_and(|state| state.spec == spec && state.mode == DirectoryMode::Retired)
-            {
-                return Err(StorageError::Transient(
-                    "directory retirement is not complete".into(),
-                ));
-            }
+            };
+            // The traversal verified this immutable root's terminal state and
+            // observed its durable sequence. Residency may be released before
+            // the account acknowledgement; rereading the root is unnecessary
+            // and can fail for a local maintenance client after reclamation.
             client
                 .command::<crate::RecordTableDirectoryRetirement>(
                     &account,
@@ -337,7 +327,7 @@ impl CellInitialPartitionProvisioner {
                     Json(crate::TableDirectoryRetirement {
                         table_id: table_id.into(),
                         directory_id: spec.table_id,
-                        sequence: observed.receipt.commit_sequence,
+                        sequence,
                     }),
                 )
                 .await
@@ -365,6 +355,19 @@ impl CellInitialPartitionProvisioner {
         account_id: &str,
         root: &DirectorySpec,
     ) -> Result<bool, StorageError> {
+        self.retire_directory_receipt(client, account_id, root)
+            .await
+            .map(|receipt| receipt.is_some())
+    }
+
+    // Some(sequence) proves the exact root and every planned descendant are
+    // durably retired. None retains the next bounded child step for recovery.
+    async fn retire_directory_receipt(
+        &self,
+        client: &CellClient,
+        account_id: &str,
+        root: &DirectorySpec,
+    ) -> Result<Option<u64>, StorageError> {
         let mut current = root.clone();
         let mut parent = None;
         let mut published = true;
@@ -423,7 +426,7 @@ impl CellInitialPartitionProvisioner {
             match mode {
                 DirectoryMode::Retired => {
                     let Some(parent) = parent else {
-                        return Ok(true);
+                        return Ok(Some(sequence));
                     };
                     let parent_client = self
                         .existing_directory_client(client, account_id, &parent)
@@ -441,7 +444,8 @@ impl CellInitialPartitionProvisioner {
                         )
                         .await
                         .map_err(cell_error)?;
-                    return Ok(parent == *root && recorded.output.0);
+                    return Ok((parent == *root && recorded.output.0)
+                        .then_some(recorded.receipt.commit_sequence));
                 }
                 DirectoryMode::Retiring {
                     children,

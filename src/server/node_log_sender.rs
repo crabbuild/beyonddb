@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
@@ -23,10 +23,13 @@ use reqwest::{StatusCode, Url, header};
 use super::{
     node_lease::unix_time_ms,
     node_log_receiver::{self, Operation, WireRequest},
+    runtime_metrics::{FollowerPhase, RuntimeMetrics, observe_follower},
 };
 
 const PEER_CACHE_MS: i64 = 500;
 const MAX_CACHED_PEERS: usize = 128;
+// Match the reviewed NodeDirectory::resolve_node live-scan bound.
+const MAX_DISCOVERY_NODES: usize = 1_024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(32);
 const MAX_TOTAL_TAIL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TAIL_PAGES: usize = 4096;
@@ -44,6 +47,8 @@ pub struct PeerNodeLogTransport {
     guard: NodeLeaseGuard,
     local_store: Option<Arc<FollowerStore>>,
     peers: Arc<Mutex<VecDeque<CachedPeer>>>,
+    discovery: Arc<Mutex<Weak<tokio::sync::OnceCell<FleetDiscovery>>>>,
+    metrics: Option<Arc<RuntimeMetrics>>,
 }
 
 #[derive(Clone)]
@@ -56,6 +61,11 @@ struct CachedPeer {
     expires_at_ms: i64,
     endpoint: Url,
     client: reqwest::Client,
+}
+
+struct FleetDiscovery {
+    observed_at_ms: i64,
+    advertisements: Vec<NodeAdvertisement>,
 }
 
 impl PeerNodeLogTransport {
@@ -85,7 +95,16 @@ impl PeerNodeLogTransport {
             guard,
             local_store: None,
             peers: Arc::new(Mutex::new(VecDeque::new())),
+            discovery: Arc::new(Mutex::new(Weak::new())),
+            metrics: None,
         }
+    }
+
+    /// Enable bounded append-phase observations, including cancelled requests.
+    #[must_use]
+    pub fn with_runtime_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Allow a recovery claimant to seal/read its own persistent follower lane.
@@ -123,6 +142,9 @@ impl PeerNodeLogTransport {
         if member == self.node {
             return Err(Error::PeerAuthorization("follower is the local node"));
         }
+        if member.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(Error::Node("node identity is zero"));
+        }
         let now_ms = unix_time_ms()?;
         if let Some(peer) = self
             .peers
@@ -138,13 +160,49 @@ impl PeerNodeLogTransport {
         {
             return Ok(peer);
         }
-        let advertisement = self
-            .directory
-            .resolve_node(member, now_ms)
-            .await?
+        // The shipper appends to its distinct members concurrently. Share that
+        // cohort's complete signed scan instead of scanning the fleet once per
+        // follower. Only in-flight lookups keep this observation alive; normal
+        // peer-cache freshness and hard advertisement expiry remain unchanged.
+        let discovery = {
+            let mut current = self
+                .discovery
+                .lock()
+                .map_err(|_| Error::Peer("node-log discovery state is poisoned"))?;
+            match current.upgrade() {
+                Some(discovery) => discovery,
+                None => {
+                    let discovery = Arc::new(tokio::sync::OnceCell::new());
+                    *current = Arc::downgrade(&discovery);
+                    discovery
+                }
+            }
+        };
+        let observed = discovery
+            .get_or_try_init(|| async {
+                self.guard.check()?;
+                let observed_at_ms = unix_time_ms()?;
+                let advertisements = self
+                    .directory
+                    .live(observed_at_ms, MAX_DISCOVERY_NODES)
+                    .await?;
+                self.guard.check()?;
+                Ok::<_, Error>(FleetDiscovery {
+                    observed_at_ms,
+                    advertisements,
+                })
+            })
+            .await?;
+        let advertisement = observed
+            .advertisements
+            .iter()
+            .find(|advertisement| {
+                advertisement.node() == member && advertisement.expires_at_ms() > now_ms
+            })
+            .cloned()
             .ok_or(Error::Peer("follower has no live advertisement"))?;
         self.guard.check()?;
-        self.refresh_peer(member, advertisement, now_ms)
+        self.refresh_peer(member, advertisement, observed.observed_at_ms)
     }
 
     fn refresh_peer(
@@ -196,10 +254,23 @@ impl PeerNodeLogTransport {
     }
 
     async fn send(&self, member: NodeId, request: WireRequest, tail: bool) -> Result<Bytes> {
+        let append_metrics = matches!(&request.operation, Operation::Append(_))
+            .then_some(self.metrics.as_deref())
+            .flatten();
         let encoded = request
             .encode()
             .map_err(|()| Error::Peer("invalid node-log request"))?;
-        let peer = self.peer(member).await?;
+        let peer =
+            observe_follower(append_metrics, FollowerPhase::PeerLookup, self.peer(member)).await?;
+        observe_follower(
+            append_metrics,
+            FollowerPhase::RoundTrip,
+            self.send_resolved(peer, encoded, tail),
+        )
+        .await
+    }
+
+    async fn send_resolved(&self, peer: CachedPeer, encoded: Vec<u8>, tail: bool) -> Result<Bytes> {
         let url = peer
             .endpoint
             .join("internal/node-log/v1")
@@ -314,6 +385,14 @@ impl NodeLogTransport for PeerNodeLogTransport {
                 },
             )
             .await
+            .inspect_err(|error| {
+                tracing::warn!(
+                    ?member,
+                    log_epoch = request.log_epoch,
+                    error = %error,
+                    "node-log follower append failed"
+                );
+            })
         })
     }
 
@@ -483,7 +562,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         process::Command,
-        sync::Arc,
+        sync::{Arc, atomic::Ordering},
     };
 
     use cellule_ltx::{Db, NodeFrameScope, encode_node_frame};
@@ -500,6 +579,97 @@ mod tests {
     };
     use cellule_store::Store;
     use object_store::{memory::InMemory, path::Path as ObjectPath};
+
+    #[derive(Debug, Default)]
+    struct DelayedDiscoveryStore {
+        inner: InMemory,
+        counted_path: Mutex<Option<ObjectPath>>,
+        reads: std::sync::atomic::AtomicUsize,
+        gate: Mutex<Option<DiscoveryGate>>,
+    }
+
+    #[derive(Debug)]
+    struct DiscoveryGate {
+        entered: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl std::fmt::Display for DelayedDiscoveryStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("DelayedDiscoveryStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for DelayedDiscoveryStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let counted = self.counted_path.lock().unwrap().as_ref() == Some(location);
+            if counted {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                let gate = self.gate.lock().unwrap().take();
+                if let Some(gate) = gate {
+                    gate.entered.add_permits(1);
+                    gate.release.acquire().await.unwrap().forget();
+                }
+                // Make the real lookup yield so all cold transport callers
+                // enter discovery before the first result can populate cache.
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
 
     fn run(command: &mut Command) {
         assert!(command.output().unwrap().status.success());
@@ -602,6 +772,8 @@ mod tests {
 
     #[tokio::test]
     async fn pinned_mtls_append_survives_follower_store_reopen() {
+        let sender_metrics = Arc::new(RuntimeMetrics::default());
+        let receiver_metrics = Arc::new(RuntimeMetrics::default());
         let root = tempfile::TempDir::new().unwrap();
         let ca_key = root.path().join("ca.key");
         let ca = root.path().join("ca.crt");
@@ -626,18 +798,23 @@ mod tests {
             .arg(&ca));
         let (leader_cert, leader_key) = certificate(root.path(), "leader", &ca, &ca_key);
         let (follower_cert, follower_key) = certificate(root.path(), "follower", &ca, &ca_key);
+        let (second_cert, second_key) = certificate(root.path(), "second-follower", &ca, &ca_key);
         let leader_tls = LoadedPeerTls::load(&leader_cert, &leader_key, &ca, "localhost").unwrap();
         let follower_tls =
             LoadedPeerTls::load(&follower_cert, &follower_key, &ca, "localhost").unwrap();
+        let second_tls = LoadedPeerTls::load(&second_cert, &second_key, &ca, "localhost").unwrap();
+        let second_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_endpoint = format!("https://{}", second_listener.local_addr().unwrap());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let follower_endpoint = format!("https://{}", listener.local_addr().unwrap());
+        let discovery_store = Arc::new(DelayedDiscoveryStore::default());
         let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
+            Store::new(discovery_store.clone()),
             ObjectPath::from("follower-transport-test"),
             [42; 16],
         );
         let directory = NodeDirectory::new(
-            layout,
+            layout.clone(),
             leader_tls.fleet(),
             Digest::from_bytes([81; 32]),
             Digest::from_bytes([82; 32]),
@@ -646,14 +823,32 @@ mod tests {
         let follower_session = SessionId::from_bytes([2; 16]);
         let leader_node = NodeId::from_bytes([3; 16]);
         let follower_node = NodeId::from_bytes([4; 16]);
+        let second_session = SessionId::from_bytes([7; 16]);
+        let second_node = NodeId::from_bytes([6; 16]);
         let now_ms = unix_time_ms().unwrap();
         directory
             .create(
                 advertisement(
                     follower_node,
                     follower_session,
-                    follower_endpoint,
+                    follower_endpoint.clone(),
                     &follower_tls,
+                    true,
+                    true,
+                    now_ms,
+                    15_000,
+                ),
+                now_ms,
+            )
+            .await
+            .unwrap();
+        directory
+            .create(
+                advertisement(
+                    second_node,
+                    second_session,
+                    second_endpoint,
+                    &second_tls,
                     true,
                     true,
                     now_ms,
@@ -686,7 +881,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             enrolled.advertisement().log().unwrap().members(),
-            &[follower_node]
+            &[follower_node, second_node]
         );
 
         let limits = Limits::default();
@@ -694,6 +889,18 @@ mod tests {
         let store = Arc::new(
             FollowerStore::open(store_root.clone(), limits, DiskBudget::new(1 << 30)).unwrap(),
         );
+        let second_store_root = root.path().join("second-follower-store");
+        let second_store = Arc::new(
+            FollowerStore::open(second_store_root.clone(), limits, DiskBudget::new(1 << 30))
+                .unwrap(),
+        );
+        let second_runtime = CellRuntime::new_with_replica_host(
+            SqlWorkerPool::new(1, 8).unwrap(),
+            64 << 20,
+            second_session,
+            Host::default(),
+        )
+        .unwrap();
         let runtime = CellRuntime::new_with_replica_host(
             SqlWorkerPool::new(1, 8).unwrap(),
             64 << 20,
@@ -708,6 +915,33 @@ mod tests {
             follower_node,
             store.clone(),
             guard.clone(),
+        )
+        .with_runtime_metrics(receiver_metrics.clone());
+        let second_receiver = node_log_receiver::FollowerEndpoint::new(
+            directory.clone(),
+            second_runtime,
+            second_node,
+            second_store.clone(),
+            guard.clone(),
+        )
+        .with_runtime_metrics(receiver_metrics.clone());
+        let second_server = tokio::spawn(async move {
+            axum::serve(
+                second_tls.listener(second_listener),
+                node_log_receiver::router(second_receiver)
+                    .into_make_service_with_connect_info::<PeerTlsIdentity>(),
+            )
+            .await
+        });
+        let duplicate = advertisement(
+            follower_node,
+            SessionId::from_bytes([8; 16]),
+            follower_endpoint,
+            &follower_tls,
+            true,
+            true,
+            now_ms,
+            15_000,
         );
         let follower_client = follower_tls.client_identity();
         let server = tokio::spawn(async move {
@@ -724,12 +958,15 @@ mod tests {
             leader_session,
             leader_node,
             guard.clone(),
-        );
+        )
+        .with_runtime_metrics(sender_metrics.clone());
         let saved = frame(limits, leader_session);
-        for _ in 0..2 {
-            let receipt = transport
-                .append(
-                    follower_node,
+        *discovery_store.counted_path.lock().unwrap() =
+            Some(layout.node_path(follower_session.as_bytes()));
+        let append_both = || {
+            futures_util::future::join_all([follower_node, second_node].map(|member| {
+                transport.append(
+                    member,
                     AppendRequest {
                         leader_session,
                         log_epoch: 2,
@@ -737,10 +974,87 @@ mod tests {
                         covered_through: 0,
                     },
                 )
-                .await
-                .unwrap();
-            assert_eq!(receipt.durable_through, 1);
+            }))
+        };
+        // Match the node-log shipper: one append to each enrolled member,
+        // with every receipt required before the batch can be acknowledged.
+        for receipt in append_both().await {
+            assert_eq!(receipt.unwrap().durable_through, 1);
         }
+        let cold_reads = discovery_store.reads.load(Ordering::SeqCst);
+        for receipt in append_both().await {
+            assert_eq!(receipt.unwrap().durable_through, 1);
+        }
+        let warm_reads = discovery_store.reads.load(Ordering::SeqCst);
+        // Force only discovery TTL expiry; keep session/certificate/lease proof.
+        for peer in transport.peers.lock().unwrap().iter_mut() {
+            peer.verified_at_ms = unix_time_ms().unwrap() - PEER_CACHE_MS;
+        }
+        for receipt in append_both().await {
+            assert_eq!(receipt.unwrap().durable_through, 1);
+        }
+        let refreshed_reads = discovery_store.reads.load(Ordering::SeqCst);
+        assert!(transport.discovery.lock().unwrap().upgrade().is_none());
+        assert!(matches!(
+            transport.peer(NodeId::from_bytes([0; 16])).await,
+            Err(Error::Node("node identity is zero"))
+        ));
+
+        // Cancel the initializer while a second follower lookup shares its
+        // cohort. The waiter must initialize afresh; nothing may stay detached.
+        transport.peers.lock().unwrap().clear();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        *discovery_store.gate.lock().unwrap() = Some(DiscoveryGate {
+            entered: entered.clone(),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        });
+        let first = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.peer(follower_node).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let second = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.peer(second_node).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while transport.discovery.lock().unwrap().strong_count() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first.abort();
+        assert!(matches!(first.await, Err(error) if error.is_cancelled()));
+        let resumed = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.member, second_node);
+        assert!(transport.discovery.lock().unwrap().upgrade().is_none());
+        *discovery_store.counted_path.lock().unwrap() = None;
+
+        // Keep resolve_node's fail-closed fleet validation even when the
+        // requested member is healthy and another node has duplicate sessions.
+        let duplicate = directory
+            .create(duplicate, unix_time_ms().unwrap())
+            .await
+            .unwrap();
+        transport.peers.lock().unwrap().clear();
+        assert!(matches!(
+            transport.peer(second_node).await,
+            Err(Error::Node("multiple live sessions advertise one node"))
+        ));
+        assert!(transport.discovery.lock().unwrap().upgrade().is_none());
+        directory
+            .withdraw_after_drain(&duplicate, unix_time_ms().unwrap())
+            .await
+            .unwrap();
         let local = PeerNodeLogTransport::new(
             directory.clone(),
             follower_client,
@@ -800,11 +1114,36 @@ mod tests {
             .unwrap();
         assert_eq!(page.frames, vec![saved.clone()]);
         assert_eq!(page.next_sequence, None);
+        for (metrics, phases) in [
+            (&sender_metrics, ["peer_lookup", "round_trip"]),
+            (&receiver_metrics, ["enrollment", "durable_append"]),
+        ] {
+            let snapshot = metrics.snapshot();
+            for phase in phases {
+                let observed = &snapshot["follower_append_phases"][phase];
+                assert_eq!(observed["count"], 6, "{phase}: {observed}");
+                assert_eq!(observed["failed"], 0);
+                assert_eq!(observed["cancelled"], 0);
+                assert_eq!(observed["in_flight"], 0);
+            }
+        }
         server.abort();
+        second_server.abort();
         let _ = server.await;
+        let _ = second_server.await;
         drop(transport);
         drop(local);
         drop(store);
+        drop(second_store);
+        let second_reopened =
+            FollowerStore::open(second_store_root, limits, DiskBudget::new(1 << 30)).unwrap();
+        assert_eq!(
+            second_reopened
+                .read_tail(leader_session, 2, 1)
+                .await
+                .unwrap(),
+            vec![saved.clone()]
+        );
         let reopened = FollowerStore::open(store_root, limits, DiskBudget::new(1 << 30)).unwrap();
         assert_eq!(
             reopened
@@ -817,6 +1156,16 @@ mod tests {
         assert_eq!(
             reopened.read_tail(leader_session, 2, 1).await.unwrap(),
             vec![saved]
+        );
+        eprintln!(
+            "follower discovery reads: cold={cold_reads}, warm={warm_reads}, expired={refreshed_reads}"
+        );
+        assert_eq!(cold_reads, 1, "concurrent cold appends repeated discovery");
+        assert_eq!(warm_reads, cold_reads, "warm cache reloaded discovery");
+        assert_eq!(
+            refreshed_reads,
+            cold_reads + 1,
+            "expired cache did not refresh"
         );
     }
 

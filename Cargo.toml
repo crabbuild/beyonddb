@@ -8,12 +8,12 @@ repository = "https://github.com/crabbuild/beyonddb"
 rust-version = "1.97"
 
 [workspace.dependencies]
-cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
-cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
-cellule-peer-http = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
-cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
-cellule-store = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
-cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "9e17746a633ca1046bd93866866074226091f81a" }
+cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellule-peer-http = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellule-store = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
 async-trait = "0.1"
 blake3 = "1.8"
 futures-util = "0.3"
@@ -61,6 +61,7 @@ extenddb-storage = { git = "https://github.com/crabbuild/extenddb.git", rev = "7
 futures-util.workspace = true
 fs4 = "0.13.1"
 getrandom = "0.3"
+object_store.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -74,12 +75,12 @@ uuid.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+prost = "=0.13.5"
 cellule-store = { workspace = true, features = ["test-support"] }
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-dynamodb.workspace = true
 ed25519-dalek.workspace = true
 extenddb-engine = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
-object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }

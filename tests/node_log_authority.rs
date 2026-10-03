@@ -17,6 +17,12 @@ use ed25519_dalek::SigningKey;
 use object_store::{memory::InMemory, path::Path};
 use tokio_util::sync::CancellationToken;
 
+#[path = "node_log_authority/stalled_log_read.rs"]
+mod stalled_log_read;
+
+#[path = "node_log_authority/heartbeat_versions.rs"]
+mod heartbeat_versions;
+
 const FLEET: Digest = Digest::from_bytes([80; 32]);
 const IMAGE: Digest = Digest::from_bytes([81; 32]);
 const RELEASE: Digest = Digest::from_bytes([82; 32]);
@@ -121,6 +127,8 @@ async fn published_log_authority_reconciles_heartbeat_and_fences_transitions() {
         authority.recruit(1, 4096, 16).await.unwrap(),
         Some(vec![follower_node])
     );
+    assert!(!authority.rotation_required(1, 16).await.unwrap());
+    assert!(authority.rotation_required(2, 16).await.is_err());
     assert!(authority.activate(2).await.is_err());
 
     let cancellation = CancellationToken::new();
@@ -192,4 +200,89 @@ async fn published_log_authority_reconciles_heartbeat_and_fences_transitions() {
         authority.activate(1).await,
         Err(cellule_runtime::Error::Fenced)
     ));
+    assert!(matches!(
+        authority.rotation_required(1, 16).await,
+        Err(cellule_runtime::Error::Fenced)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_log_membership_requires_rotation_after_follower_expiry() {
+    let layout = CellStorageLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        Path::from("beyonddb-node-log-member-expiry"),
+        [44; 16],
+    );
+    let directory = NodeDirectory::new(layout, FLEET, IMAGE, RELEASE);
+    let leader_node = NodeId::from_bytes([101; 16]);
+    let leader_session = SessionId::from_bytes([102; 16]);
+    let follower_node = NodeId::from_bytes([103; 16]);
+    let follower_session = SessionId::from_bytes([104; 16]);
+    let now = now_ms();
+    let follower_expires = now + 5_000;
+    directory
+        .create(
+            advertisement(
+                follower_node,
+                follower_session,
+                105,
+                NodeCapacity {
+                    free_memory_bytes: 16 * 1024 * 1024,
+                    free_disk_bytes: 1 << 30,
+                    follower_free_bytes: 1 << 30,
+                    job_credits: 8,
+                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
+                    ..NodeCapacity::default()
+                },
+                now,
+                follower_expires,
+            )
+            .unwrap(),
+            now,
+        )
+        .await
+        .unwrap();
+    let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
+        advertisement(
+            leader_node,
+            leader_session,
+            106,
+            NodeCapacity {
+                free_memory_bytes: 16 * 1024 * 1024,
+                free_disk_bytes: 1 << 30,
+                job_credits: 8,
+                ..NodeCapacity::default()
+            },
+            now,
+            expires,
+        )
+    })
+    .publish()
+    .await
+    .unwrap();
+    let authority = published.log_authority();
+    assert_eq!(
+        authority.recruit(1, 4096, 16).await.unwrap(),
+        Some(vec![follower_node])
+    );
+    assert!(!authority.rotation_required(1, 16).await.unwrap());
+    // A different epoch is an error, rather than a healthy membership result.
+    assert!(authority.rotation_required(2, 16).await.is_err());
+    tokio::time::timeout(Duration::from_secs(7), async {
+        while now_ms() <= follower_expires {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(authority.rotation_required(1, 16).await.unwrap());
+    // Liveness observation cannot silently replace the enrolled member set.
+    let current = directory
+        .load(leader_session, now_ms())
+        .await
+        .unwrap()
+        .unwrap();
+    let log = current.advertisement().log().unwrap();
+    assert_eq!(log.epoch(), 1);
+    assert_eq!(log.members(), &[follower_node]);
 }

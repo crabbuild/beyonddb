@@ -63,6 +63,13 @@ Wait for RustFS to accept S3 requests before creating the bucket. Keep its
 named volume for restart testing; removing it removes this fixture's data.
 Use a service with qualified conditional writes for any nonlocal deployment.
 
+On macOS with Colima, this named volume keeps provider data inside the VM.
+A direct S3 diagnostic
+measured faster 1-KiB conditional writes on native volumes than host file
+sharing in both repetitions. GET results and host load differed; this is a
+local fixture observation, not a production capacity guarantee. Record the
+storage mount when comparing performance.
+
 ## Prepare keys, policy, and configuration
 
 The example uses `/etc/beyonddb` for secrets and `/srv/beyonddb` for scratch files. Run the provisioning commands with an account that can write those paths, and run the server with read access to the key and certificate files. For a local account without that access, change every path in the commands and JSON to directories it owns.
@@ -161,21 +168,38 @@ metadata immediately; changes made through another node become visible after
 the cache TTL. Enabling the flag also caches complete routed directory pages
 for point operations. The owning data Cell rejects a stale epoch and the
 server drops that route entry, so a split is refreshed on the next request. It
-also keeps immutable catalog proofs and resident local Cell handles for 500 ms;
-the authority check resumes after that window, and a drained Cell handle still
-rejects work immediately. This short owner cache improves warm local latency
-while bounding visibility of an ownership change.
+also caches immutable catalog proofs. Resident Cell handles are cached for
+500 ms on both public request resolution and private peer invocation. After
+expiry, the runtime resolves a still-resident actor without reading object
+storage. Cached handles are checked against the current resident actor before
+reuse, and dispatch fences drained handles. Remote routing, local admission
+and recovery still use exact authority checks. Peer enrollment and
+authorization are checked for every private request.
 
-The parser rejects unknown fields. `initial_partitions` defaults to one and can provision 1–256 initial data Cells per new table. `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+The parser rejects unknown fields. `initial_partitions` defaults to one and accepts powers of two from 1–256. It sets the initial base and GSI range count when a new table omits the placement selector. A creation-time `beyonddb:cell-model` tag overrides that count: `single` and `auto` start with one; `partitioned` uses at least two. The model is stored with the table generation, so later node configuration changes do not repartition existing tables. See [choose a table's Cell model](scaling.md#choose-a-tables-cell-model). `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
 
 `follower_store_bytes` is an optional positive disk budget for persistent
-follower lanes under `data_dir/follower-store`. Setting it opens a private,
-authenticated node-log receiver; it does **not** enable follower durability or
-improve write latency yet. BeyondDB still waits for object-store publication
-and advertises no follower capacity. Reserve this budget in addition to
-`disk_budget_bytes`, and retain the follower directory across process restart.
-The [follower durability guide](follower-durability.md) tracks the remaining
-enrollment, lifecycle, and recovery work.
+follower lanes under `data_dir/follower-store`. Reserve it in addition to
+`disk_budget_bytes`, and retain the directory across process restart. By
+itself, it opens the authenticated receiver for recovery and advertises zero
+follower capacity; writes still wait for object publication.
+
+Experimental `follower_durability_enabled: true` requires a follower-store
+budget of at least 64 MiB. It installs the host provider during startup, gates
+recruitment until configured-account recovery completes, and advertises actual
+remaining follower bytes only after the private listener starts. Each enrolled
+member must fsync before a follower proof; absent an eligible ensemble, the
+object-publication path remains available. Use separate node IDs, certificates,
+and data directories for every server. The three-process crash test exercises
+same-partition item mutations, transaction replay, and stream records;
+independent-host failure, cross-partition transaction faults, rotation under
+load, and sustained throughput still need qualification. See the
+[follower durability guide](follower-durability.md).
+
+The S3 serving path uses Cellule's provider builder, including multipart
+conditional copy support needed to pin recovery overlays. The URL-only builder
+previously left that operation unconfigured, which the real RustFS process-kill
+test exposed. GCS and Azure retain their URL-based configuration paths.
 
 | Credential or file | Used by | Keep across restart? |
 | --- | --- | --- |

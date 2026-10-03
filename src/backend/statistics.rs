@@ -31,7 +31,7 @@ impl Sweep {
             snapshot: StatisticsSnapshot {
                 table_id: table.id.clone(),
                 sampled_at: mutation_identity()?.issued_at_ms,
-                base_routed: matches!(table.placement, crate::TablePlacement::Routed { .. }),
+                base_routed: table.placement.is_routed(),
                 index_generations: Default::default(),
                 statistics: TableStatistics::default(),
             },

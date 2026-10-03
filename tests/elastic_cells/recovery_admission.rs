@@ -179,6 +179,13 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
     let blocked = layout.control_path(participants[0].0.cell_id().as_bytes());
     objects.reset();
     objects.block_body_reads_for(&blocked);
+    // Recovery must encounter the admission fault with cold routing state.
+    // A client warmed by prepare can reuse a verified local route and reach
+    // the live actor without reading the control object blocked above.
+    // Keep the fixed-handle observer so assertions can still inspect that actor.
+    let client = CellClient::local_runtime(registry, host.runtime(), layout.clone());
+    let storage =
+        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
     if startup {
         assert!(
             provisioner

@@ -6,6 +6,7 @@ pub(crate) mod query;
 mod scan;
 mod transaction;
 mod ttl;
+mod update_batch;
 
 pub use indexes::*;
 pub use key::data_key_hash;
@@ -13,6 +14,7 @@ pub use query::*;
 pub use scan::*;
 pub use transaction::*;
 pub use ttl::*;
+pub use update_batch::*;
 
 use std::sync::OnceLock;
 
@@ -53,7 +55,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 25] = [
+static COMMANDS: [OperationDescriptor; 29] = [
     operation(1),
     operation(2),
     OperationDescriptor {
@@ -84,12 +86,16 @@ static COMMANDS: [OperationDescriptor; 25] = [
     no_return_operation(22),
     operation(23),
     crate::no_return_transaction_operation(24),
+    update_batch::batch_operation(25),
+    operation(26),
+    crate::participant::bounded_prepare_operation(28),
+    crate::participant::bounded_prepare_operation(29),
     OperationDescriptor {
         codec_version: 2,
         ..no_return_operation(52)
     },
 ];
-static QUERIES: [OperationDescriptor; 18] = [
+static QUERIES: [OperationDescriptor; 19] = [
     operation(1),
     operation(2),
     operation(3),
@@ -107,7 +113,11 @@ static QUERIES: [OperationDescriptor; 18] = [
     operation(16),
     operation(17),
     operation(18),
-    operation(19),
+    OperationDescriptor {
+        codec_version: 3,
+        ..operation(19)
+    },
+    crate::participant::bounded_read_result_operation(20),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -155,7 +165,10 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("partition/scan.rs"));
                 source.update(include_bytes!("partition/transaction.rs"));
                 source.update(include_bytes!("partition/transaction/participant.rs"));
+                source.update(include_bytes!("partition/transaction/prepare_batch.rs"));
                 source.update(include_bytes!("partition/ttl.rs"));
+                source.update(include_bytes!("partition/update_batch.rs"));
+                source.update(include_bytes!("item_wire.rs"));
                 source.update(include_bytes!("partition/indexes.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("item_storage.rs"));
@@ -198,6 +211,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<PartitionDeleteNoReturn>()?;
         registry.bind_command::<PartitionUpdate>()?;
         registry.bind_command::<PartitionUpdateNoReturn>()?;
+        registry.bind_command::<PartitionUpdateBatch>()?;
+        registry.bind_command::<PartitionUpdateIndividual>()?;
         registry.bind_command::<SealPartition>()?;
         registry.bind_command::<ImportPartitionItem>()?;
         registry.bind_command::<ActivateImportedPartition>()?;
@@ -210,6 +225,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_command::<BackfillPartitionTtl>()?;
         registry.bind_command::<crate::UploadTransactionPayload<PreparePartitionTransaction>>()?;
         registry.bind_command::<PreparePartitionTransaction>()?;
+        registry.bind_command::<PreparePartitionTransactionBounded>()?;
+        registry.bind_command::<PreparePartitionTransactionBatch>()?;
         registry.bind_command::<ResolvePartitionTransaction>()?;
         registry.bind_command::<ReleasePartitionTransactionReads>()?;
         registry.bind_command::<crate::RecordPartitionIndexDelivery>()?;
@@ -227,7 +244,8 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_query::<ReadPartitionTransaction>()?;
         registry.bind_query::<crate::ReadPartitionIndexChange>()?;
         registry.bind_query::<crate::ReadPartitionIndexChangeChunk>()?;
-        registry.bind_query::<ReadPartitionTransactionResult>()
+        registry.bind_query::<ReadPartitionTransactionResult>()?;
+        registry.bind_query::<ReadPartitionTransactionResultBounded>()
     }
 }
 
@@ -627,7 +645,7 @@ impl Command for SealPartition {
                 SealPartitionOutcome::StaleRoute,
             )));
         }
-        if !seal.valid_for(&source) {
+        if source.table.placement == crate::TablePlacement::Single || !seal.valid_for(&source) {
             return Ok(CommandResult::Rejected(Json(
                 SealPartitionOutcome::InvalidSeal,
             )));
@@ -1324,7 +1342,7 @@ impl Command for PartitionUpdate {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        execute_partition_update(context, input, true)
+        execute_partition_update(context, input, true, 0)
     }
 }
 
@@ -1342,7 +1360,7 @@ impl Command for PartitionUpdateNoReturn {
         context: &mut CommandContext<'_, '_>,
         Json(input): Self::Input,
     ) -> Result<CommandResult<Self::Output>> {
-        execute_partition_update(context, input, false)
+        execute_partition_update(context, input, false, 0)
     }
 }
 
@@ -1350,6 +1368,7 @@ fn execute_partition_update(
     context: &mut CommandContext<'_, '_>,
     input: PartitionUpdateInput,
     return_images: bool,
+    ordinal: usize,
 ) -> Result<CommandResult<Json<PartitionUpdateOutcome>>> {
     let Some(spec) = indexes::command_spec(context)? else {
         return Ok(CommandResult::Rejected(Json(
@@ -1437,7 +1456,7 @@ fn execute_partition_update(
         spec.table.stream.as_ref(),
         old.as_ref(),
         Some(&new),
-        0,
+        ordinal,
     )?;
     Ok(CommandResult::Success(Json(if return_images {
         PartitionUpdateOutcome::Applied { old, new }

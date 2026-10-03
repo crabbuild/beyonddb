@@ -44,6 +44,39 @@ and a durable projection journal. Bounded tombstone retention, projection
 throughput, and index-owner fleet recovery remain open scale gates. See
 [global indexes](global-indexes.md).
 
+## Choose a table's Cell model
+
+Choose placement when you create a table with the `beyonddb:cell-model` tag. This BeyondDB extension uses the standard DynamoDB `CreateTable.Tags` field, so AWS CLI and SDK clients need no custom request format.
+
+| Value | Initial base data Cells | Base splitting | Use when |
+| --- | ---: | --- | --- |
+| `single` | 1 | Disabled, including manual splits | Your table fits one Cell's disk, memory, write, and recovery budgets. |
+| `auto` | 1 | Enabled | You want to start with one Cell and allow range growth. |
+| `partitioned` | `max(2, initial_partitions)` | Enabled | You need independent ranges from creation. |
+| Tag omitted | Configured `initial_partitions` | Enabled | You want to preserve the existing server default. |
+
+```text
+single                          auto / partitioned
+Table directory                 Table directory
+      |                          /             \
+One base data Cell          Data Cell A     Data Cell B
+items + LSIs + journal      hash range A    hash range B
+      |                          \             /
+      +---- async projection ------> GSI Cells
+```
+
+`single` means one **base data Cell**. Account metadata, credentials, directories, and transaction coordinators remain separate. Each global secondary index (GSI) also uses separate Cells; a single-model table starts each GSI with one range, and the index can split independently. Local secondary indexes (LSIs) stay with base items.
+
+The choice persists in the table generation. Changing or removing the tag later changes tag metadata only; `TagResource`, `UntagResource`, and `UpdateTable` do not move data or change placement. Live conversion from `single` to a splitting model is not implemented. Choose `auto` if future growth is uncertain. Invalid values and duplicate selector tags are rejected before table creation.
+
+Table size and write load both matter. A smaller table with heavy writes may need several Cells. One Cell serializes mutations and remains subject to node admission, disk budgets, and recovery costs. `single` suppresses splitting; it does not remove resource limits. Hash-range splitting also does not solve every hot partition-key workload; see the delivery gates below.
+
+Start with `auto` when you want one base data Cell today and room to split later. Choose `single` when fixed placement matters and you can keep the complete Cell within its resource budget. Choose `partitioned` when measured write load needs several independent owners from the beginning. Labels such as “medium” or “large” do not determine placement: both stored bytes and write demand matter.
+
+**Current sizing limit:** the compiled base data Cell has a **512 MiB SQLite database budget** and a **64 MiB capture budget**. The database budget includes items, local indexes, stream records, transaction state and other Cell metadata; usable item storage is smaller. The creation tag does not raise these limits. A table that will exceed this budget needs `auto` or `partitioned` in the current release. Configurable larger single-Cell budgets and live placement conversion are unfinished.
+
+Small same-Cell transaction reads can use one atomic query. Tokenized transaction writes still require the account-scoped coordinator, and cross-table transactions can span Cells. Placement therefore reduces some transaction work without establishing SQLite write parity. See [transaction execution paths](cross-cell-transactions.md#one-cell-and-multiple-cell-requests) and [measured performance](performance.md).
+
 ## Horizontal scaling delivery gates
 
 The agreed target is 10,000 active Cells and multi-TB stored data. The following

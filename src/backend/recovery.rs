@@ -204,6 +204,36 @@ impl CellStorage {
             .map_err(cell_error)?
             .output
             .0;
+        self.finish_transaction_participants(coordinator, read, commit, participants)
+            .await?;
+        let final_status = self
+            .client
+            .query::<ReadCrossCellTransaction>(coordinator, None, Json(read.clone()))
+            .await
+            .map_err(cell_error)?
+            .output
+            .0
+            .ok_or_else(|| StorageError::Internal("coordinator transaction disappeared".into()))?;
+        if final_status.resolved_count != final_status.participant_count
+            || final_status.unreleased_read_results != 0
+        {
+            return Err(StorageError::Transient(
+                "cross-Cell participant resolution is incomplete".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publish each participant's durable resolution receipt. Success requires
+    /// an acknowledged coordinator record for every supplied participant.
+    /// The caller must supply an authoritative terminal decision and targets.
+    pub(super) async fn finish_transaction_participants(
+        &self,
+        coordinator: &CellTarget,
+        read: &ReadCrossCellTransactionInput,
+        commit: bool,
+        participants: Vec<UnresolvedCoordinatorParticipant>,
+    ) -> Result<(), StorageError> {
         let mut failure = None;
         // Only terminal decisions permit independent resolution. Keep a small
         // window so a slow owner cannot hold healthy keys, without fanning one
@@ -255,25 +285,7 @@ impl CellStorage {
         }
         self.record_resolution_progress(coordinator, read, &mut read_releases, &mut resolutions)
             .await?;
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        let final_status = self
-            .client
-            .query::<ReadCrossCellTransaction>(coordinator, None, Json(read.clone()))
-            .await
-            .map_err(cell_error)?
-            .output
-            .0
-            .ok_or_else(|| StorageError::Internal("coordinator transaction disappeared".into()))?;
-        if final_status.resolved_count != final_status.participant_count
-            || final_status.unreleased_read_results != 0
-        {
-            return Err(StorageError::Transient(
-                "cross-Cell participant resolution is incomplete".into(),
-            ));
-        }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     async fn record_resolution_progress(
@@ -318,6 +330,7 @@ impl CellStorage {
             }
         }
         if !resolutions.is_empty() {
+            let expected = resolutions.len();
             let recorded = self
                 .client
                 .command::<RecordParticipantResolutions>(
@@ -327,12 +340,14 @@ impl CellStorage {
                 )
                 .await
                 .map_err(cell_error)?;
-            if recorded.output.0.iter().any(|outcome| {
-                !matches!(
-                    outcome,
-                    CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
-                )
-            }) {
+            if recorded.output.0.len() != expected
+                || recorded.output.0.iter().any(|outcome| {
+                    !matches!(
+                        outcome,
+                        CoordinatorPhaseOutcome::Recorded | CoordinatorPhaseOutcome::Replay
+                    )
+                })
+            {
                 return Err(StorageError::Internal(
                     "coordinator rejected participant resolution".into(),
                 ));

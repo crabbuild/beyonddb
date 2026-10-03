@@ -95,7 +95,7 @@ sequenceDiagram
       Driver->>B: PREPARE item images and locks
       B-->>Driver: Durable prepare receipt
     end
-    Driver->>Coord: Publish COMMIT or ABORT
+    Driver->>Coord: Record prepares + COMMIT, or publish ABORT
     Coord-->>Driver: Durable decision
     par Resolve owners
       Driver->>A: Apply or discard decision
@@ -108,7 +108,7 @@ sequenceDiagram
     Driver-->>Client: Return or replay result
 ```
 
-The original coordinator and participant identities survive routing changes. If a driver dies after publishing the decision, startup or serving recovery finishes participant resolution. A caller timeout leaves the outcome unknown until the durable decision is inspected. A client token distinguishes a matching replay from a different request. Transactional reads use shared key locks and captured images. See the [transaction protocol and failure cases](cross-cell-transactions.md).
+The original coordinator and participant identities survive routing changes. If a driver dies after publishing the decision, startup or serving recovery finishes participant resolution. A caller timeout leaves the outcome unknown until the durable decision is inspected. A client token distinguishes a matching replay from a different request. Cross-Cell transaction reads use shared key locks and captured images. Single-Cell reads use one atomic query with a compact internal response when it fits the query envelope. See the [transaction protocol and failure cases](cross-cell-transactions.md).
 
 ## Range split and GSI projection
 

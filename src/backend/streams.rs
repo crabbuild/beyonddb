@@ -148,7 +148,7 @@ impl CellStorage {
                 }
                 _ => StreamStatus::Disabled,
             }
-        } else if matches!(record.placement, crate::TablePlacement::Routed { .. })
+        } else if record.placement.is_routed()
             && !self.route_active_for(account_id, &record.id).await?
         {
             StreamStatus::Enabling
@@ -301,9 +301,9 @@ impl StreamEngine for CellStorage {
             let mut pending = if status == StreamStatus::Enabling {
                 Vec::new()
             } else {
-                match record.placement {
-                    crate::TablePlacement::Account => vec![(None, None)],
-                    crate::TablePlacement::Routed { initial_partitions } => (0..initial_partitions)
+                match record.placement.initial_partitions() {
+                    None => vec![(None, None)],
+                    Some(initial_partitions) => (0..initial_partitions)
                         .rev()
                         .map(|index| {
                             let mut partition_id = [0; 16];
@@ -532,7 +532,7 @@ impl StreamEngine for CellStorage {
             match (record.placement, shard) {
                 (crate::TablePlacement::Account, StreamShard::Account { .. }) => Ok(()),
                 (
-                    crate::TablePlacement::Routed { .. },
+                    crate::TablePlacement::Routed { .. } | crate::TablePlacement::Single,
                     StreamShard::Partition {
                         table_id,
                         partition_id,

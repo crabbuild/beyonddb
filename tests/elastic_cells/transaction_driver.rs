@@ -1,5 +1,5 @@
 use crate::*;
-use beyonddb::{TableRecord, TransactionFailure};
+use beyonddb::{ReadCoordinatorResume, TableRecord, TransactionFailure};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures() {
@@ -119,14 +119,15 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     for scenario in [180_u8, 181, 182, 183, 184, 185, 186, 187, 188] {
         let transaction_id = [scenario; 16];
         let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
+        let mut coordinator_file = directory
+            .path()
+            .join(format!("coordinator-{scenario}.sqlite"));
         let coordinator_handle = bootstrap
             .cell(
                 &coordinator,
                 "beyonddb-coordinator",
                 scenario,
-                &directory
-                    .path()
-                    .join(format!("coordinator-{scenario}.sqlite")),
+                &coordinator_file,
                 initialize_coordinator,
             )
             .await;
@@ -186,7 +187,40 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
         )
         .await
         .unwrap();
-        let mut recorded_sequence = None;
+        let snapshot = client
+            .query::<ReadCoordinatorResume>(
+                &coordinator,
+                None,
+                Json(ReadCrossCellTransactionInput {
+                    account_id: account_id.into(),
+                    transaction_id,
+                    routing_key: transaction_id.to_vec(),
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        assert_eq!(
+            snapshot.status.unwrap().decision,
+            CoordinatorDecision::Begin
+        );
+        if scenario == 188 {
+            assert!(
+                snapshot.participants.is_none(),
+                "large escaped payloads must retain chunked retrieval"
+            );
+        } else {
+            assert_eq!(
+                snapshot
+                    .participants
+                    .unwrap()
+                    .into_iter()
+                    .map(|p| p.participant)
+                    .collect::<Vec<_>>(),
+                request
+            );
+        }
         if matches!(scenario, 180 | 181 | 183) {
             // Cover recorded and lost prepare receipts, plus a conflicting
             // transaction on the second participant.
@@ -217,25 +251,50 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .await
             .unwrap();
             if scenario == 180 {
-                recorded_sequence = Some(
-                    client
-                        .command::<RecordParticipantPrepare>(
-                            &coordinator,
-                            identity(179),
-                            Json(CoordinatorPhaseInput {
-                                account_id: account_id.into(),
-                                transaction_id,
-                                routing_key: transaction_id.to_vec(),
-                                position: 0,
-                                participant_cell: *participants[0].0.cell_id().as_bytes(),
-                                sequence: prepared.receipt.commit_sequence,
-                            }),
-                        )
-                        .await
-                        .unwrap()
-                        .receipt
-                        .commit_sequence,
-                );
+                client
+                    .command::<RecordParticipantPrepare>(
+                        &coordinator,
+                        identity(179),
+                        Json(CoordinatorPhaseInput {
+                            account_id: account_id.into(),
+                            transaction_id,
+                            routing_key: transaction_id.to_vec(),
+                            position: 0,
+                            participant_cell: *participants[0].0.cell_id().as_bytes(),
+                            sequence: prepared.receipt.commit_sequence,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                let partial = client
+                    .query::<ReadCoordinatorResume>(
+                        &coordinator,
+                        None,
+                        Json(ReadCrossCellTransactionInput {
+                            account_id: account_id.into(),
+                            transaction_id,
+                            routing_key: transaction_id.to_vec(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0;
+                assert_eq!(partial.status.unwrap().prepared_count, 1);
+                let remaining = partial.participants.unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].position, 1);
+                assert_eq!(remaining[0].participant, request[1]);
+                coordinator_file = super::transaction_commit::assert_atomic_prepared_commit(
+                    &client,
+                    &bootstrap,
+                    &coordinator_handle,
+                    application.clone(),
+                    directory.path(),
+                    &participants[1],
+                    transaction_id,
+                )
+                .await;
             }
         }
         let decision = if scenario == 181 {
@@ -289,7 +348,9 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             } else {
                 Arc::new(RefusePhase {
                     inner: transport,
-                    command: 12,
+                    // These scenarios send small participant payloads, so the
+                    // production adapter selects the bounded prepare opcode.
+                    command: 28,
                     persistent: scenario == 187,
                     winner: (scenario == 186).then(|| (client.clone(), transaction_id)),
                     refused: lost.clone(),
@@ -370,18 +431,10 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             )
             .await
             .unwrap();
-        if let Some(sequence) = recorded_sequence {
-            // The remaining prepare and decision need two commits. Nearby
-            // resolutions can share one commit; the progress timer may split
-            // them when a participant finishes later.
-            assert!((3..=4).contains(&(status.receipt.commit_sequence - sequence)));
-        }
         let status = status.output.0.unwrap();
         assert_eq!(status.resolved_count, 2);
         let database = rusqlite::Connection::open_with_flags(
-            directory
-                .path()
-                .join(format!("coordinator-{scenario}.sqlite")),
+            &coordinator_file,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
@@ -559,11 +612,14 @@ impl PeerRoundTrip for DropPhaseReplies {
                 Some(peer_request::Operation::Mutate(mutation)) => match &mutation.operation {
                     Some(mutation_request::Operation::CellCommand(command)) => {
                         match command.command_id {
-                            12 | 21 => 1,
-                            3 => 2,
+                            12 | 21 | 28 | 57 => 1,
+                            3 | 11 => 2,
                             1 => 4,
                             13 | 22 => 8,
                             5 => 16,
+                            // Separate bit lets fresh completion tests lose the
+                            // batched coordinator receipt without losing BEGIN.
+                            10 => 128,
                             14 => 32,
                             23 => 64,
                             _ => 0,

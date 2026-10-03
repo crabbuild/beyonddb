@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use super::{CellStorage, cell_error, mutation_identity};
 use crate::{
-    BeginReadResultRelease, CoordinatorDecision, CoordinatorParticipantTarget,
-    CoordinatorPhaseOutcome, GetItemInput, Json, ReadAccountTransactionResult,
-    ReadCoordinatorParticipantInput, ReadPartitionTransactionResult, ReadResultRelease,
-    ReadTransactionInput, ReadTransactionResultInput, RecordReadResultReleases,
-    RecordReadResultReleasesInput, ReleaseAccountTransactionReads,
-    ReleasePartitionTransactionReads, TransactionFailure, TransactionOperation,
-    TransactionReadResult, account_target, coordinator_target, data_target,
+    BeginReadResultRelease, BoundedTransactionReadResult, CoordinatorDecision,
+    CoordinatorParticipantTarget, CoordinatorPhaseOutcome, GetItemInput, Json,
+    ReadAccountTransactionResult, ReadAccountTransactionResultBounded,
+    ReadCoordinatorParticipantInput, ReadPartitionTransactionResult,
+    ReadPartitionTransactionResultBounded, ReadResultRelease, ReadTransactionInput,
+    ReadTransactionResultInput, RecordReadResultReleases, RecordReadResultReleasesInput,
+    ReleaseAccountTransactionReads, ReleasePartitionTransactionReads, TransactionFailure,
+    TransactionOperation, TransactionReadResult, account_target, coordinator_target, data_target,
 };
 
 #[derive(Clone)]
@@ -25,6 +26,49 @@ enum ReadTarget {
 }
 
 impl CellStorage {
+    async fn saved_transaction_image(
+        &self,
+        target: &ReadTarget,
+        input: Json<ReadTransactionResultInput>,
+    ) -> Result<TransactionReadResult, StorageError> {
+        let result = match target {
+            ReadTarget::Account(target) => {
+                self.client
+                    .query::<ReadAccountTransactionResultBounded>(target, None, input.clone())
+                    .await
+            }
+            ReadTarget::Data(target) => {
+                self.client
+                    .query::<ReadPartitionTransactionResultBounded>(target, None, input.clone())
+                    .await
+            }
+        }
+        .map_err(cell_error)?
+        .output;
+        match result {
+            BoundedTransactionReadResult::Unavailable => Ok(TransactionReadResult::Unavailable),
+            BoundedTransactionReadResult::Item(item) => Ok(TransactionReadResult::Item(item)),
+            BoundedTransactionReadResult::WideRequired => {
+                // Only the explicit successful small reply permits a wide query.
+                // Keep the same coordinator identity and saved-image position.
+                let result = match target {
+                    ReadTarget::Account(target) => {
+                        self.client
+                            .query::<ReadAccountTransactionResult>(target, None, input)
+                            .await
+                    }
+                    ReadTarget::Data(target) => {
+                        self.client
+                            .query::<ReadPartitionTransactionResult>(target, None, input)
+                            .await
+                    }
+                }
+                .map_err(cell_error)?;
+                Ok(result.output.0)
+            }
+        }
+    }
+
     pub(super) async fn transaction_read(
         &self,
         account_id: &str,
@@ -55,24 +99,48 @@ impl CellStorage {
         let identity = admitted.identity;
         let coordinator = coordinator_target(account_id, &identity.routing_key)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
-        let participant_inputs =
-            (0..admitted.participant_count).map(|position| ReadCoordinatorParticipantInput {
-                account_id: account_id.into(),
-                transaction_id: identity.transaction_id,
-                routing_key: identity.routing_key.clone(),
-                position,
-                chunk: 0,
-            });
-        let participant_results = stream::iter(participant_inputs.map(|input| async {
-            let position = input.position;
-            (
-                position,
-                self.coordinator_participant(&coordinator, input).await,
-            )
-        }))
-        .buffer_unordered(8)
-        .collect::<Vec<_>>()
-        .await;
+        let participant_results = if let Some(participants) =
+            admitted.acknowledged_read_participants
+        {
+            if participants.len() != usize::from(admitted.participant_count) {
+                return Err(StorageError::Internal(
+                    "acknowledged read participant count differs".into(),
+                ));
+            }
+            // The acknowledged fresh BEGIN fixes this exact ordering. Reuse
+            // only routing/operation metadata; images still come from durable
+            // participant snapshots, never from live items or current routes.
+            participants
+                .into_iter()
+                .enumerate()
+                .map(|(position, participant)| {
+                    u8::try_from(position)
+                        .map(|position| (position, Ok(Some(participant))))
+                        .map_err(|_| {
+                            StorageError::Internal("invalid read participant position".into())
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            let participant_inputs =
+                (0..admitted.participant_count).map(|position| ReadCoordinatorParticipantInput {
+                    account_id: account_id.into(),
+                    transaction_id: identity.transaction_id,
+                    routing_key: identity.routing_key.clone(),
+                    position,
+                    chunk: 0,
+                });
+            stream::iter(participant_inputs.map(|input| async {
+                let position = input.position;
+                (
+                    position,
+                    self.coordinator_participant(&coordinator, input).await,
+                )
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await
+        };
         let mut image_reads: HashMap<[u8; 32], Vec<_>> = HashMap::new();
         let mut participant_targets = Vec::with_capacity(participant_results.len());
         for (participant_position, result) in participant_results {
@@ -116,27 +184,13 @@ impl CellStorage {
                 ));
             }
         }
-        // One image query reserves up to the Cell wire result ceiling. Fetch
-        // each participant's images serially to stay inside its 16 MiB mailbox,
-        // while independent participant Cells can still make progress together.
+        // Small saved images reserve a bounded reply instead of the wide item
+        // ceiling. Keep each participant's reads serial for large-image fallback;
+        // independent participants can still make progress together.
         let images = stream::iter(image_reads.into_values().map(|reads| async move {
             let mut group = Vec::with_capacity(reads.len());
             for (index, target, input) in reads {
-                let image = match target {
-                    ReadTarget::Account(target) => {
-                        self.client
-                            .query::<ReadAccountTransactionResult>(&target, None, input)
-                            .await
-                    }
-                    ReadTarget::Data(target) => {
-                        self.client
-                            .query::<ReadPartitionTransactionResult>(&target, None, input)
-                            .await
-                    }
-                }
-                .map_err(cell_error)?
-                .output
-                .0;
+                let image = self.saved_transaction_image(&target, input).await?;
                 let TransactionReadResult::Item(image) = image else {
                     return Err(StorageError::Internal(
                         "committed read image is missing".into(),

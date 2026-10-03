@@ -1,6 +1,8 @@
 //! Initial table data Cell admission through the existing Cell runtime.
 
 mod capacity;
+mod coordinator_bootstrap;
+mod coordinator_registration;
 mod directory;
 mod global_indexes;
 mod ranges;
@@ -62,7 +64,9 @@ pub struct CellInitialPartitionProvisioner {
     directory: PathBuf,
     initial_partition_count: u16,
     transaction_recovery: transactions::CoordinatorRecovery,
-    admission: tokio::sync::Mutex<()>,
+    admission: tokio::sync::RwLock<()>,
+    coordinator_bootstrap: coordinator_bootstrap::CoordinatorBootstrap,
+    coordinator_registrations: coordinator_registration::CoordinatorRegistrations,
     peers: Option<Arc<crate::BeyonddbPeers>>,
     recovery_transport: Option<Arc<dyn NodeLogTransport>>,
 }
@@ -92,6 +96,8 @@ impl CellInitialPartitionProvisioner {
             initial_partition_count: 1,
             transaction_recovery: Default::default(),
             admission: Default::default(),
+            coordinator_bootstrap: Default::default(),
+            coordinator_registrations: Default::default(),
             peers: None,
             recovery_transport: None,
         })
@@ -185,7 +191,7 @@ impl CellInitialPartitionProvisioner {
             .try_into()
             .map_err(|_| StorageError::Internal("invalid coordinator partition".into()))?;
         let client = CellClient::local(self.application.registry(), account_handle);
-        client
+        let registration = client
             .command::<RegisterCoordinatorShard>(
                 &account,
                 mutation_identity()?,
@@ -196,6 +202,8 @@ impl CellInitialPartitionProvisioner {
             )
             .await
             .map_err(cell_error)?;
+        self.remember_coordinator_registration(&account, &target, registration.receipt.incarnation)
+            .await?;
         Ok(handle)
     }
 
@@ -540,8 +548,21 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
     ) -> Result<CellHandle, StorageError> {
         let target = credential_target(access_key_id).map_err(provision_error)?;
-        let proof = self.cataloged(&target, crate::credentials::MODULE).await?;
-        self.takeover_expired(&target, proof, nodes, initialize_credentials)
+        self.takeover_expired_credential_cell(&target, nodes).await
+    }
+
+    pub(crate) async fn takeover_expired_credential_cell(
+        &self,
+        target: &CellTarget,
+        nodes: &NodeDirectory,
+    ) -> Result<CellHandle, StorageError> {
+        if target.namespace() != crate::credentials::NAMESPACE {
+            return Err(StorageError::Validation(
+                "invalid credential namespace".into(),
+            ));
+        }
+        let proof = self.cataloged(target, crate::credentials::MODULE).await?;
+        self.takeover_expired(target, proof, nodes, initialize_credentials)
             .await
     }
 
@@ -635,7 +656,7 @@ impl CellInitialPartitionProvisioner {
         nodes: &NodeDirectory,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         self.reclaim_settled_capacity(target).await?;
         let authority = CellAuthority::new(self.layout.clone());
         let mut observed = authority
@@ -689,7 +710,10 @@ impl CellInitialPartitionProvisioner {
                         MAX_NODE_LOG_RECOVERY_CELLS,
                     )
                     .await
-                    .map_err(provision_error)?;
+                    .map_err(|error| {
+                        tracing::warn!(?error, former = ?former_session, claimant = ?self.session, "node-log recovery failed");
+                        provision_error(error)
+                    })?;
                     // Recovery pins the overlay by changing Cell authority.
                     // The takeover must see that new control and its scratch.
                     observed = authority
@@ -812,18 +836,26 @@ impl CellInitialPartitionProvisioner {
         module: &'static str,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> Result<CellHandle, StorageError> {
+        let proof = self.provision_module_catalog(target, module).await?;
+        self.admit_initialized(target, proof, initialize)
+            .await
+            .map_err(provision_error)
+    }
+
+    async fn provision_module_catalog(
+        &self,
+        target: &CellTarget,
+        module: &'static str,
+    ) -> Result<CatalogProof, StorageError> {
         let code = self
             .application
             .registry()
             .module_code(module)
             .ok_or_else(|| StorageError::Internal("Cell module is not compiled".into()))?;
-        let proof = CellCatalog::new(self.layout.clone(), target.tenant())
+        CellCatalog::new(self.layout.clone(), target.tenant())
             .provision(
                 CatalogEntry::new(target, CatalogRole::Sql, code, 1).map_err(provision_error)?,
             )
-            .await
-            .map_err(provision_error)?;
-        self.admit_initialized(target, proof, initialize)
             .await
             .map_err(provision_error)
     }
@@ -844,9 +876,20 @@ impl CellInitialPartitionProvisioner {
         proof: CatalogProof,
         initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
     ) -> cellule_runtime::Result<CellHandle> {
+        if let Some(handle) = self
+            .try_bootstrap_coordinator(
+                target,
+                proof.clone(),
+                initialize,
+                coordinator_bootstrap::AuthorityObservation::Read,
+            )
+            .await?
+        {
+            return Ok(handle);
+        }
         // Serialize local activation/reclamation. Authority CAS still decides
         // ownership against other nodes; this guard never fences peers.
-        let _admission = self.admission.lock().await;
+        let _admission = self.admission.write().await;
         let authority = CellAuthority::new(self.layout.clone());
         let observed = authority.load(target.cell_id()).await?;
         if let Some(observed) = &observed
@@ -895,6 +938,18 @@ impl CellInitialPartitionProvisioner {
         {
             return self.activate_published(target, proof, observed).await;
         }
+        self.bootstrap_unpublished(target, proof, observed, initialize)
+            .await
+    }
+
+    async fn bootstrap_unpublished(
+        &self,
+        target: &CellTarget,
+        proof: CatalogProof,
+        observed: cellule_runtime::control::authority::VersionedControl,
+        initialize: for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>,
+    ) -> cellule_runtime::Result<CellHandle> {
+        let authority = CellAuthority::new(self.layout.clone());
         let replica = CellReplica::new(
             self.layout.clone(),
             *target.cell_id().as_bytes(),
@@ -1044,7 +1099,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<crate::GlobalIndexPartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+            let Some(initial_partitions) = table.placement.initial_partitions() else {
                 return Err(StorageError::Validation(
                     "account-local table has no initial ranges".into(),
                 ));
@@ -1093,7 +1148,7 @@ impl InitialPartitionProvisioner for CellInitialPartitionProvisioner {
     ) -> BoxedFuture<'a, Result<Vec<PartitionSpec>, StorageError>> {
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let crate::TablePlacement::Routed { initial_partitions } = table.placement else {
+            let Some(initial_partitions) = table.placement.initial_partitions() else {
                 return Err(StorageError::Validation(
                     "account-local table has no initial ranges".into(),
                 ));

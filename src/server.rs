@@ -9,6 +9,7 @@ mod node_log_recovery;
 mod node_log_sender;
 mod peer_receiver;
 mod placement;
+mod runtime_metrics;
 
 pub use capacity::measured_node_capacity;
 pub use node_lease::{NodeLeasePublisher, PublishedNodeLease};
@@ -16,6 +17,7 @@ pub use node_log_authority::PublishedNodeLogAuthority;
 pub use node_log_provider::PeerNodeDurabilityProvider;
 pub use node_log_recovery::recover_fenced_node_log;
 pub use node_log_sender::PeerNodeLogTransport;
+pub use runtime_metrics::RuntimeMetrics;
 
 use std::sync::Arc;
 
@@ -106,6 +108,7 @@ pub struct BeyonddbPeers {
     registry: Arc<cellule_runtime::registry::Registry>,
     placement: Arc<placement::RangePlacement>,
     follower: Option<node_log_receiver::FollowerEndpoint>,
+    follower_metrics: Option<Arc<RuntimeMetrics>>,
 }
 
 impl BeyonddbPeers {
@@ -147,6 +150,7 @@ impl BeyonddbPeers {
                 round_trip,
             }),
             follower: None,
+            follower_metrics: None,
         })
     }
 
@@ -160,13 +164,27 @@ impl BeyonddbPeers {
         store: Arc<FollowerStore>,
         guard: cellule_runtime::NodeLeaseGuard,
     ) -> Self {
-        self.follower = Some(node_log_receiver::FollowerEndpoint::new(
+        let mut endpoint = node_log_receiver::FollowerEndpoint::new(
             self.placement.directory.clone(),
             self.runtime.clone(),
             node,
             store,
             guard,
-        ));
+        );
+        if let Some(metrics) = &self.follower_metrics {
+            endpoint = endpoint.with_runtime_metrics(metrics.clone());
+        }
+        self.follower = Some(endpoint);
+        self
+    }
+
+    /// Observe authenticated follower append phases on the private listener.
+    #[must_use]
+    pub fn with_follower_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
+        if let Some(endpoint) = self.follower.take() {
+            self.follower = Some(endpoint.with_runtime_metrics(metrics.clone()));
+        }
+        self.follower_metrics = Some(metrics);
         self
     }
 
@@ -177,9 +195,9 @@ impl BeyonddbPeers {
 
     /// Build a client with the opt-in short-lived local owner cache.
     ///
-    /// The cache keeps resident handles for 500 ms while the Cell handle still
-    /// fences drained owners. Authority is re-read after expiry, so ownership
-    /// changes remain bounded by the cache window.
+    /// The cache keeps resident handles for 500 ms, then resolves the current
+    /// actor without provider reads. Reuse checks the current resident owner;
+    /// dispatch fences drained handles. Remote routing keeps exact checks.
     pub fn client_with_cache(
         &self,
         provisioner: Arc<CellInitialPartitionProvisioner>,
@@ -205,7 +223,19 @@ impl BeyonddbPeers {
 
     /// Build the authenticated peer route; mount only on this identity's mTLS listener.
     pub fn router(&self, provisioner: Arc<CellInitialPartitionProvisioner>) -> axum::Router {
-        let router = peer_receiver::peer_router(self, provisioner);
+        self.router_with_cache(provisioner, false)
+    }
+
+    /// Build the authenticated peer route with the opt-in 500 ms active owner handle cache.
+    ///
+    /// Cell handles still fence drained owners; peer enrollment and request
+    /// authorization are checked for every invocation.
+    pub fn router_with_cache(
+        &self,
+        provisioner: Arc<CellInitialPartitionProvisioner>,
+        handle_cache_enabled: bool,
+    ) -> axum::Router {
+        let router = peer_receiver::peer_router(self, provisioner, handle_cache_enabled);
         match &self.follower {
             Some(follower) => router.merge(node_log_receiver::router(follower.clone())),
             None => router,

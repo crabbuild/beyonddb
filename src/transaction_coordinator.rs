@@ -37,7 +37,7 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 10] = [
+static COMMANDS: [OperationDescriptor; 11] = [
     operation(1),
     crate::participant::phase_operation(2),
     operation(3),
@@ -60,8 +60,13 @@ static COMMANDS: [OperationDescriptor; 10] = [
         output_limit: 64 * 1024,
         ..operation(10)
     },
+    OperationDescriptor {
+        input_limit: 64 * 1024,
+        output_limit: 64 * 1024,
+        ..operation(11)
+    },
 ];
-static QUERIES: [OperationDescriptor; 6] = [
+static QUERIES: [OperationDescriptor; 7] = [
     OperationDescriptor {
         codec_version: 2,
         ..operation(1)
@@ -78,6 +83,11 @@ static QUERIES: [OperationDescriptor; 6] = [
     },
     operation(5),
     operation(6),
+    OperationDescriptor {
+        input_limit: 4096,
+        output_limit: resume::RESUME_OUTPUT_BYTES,
+        ..operation(7)
+    },
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -110,6 +120,7 @@ impl cellule_runtime::registry::CellModule for CoordinatorModule {
                 source.update(include_bytes!("transaction_coordinator/phase.rs"));
                 source.update(include_bytes!("transaction_coordinator/read_release.rs"));
                 source.update(include_bytes!("transaction_coordinator/token.rs"));
+                source.update(include_bytes!("transaction_coordinator/resume.rs"));
                 source.update(include_bytes!("transaction_token.rs"));
                 source.update(include_bytes!("items.rs"));
                 source.update(include_bytes!("expression_wire.rs"));
@@ -137,6 +148,7 @@ impl cellule_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_command::<RecordParticipantPrepare>()?;
         registry.bind_command::<RecordParticipantPrepares>()?;
         registry.bind_command::<DecideCrossCellTransaction>()?;
+        registry.bind_command::<CommitPreparedTransaction>()?;
         registry.bind_command::<RecordParticipantResolution>()?;
         registry.bind_command::<RecordParticipantResolutions>()?;
         registry.bind_command::<BeginReadResultRelease>()?;
@@ -147,6 +159,7 @@ impl cellule_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_query::<ReadPendingCrossCellTransactions>()?;
         registry.bind_query::<ReadUnresolvedCoordinatorParticipants>()?;
         registry.bind_query::<ReadPendingTransactionBoundary>()?;
+        registry.bind_query::<ReadCoordinatorResume>()?;
         registry.bind_query::<ReadCoordinatorToken>()
     }
 }
@@ -473,8 +486,10 @@ fn read_decision(
 mod phase;
 mod read_release;
 mod registry;
+mod resume;
 mod token;
 pub use phase::*;
 pub use read_release::*;
 pub use registry::*;
+pub use resume::*;
 pub use token::*;

@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     sync::{OnceLock, RwLock},
+    time::Duration,
 };
 
 use aes_gcm::aead::{Aead, Payload};
@@ -31,6 +32,7 @@ pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x44; 16]);
 const TENANT: TenantId = TenantId::from_bytes([0x44; 16]);
 const SHARDS: u32 = 256;
 const SCHEMA: &str = include_str!("credential_schema.sql");
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NAMESPACE,
@@ -408,11 +410,35 @@ impl CellCredentialStore {
             }
             self.remember_cell(&cell_id);
         }
-        let output = self
-            .client
-            .query::<ReadCredential>(&target, None, Json(access_key_id.into()))
+        let lookup = async {
+            let observed = self
+                .client
+                .query::<ReadCredential>(&target, None, Json(access_key_id.into()))
+                .await;
+            if matches!(
+                &observed,
+                Err(InvocationError::NotStarted(Error::CellNotActive))
+            ) {
+                // Pressure can release the owner while the peer transport paces
+                // a pre-dispatch refusal. Re-enter the resolver once so it can
+                // restore the now-idle Cell rather than forwarding to no owner.
+                self.client
+                    .query::<ReadCredential>(&target, None, Json(access_key_id.into()))
+                    .await
+            } else {
+                observed
+            }
+        };
+        let output = tokio::time::timeout(QUERY_TIMEOUT, lookup)
             .await
-            .map_err(|_| internal_error())?;
+            .map_err(|_| {
+                tracing::warn!(cell = ?target.cell_id(), "credential Cell query deadline reached");
+                internal_error()
+            })?
+            .map_err(|error| {
+                tracing::warn!(error = %error, cell = ?target.cell_id(), "credential Cell query failed");
+                internal_error()
+            })?;
         output
             .output
             .0
