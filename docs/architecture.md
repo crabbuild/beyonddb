@@ -1,5 +1,10 @@
 # Understand BeyondDB's architecture and durability
 
+For `codex/bdb-cellar`, the current runtime is described in
+[the embedded server guide](cellar-server.md), and table ownership follows
+[ordered cell partitioning](ordered-cell-partitioning.md). The Cellule runtime
+details and HASH placement described below record the earlier implementation.
+
 This page explains how a signed request becomes durable, which Cell owns each kind of state, and how another node recovers that state. BeyondDB uses two pinned projects: ExtendDB owns the DynamoDB protocol and security boundary; Cellule owns fenced execution and durable publication. BeyondDB connects them through Cell schemas, adapters, routing, provisioners, a transaction coordinator, and serving workers. The design does not establish fleet-scale performance.
 
 ![The layers from AWS clients through ExtendDB, BeyondDB, and Cellule to the object store](../diagram/beyonddb-architecture/layers.svg)

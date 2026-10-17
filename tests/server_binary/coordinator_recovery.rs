@@ -27,27 +27,10 @@ async fn settled_history_beyond_residency_survives_process_loss() {
         .send()
         .await
         .unwrap();
-    let table_id = created.table_description().unwrap().table_id().unwrap();
-    let schema = [extenddb_core::types::KeySchemaElement {
-        attribute_name: "id".into(),
-        key_type: extenddb_core::types::KeyType::Hash,
-    }];
-    let range = |id: &str| {
-        beyonddb::data_key_hash(
-            table_id,
-            &extenddb_core::types::Item::from([(
-                "id".into(),
-                extenddb_core::types::AttributeValue::S(id.into()),
-            )]),
-            &schema,
-        )
-        .unwrap()[0]
-            >> 7
-    };
-    let other = (0..1_000)
-        .map(|n| format!("other-{n}"))
-        .find(|key| range(key) != range("first"))
-        .unwrap();
+    assert!(created.table_description().unwrap().table_id().is_some());
+    // The two ordered bootstrap intervals meet at U+0080. These PKs have
+    // distinct owners; HASH percentiles no longer establish participant count.
+    let other = "Ω-other".to_owned();
     let mut shards = HashSet::new();
     let tokens = (0..10_000)
         .map(|n| format!("recovery-{n}"))
@@ -98,7 +81,7 @@ async fn settled_history_beyond_residency_survives_process_loss() {
     let mut config: serde_json::Value =
         serde_json::from_slice(&fs::read(&fixture.config).unwrap()).unwrap();
     config["peer_bind"] = json!(replacement_peer);
-    config["peer_endpoint"] = json!(format!("https://{replacement_peer}"));
+    config["peer_advertise"] = json!(replacement_peer.to_string());
     fs::write(&fixture.config, config.to_string()).unwrap();
     let recovery_started = Instant::now();
     fixture.child = start(&fixture.config, &fixture.log, false, fixture.s3);

@@ -1,11 +1,11 @@
 //! Read projected images without fetching base-table attributes.
 
-use cellule_runtime::registry::{Query, QueryContext};
+use bdb_cellar_runtime::registry::{Query, QueryContext};
 use extenddb_core::types::{Item, KeyType, extract_key, item_size_bytes};
 
 use super::{MODULE, read_spec};
 use crate::item_storage::StoredValue;
-use crate::partition::key::{index_key, partition_key_bytes, sort_component, sort_prefix};
+use crate::partition::key::{partition_key_bytes, sort_component, sort_prefix};
 use crate::table::statement;
 use crate::{
     Error, Json, PartitionQueryInput, PartitionQueryOutcome, PartitionScanInput,
@@ -51,7 +51,10 @@ impl Query for GlobalIndexQuery {
         {
             return Ok(Json(Outcome::InvalidKey));
         }
-        if !spec.contains(&input.partition_key)? {
+        let span = crate::partition::key::partition_span(&input.partition_key, schema)?;
+        let owned = bdb_keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
+            .map_err(|_| Error::Command("invalid installed index range"))?;
+        if span.intersection(&owned).is_none() {
             return Ok(Json(Outcome::WrongPartition));
         }
         let bounds = match bounds(&input, schema, &spec.table.attribute_definitions) {
@@ -64,10 +67,10 @@ impl Query for GlobalIndexQuery {
             if !spec.valid_key(key) || partition_key_bytes(key, schema)? != partition {
                 return Ok(Json(Outcome::InvalidKey));
             }
-            Some((
-                index_key(key, schema)?.1,
-                crate::items::item_key(key, &keys)?,
-            ))
+            Some(
+                crate::partition::key::ordered_index_key(key, schema, &spec.table.key_schema)?
+                    .to_vec(),
+            )
         } else {
             None
         };
@@ -78,23 +81,26 @@ impl Query for GlobalIndexQuery {
         let mut last = None;
         loop {
             let mut sql = String::from(
-                "SELECT item_key, sort_key FROM ddb_global_index_items WHERE item IS NOT NULL AND partition_key = ?",
+                "SELECT item_key, sort_key, ordered_key FROM ddb_global_index_items WHERE item IS NOT NULL AND partition_key = ?",
             );
             let mut parameters = vec![SqlValue::Blob(partition.clone())];
             for (operator, bound) in &bounds {
                 sql.push_str(&format!(" AND sort_key {operator} ?"));
                 parameters.push(SqlValue::Blob(bound.clone()));
             }
-            if let Some((sort, key)) = &cursor {
-                sql.push_str(&format!(" AND (sort_key, item_key) {comparison} (?, ?)"));
-                parameters.extend([SqlValue::Blob(sort.clone()), SqlValue::Blob(key.clone())]);
+            if let Some(key) = &cursor {
+                sql.push_str(&format!(" AND ordered_key {comparison} ?"));
+                parameters.push(SqlValue::Blob(key.clone()));
             }
-            sql.push_str(&format!(
-                " ORDER BY sort_key {order}, item_key {order} LIMIT 64"
-            ));
+            sql.push_str(&format!(" ORDER BY ordered_key {order} LIMIT 64"));
             let rows = context.sql(&statement(&sql, parameters))?;
             for row in &rows[0].rows {
-                let [SqlValue::Blob(key), SqlValue::Blob(sort)] = row.as_slice() else {
+                let [
+                    SqlValue::Blob(key),
+                    SqlValue::Blob(_sort),
+                    SqlValue::Blob(ordered),
+                ] = row.as_slice()
+                else {
                     return Err(Error::Command("invalid global-index query row"));
                 };
                 let item = StoredValue::GlobalIndex(key)
@@ -114,7 +120,7 @@ impl Query for GlobalIndexQuery {
                 bytes = next;
                 last = Some(extract_key(&item, &keys));
                 items.push(item);
-                cursor = Some((sort.clone(), key.clone()));
+                cursor = Some(ordered.clone());
             }
             if rows[0].rows.len() < 64 {
                 break;
@@ -153,7 +159,12 @@ impl Query for GlobalIndexScan {
         }
         let schema = spec.index.key_schema(&spec.table);
         let mut cursor = match &input.exclusive_start_key {
-            Some(key) if spec.valid_key(key) => crate::items::item_key(key, &schema)?,
+            Some(key) if spec.valid_key(key) => crate::partition::key::ordered_index_key(
+                key,
+                &spec.index.specification.key_schema,
+                &spec.table.key_schema,
+            )?
+            .to_vec(),
             Some(_) => return Ok(Json(Outcome::InvalidKey)),
             None => Vec::new(),
         };
@@ -161,9 +172,9 @@ impl Query for GlobalIndexScan {
         let mut bytes = 0_usize;
         let mut last = None;
         loop {
-            let rows = context.sql(&statement("SELECT item_key FROM ddb_global_index_items WHERE item IS NOT NULL AND item_key > ?1 ORDER BY item_key LIMIT 64", vec![SqlValue::Blob(cursor.clone())]))?;
+            let rows = context.sql(&statement("SELECT item_key, ordered_key FROM ddb_global_index_items WHERE item IS NOT NULL AND ordered_key > ?1 ORDER BY ordered_key LIMIT 64", vec![SqlValue::Blob(cursor.clone())]))?;
             for row in &rows[0].rows {
-                let [SqlValue::Blob(key)] = row.as_slice() else {
+                let [SqlValue::Blob(key), SqlValue::Blob(ordered)] = row.as_slice() else {
                     return Err(Error::Command("invalid global-index scan row"));
                 };
                 let item = StoredValue::GlobalIndex(key)
@@ -183,7 +194,7 @@ impl Query for GlobalIndexScan {
                 bytes = next;
                 last = Some(extract_key(&item, &schema));
                 items.push(item);
-                cursor = key.clone();
+                cursor = ordered.clone();
             }
             if rows[0].rows.len() < 64 {
                 break;

@@ -1,6 +1,6 @@
 //! Bounded phase inputs and immutable coordinator payload retrieval.
 
-use cellule_runtime::{
+use bdb_cellar_runtime::{
     MutationIdentity,
     client::{Committed, InvocationError},
     identity::{CellTarget, RequestId},
@@ -19,22 +19,17 @@ use crate::{
 // ABORT. Pending outcomes stay retryable; they are never classified by source
 // text or by an error nested inside an unknown mutation result.
 pub(super) enum PhaseError {
-    Capacity(cellule_runtime::Error),
+    Capacity(bdb_cellar_runtime::Error),
     Other(StorageError),
 }
 
 impl<T> From<InvocationError<T>> for PhaseError {
     fn from(error: InvocationError<T>) -> Self {
         match error {
-            InvocationError::NotStarted(error @ cellule_runtime::Error::Capacity(_)) => {
+            InvocationError::NotStarted(error @ bdb_cellar_runtime::Error::Capacity(_)) => {
                 Self::Capacity(error)
             }
-            InvocationError::NotStarted(cellule_runtime::Error::Sqlite(error))
-                if error.sqlite_error_code()
-                    == Some(cellule_ltx::rusqlite::ErrorCode::DiskFull) =>
-            {
-                Self::Capacity(cellule_runtime::Error::Sqlite(error))
-            }
+
             error => Self::Other(cell_error(error)),
         }
     }
@@ -121,7 +116,7 @@ impl CellStorage {
                 .client
                 .command::<UploadTransactionPayload<C>>(target, mutation_identity()?, chunk.clone())
                 .await;
-            if matches!(result, Err(InvocationError::Pending(_))) {
+            if matches!(result, Err(InvocationError::Ambiguous { .. })) {
                 self.client
                     .command::<UploadTransactionPayload<C>>(target, mutation_identity()?, chunk)
                     .await?;

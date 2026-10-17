@@ -1,568 +1,366 @@
-//! Run ExtendDB's signed DynamoDB endpoint over a leased BeyondDB Cell node.
+//! Process-owned ExtendDB protocol frontend with the embedded Cellar engine.
+#![recursion_limit = "512"]
 
-use std::{
-    error::Error,
-    io,
-    io::Read,
-    net::SocketAddr,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+use anyhow::{Context, Result, ensure};
+use beyonddb::{CellAuthorizationStore, CellCredentialStore, CellarServer, CellarServerConfig};
+use cellar::{
+    bucket::{Bucket, StorageBackend},
+    sdk::{
+        ActorIdentity, ActorOptions, ActorPolicy, ExternalNodeServices, LogOptions, NodeConfig,
+        NodeFleet, NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner, ReplicaStorage,
+        ReplicaStorageOptions, ReplicationOptions, ShutdownMode, SignedPeerTransport,
     },
-    time::Duration,
-};
-
-use beyonddb::{
-    APPLICATION_ID, Beyonddb, BeyonddbPeers, CellAuthorizationStore, CellCredentialStore,
-    CellInitialPartitionProvisioner, CellStorage, NodeLeasePublisher, PeerNodeDurabilityProvider,
-    PeerNodeLogTransport, RuntimeMetrics, build_http_state_with_cache, measured_node_capacity,
-    shutdown_serving_node,
-};
-use cellule_app::CellApplication;
-use cellule_host::{
-    CellNode, CellNodeBuilder, CellNodeTaskGroup, FOLLOWER_STORE_COMPONENT,
-    NodeDurabilitySupervisorConfig,
-};
-use cellule_peer_http::{LoadedPeerTls, PeerTlsIdentity};
-use cellule_runtime::{
-    NodeLeaseGuard, SqlWorkerPool,
-    follower::FollowerStore,
-    identity::{Digest, NodeId, SessionId},
-    ltx::{CellStorageLayout, DiskBudget, Host, Limits},
-    node::{
-        NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-        NodeFailureDomain,
-    },
-    registry::BuildDescriptor,
-};
-use cellule_store::{
-    Store,
-    identity::StorageProviderKind,
-    provider_store::{build_static_env_store, build_url_object_store},
 };
 use extenddb_auth::StoredCredential;
-use extenddb_server::ServerTlsConfig;
+use object_store::{
+    ClientOptions, RetryConfig,
+    aws::{AmazonS3Builder, S3ConditionalPut},
+};
 use serde::Deserialize;
-use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
+use std::{
+    io::Read,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use zeroize::Zeroizing;
-
-type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
-    storage_url: String,
-    node_id: Uuid,
+    node_name: String,
     data_dir: PathBuf,
-    disk_budget_bytes: u64,
-    /// Optional persistent follower-lane budget. Does not enable fleet proofs.
-    #[serde(default)]
-    follower_store_bytes: Option<u64>,
-    /// Experimental follower fsync proofs with fenced-owner recovery.
-    #[serde(default)]
-    follower_durability_enabled: bool,
-    #[serde(default = "default_node_retained_bytes")]
-    node_retained_bytes: usize,
-    /// Optional bounded runtime observations, atomically refreshed once per second.
-    #[serde(default)]
-    runtime_metrics_file: Option<PathBuf>,
-    #[serde(default = "default_max_active_cells")]
-    max_active_cells: usize,
-    /// Optional SQL worker override. The runtime caps this at sixteen workers.
-    #[serde(default)]
-    sql_workers: Option<usize>,
-    encryption_key_file: PathBuf,
     region: String,
-    peer_bind: SocketAddr,
-    peer_endpoint: String,
-    peer_certificate: PathBuf,
-    peer_private_key: PathBuf,
-    peer_ca: PathBuf,
-    peer_server_name: String,
     public_bind: SocketAddr,
     public_endpoint: String,
+    peer_bind: SocketAddr,
+    /// Cellar's authenticated peer address, HOST:PORT.
+    peer_advertise: String,
+    peer_key_file: PathBuf,
+    encryption_key_file: PathBuf,
+    #[serde(default)]
     public_certificate: Option<PathBuf>,
+    #[serde(default)]
     public_private_key: Option<PathBuf>,
     #[serde(default)]
-    owned_accounts: Vec<String>,
-    #[serde(default)]
-    owned_access_keys: Vec<String>,
-    #[serde(default = "default_initial_partitions")]
+    accounts: Vec<String>,
+    #[serde(default = "initial_partitions")]
     initial_partitions: u16,
-    #[serde(default = "default_split_threshold")]
+    #[serde(default = "max_cells")]
+    max_active_cells: usize,
+    #[serde(default = "split_bytes")]
     split_threshold_bytes: u64,
-    /// Enable stale-while-revalidate auth and table metadata caches plus the
-    /// complete-page routed table cache. Changes made on another node become
-    /// visible after the cache TTL or a stale-route rejection.
     #[serde(default)]
     auth_cache_enabled: bool,
-    bootstrap: Option<BootstrapConfig>,
+    #[serde(default)]
+    fleet: Option<Fleet>,
+    #[serde(default)]
+    shutdown_mode: StopMode,
+    #[serde(default)]
+    bootstrap: Option<Bootstrap>,
 }
-
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StopMode {
+    #[default]
+    Preserve,
+    Handoff,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BootstrapConfig {
+struct Fleet {
+    bucket: String,
+    endpoint: Option<String>,
+    /// Dedicated Cellar storage prefix. Never point at Cellule object roots.
+    prefix: String,
+    /// Permit native follower fsyncs to race ordinary bucket publication.
+    #[serde(default)]
+    follower_durability: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bootstrap {
     account_id: String,
     access_key_id: String,
     principal_name: String,
     policy_name: String,
     policy_file: PathBuf,
 }
-
-const fn default_initial_partitions() -> u16 {
-    1
+fn initial_partitions() -> u16 {
+    4
 }
-
-const fn default_split_threshold() -> u64 {
+fn max_cells() -> usize {
+    128
+}
+fn split_bytes() -> u64 {
     256 * 1024 * 1024
 }
 
-const fn default_node_retained_bytes() -> usize {
-    1024 * 1024 * 1024
+fn key_file(path: &Path) -> Result<[u8; 32]> {
+    let bytes = Zeroizing::new(std::fs::read(path).context("could not read key file")?);
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("key file must contain exactly 32 raw bytes"))
 }
 
-const fn default_max_active_cells() -> usize {
-    128
+fn bucket(builder: &AmazonS3Builder, name: &str, prefix: &str) -> Result<Bucket> {
+    let ordinary = Arc::new(
+        builder
+            .clone()
+            .with_retry(RetryConfig {
+                max_retries: 2,
+                retry_timeout: Duration::from_secs(30),
+                ..Default::default()
+            })
+            .build()?,
+    );
+    // An ambiguous CAS is ownership evidence, so the transport must not retry it.
+    let conditional = Arc::new(
+        builder
+            .clone()
+            .with_retry(RetryConfig {
+                max_retries: 0,
+                retry_timeout: Duration::from_secs(30),
+                ..Default::default()
+            })
+            .build()?,
+    );
+    Bucket::from_clients(
+        ordinary.clone(),
+        conditional,
+        ordinary,
+        StorageBackend::S3,
+        name.into(),
+        prefix.into(),
+    )
 }
 
-const MAX_SQL_WORKERS: usize = 16;
-const REQUIRED_FOLLOWER_BYTES: u64 = 64 * 1024 * 1024;
-
-#[tokio::main]
-async fn main() -> ServerResult<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
-        .with_writer(io::stderr)
+        .with_writer(std::io::stderr)
         .with_ansi(false)
-        .try_init()?;
-    let mut args = std::env::args_os().skip(1);
-    let path = args
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("logger initialization failed: {error}"))?;
+    let mut arguments = std::env::args_os().skip(1);
+    let config_path = arguments
         .next()
-        .ok_or_else(|| invalid("usage: beyonddb <config.json>"))?;
-    let bootstrap = match (args.next(), args.next()) {
+        .context("usage: beyonddb <config.json> [--bootstrap]")?;
+    let bootstrap = match (arguments.next(), arguments.next()) {
         (None, None) => false,
-        (Some(mode), None) if mode == "--bootstrap" => true,
-        _ => return Err(invalid("usage: beyonddb <config.json> [--bootstrap]").into()),
+        (Some(value), None) if value == "--bootstrap" => true,
+        _ => anyhow::bail!("usage: beyonddb <config.json> [--bootstrap]"),
     };
-    let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
+    let config: Config = serde_json::from_slice(&std::fs::read(config_path)?)?;
+    ensure!(
+        config.max_active_cells > 0 && config.split_threshold_bytes > 0,
+        "cell and split budgets must be positive"
+    );
+    ensure!(
+        (2..=256).contains(&config.initial_partitions),
+        "initial_partitions must be between 2 and 256"
+    );
     let secret = if bootstrap {
-        if config.bootstrap.is_none() {
-            return Err(invalid("bootstrap settings are missing").into());
-        }
-        let mut secret = Zeroizing::new(String::new());
-        io::stdin().read_to_string(&mut secret)?;
-        let trimmed = secret.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            return Err(invalid("bootstrap secret on stdin is empty").into());
-        }
+        let settings = config
+            .bootstrap
+            .as_ref()
+            .context("bootstrap settings are missing")?;
+        ensure!(
+            config.accounts.contains(&settings.account_id),
+            "bootstrap account must be in accounts"
+        );
+        let mut value = Zeroizing::new(String::new());
+        std::io::stdin().read_to_string(&mut value)?;
+        let trimmed = value.trim_end_matches(['\r', '\n']);
+        ensure!(!trimmed.is_empty(), "bootstrap secret on stdin is empty");
         Some(Zeroizing::new(trimmed.to_owned()))
     } else {
         None
     };
-    serve(config, secret).await
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_name("bdb-host")
+        .enable_all()
+        .build()?;
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("bdb-cellar")
+        .enable_all()
+        .build()?;
+    host.block_on(serve(config, secret, host.handle(), core.handle()))
 }
 
-async fn serve(config: Config, bootstrap_secret: Option<Zeroizing<String>>) -> ServerResult<()> {
-    if config.disk_budget_bytes == 0
-        || config.node_retained_bytes == 0
-        || config.split_threshold_bytes == 0
-        || config.max_active_cells == 0
-        || config.follower_store_bytes == Some(0)
-        || config
-            .sql_workers
-            .is_some_and(|workers| !(1..=MAX_SQL_WORKERS).contains(&workers))
-    {
-        return Err(invalid(
-            "disk, optional follower-store, retained-byte, split, and active-cell budgets must be positive; sql_workers must be between 1 and 16",
-        )
-        .into());
-    }
-    if config.follower_durability_enabled
-        && config
-            .follower_store_bytes
-            .is_none_or(|bytes| bytes < REQUIRED_FOLLOWER_BYTES)
-    {
-        return Err(invalid(
-            "follower durability requires a persistent follower-store budget of at least 64 MiB",
-        )
-        .into());
-    }
-    if !["s3://", "gs://", "az://"]
-        .iter()
-        .any(|scheme| config.storage_url.starts_with(scheme))
-    {
-        return Err(invalid("Cell storage must use S3, GCS, or Azure").into());
-    }
-    if !config.peer_endpoint.starts_with("https://") {
-        return Err(invalid("peer endpoint must use HTTPS").into());
-    }
-    if let Some(bootstrap) = config.bootstrap.as_ref()
-        && bootstrap_secret.is_some()
-        && (!config.owned_accounts.contains(&bootstrap.account_id)
-            || !config.owned_access_keys.contains(&bootstrap.access_key_id))
-    {
-        return Err(invalid("bootstrap account and access key must be owned by this node").into());
-    }
-    let public_tls = match (&config.public_certificate, &config.public_private_key) {
-        (Some(cert_path), Some(key_path)) => Some(ServerTlsConfig {
-            cert_path: cert_path.clone(),
-            key_path: key_path.clone(),
+async fn serve(
+    config: Config,
+    secret: Option<Zeroizing<String>>,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+) -> Result<()> {
+    let tls = match (&config.public_certificate, &config.public_private_key) {
+        (Some(cert), Some(key)) => Some(extenddb_server::ServerTlsConfig {
+            cert_path: cert.clone(),
+            key_path: key.clone(),
         }),
         (None, None) if config.public_bind.ip().is_loopback() => None,
-        (None, None) => return Err(invalid("public HTTP requires a loopback bind").into()),
-        _ => return Err(invalid("public TLS requires both certificate and private key").into()),
-    };
-    let public_scheme = if public_tls.is_some() {
-        "https://"
-    } else {
-        "http://"
-    };
-    if !config.public_endpoint.starts_with(public_scheme) {
-        return Err(invalid("public endpoint scheme does not match TLS configuration").into());
-    }
-    let encryption_key = read_encryption_key(&config.encryption_key_file)?;
-    let tls = LoadedPeerTls::load(
-        &config.peer_certificate,
-        &config.peer_private_key,
-        &config.peer_ca,
-        &config.peer_server_name,
-    )?;
-    let source_revision = option_env!("BEYONDDB_SOURCE_REVISION")
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            blake3::hash(include_bytes!("beyonddb.rs"))
-                .to_hex()
-                .to_string()
-        });
-    let application = Arc::new(Beyonddb::compile(BuildDescriptor {
-        source_revision,
-        cargo_lock_digest: Digest::from_bytes(
-            *blake3::hash(include_bytes!("../../Cargo.lock")).as_bytes(),
+        (None, None) => anyhow::bail!(
+            "public HTTP requires a loopback bind; configure TLS for external serving"
         ),
-    })?);
-    let release = application.registry().release_digest();
-    let image = application.descriptor_digest();
-    let (store, prefix) = if config.storage_url.starts_with("s3://") {
-        let url = reqwest::Url::parse(&config.storage_url)?;
-        let bucket = url
-            .host_str()
-            .ok_or_else(|| invalid("S3 bucket is missing"))?;
-        // Recovery pins immutable overlays with conditional copies. The provider
-        // builder configures multipart copy-if-absent and transport admission.
-        (
-            build_static_env_store(bucket, StorageProviderKind::S3)?,
-            object_store::path::Path::from_url_path(url.path())?,
-        )
-    } else {
-        let url_store = build_url_object_store(&config.storage_url)?;
-        (
-            Store::new(url_store.store_arc()),
-            url_store.prefix().clone(),
-        )
+        _ => anyhow::bail!("public TLS requires both certificate and private key"),
     };
-    let metrics = config
-        .runtime_metrics_file
-        .as_ref()
-        .map(|_| Arc::new(RuntimeMetrics::default()));
-    let store = match &metrics {
-        Some(metrics) => store.with_storage_observer(metrics.clone()),
-        None => store,
-    };
-    let layout = CellStorageLayout::new(store, prefix, *APPLICATION_ID.as_bytes());
-    let directory = NodeDirectory::new(layout.clone(), tls.fleet(), image, release);
-    let peer_listener = TcpListener::bind(config.peer_bind).await?;
-    let public_listener = TcpListener::bind(config.public_bind).await?;
-    let session_uuid = Uuid::now_v7();
-    let session = SessionId::from_bytes(*session_uuid.as_bytes());
-    let session_dir = config.data_dir.join(session_uuid.to_string());
-    tokio::fs::create_dir_all(&config.data_dir).await?;
-    let sql_workers = match config.sql_workers {
-        Some(workers) => SqlWorkerPool::new(workers, config.max_active_cells)?,
-        None => SqlWorkerPool::for_system(config.max_active_cells)?,
-    };
-    let mut builder = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(sql_workers, config.node_retained_bytes)
-        .with_replica_host(
-            Host::default().with_local_disk_budget(DiskBudget::new(config.disk_budget_bytes)),
-        )
-        .with_session(session);
-    if let Some(bytes) = config.follower_store_bytes {
-        builder = builder.with_follower_store(
-            config.data_dir.join("follower-store"),
-            Limits::default(),
-            DiskBudget::new(bytes),
+    ensure!(
+        config
+            .public_endpoint
+            .starts_with(if tls.is_some() { "https://" } else { "http://" }),
+        "public endpoint scheme does not match listener TLS"
+    );
+    let encryption_key = key_file(&config.encryption_key_file)?;
+    let peer_key = key_file(&config.peer_key_file)?;
+    let public = tokio::net::TcpListener::bind(config.public_bind).await?;
+    let peer = tokio::net::TcpListener::bind(config.peer_bind).await?;
+    let signer = Arc::new(PeerProbeSigner::generate());
+    let auth = Arc::new(PeerAuth::new(peer_key, &config.node_name)?);
+    let peer_http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .build()?;
+    let stream_http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .tcp_nodelay(true)
+        .build()?;
+    let fleet = if let Some(fleet) = &config.fleet {
+        ensure!(
+            !fleet.prefix.is_empty(),
+            "fleet prefix must be dedicated to this Cellar deployment"
         );
-    }
-    let node = builder.build()?;
-    let node_shutdown = CancellationToken::new();
-    let tasks = node.install_task_group(CancellationToken::new(), node_shutdown.clone())?;
-    if let Some((path, metrics)) = config.runtime_metrics_file.clone().zip(metrics.clone()) {
-        node.install_telemetry(metrics.clone())?;
-        let metrics_runtime = node.runtime();
-        let cancellation = tasks.cancellation_token();
-        tasks.spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut pending = path.as_os_str().to_os_string();
-            pending.push(".pending");
-            let pending = PathBuf::from(pending);
-            loop {
-                tokio::select! {
-                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
-                    _ = tick.tick() => {}
-                }
-                let mut snapshot = metrics.snapshot();
-                let stats = metrics_runtime.stats();
-                snapshot["node_resources"] = serde_json::json!({
-                    "active_cells": stats.active_cells(),
-                    "active_cell_capacity": stats.active_cell_capacity(),
-                    "retained_bytes": stats.retained_bytes(),
-                    "retained_capacity_bytes": stats.retained_capacity_bytes(),
-                    "worker_jobs": stats.worker_jobs(),
-                    "worker_job_capacity": stats.worker_job_capacity(),
-                    "unpublished_node_log_bytes": stats.unpublished_node_log_bytes(),
-                });
-                let encoded = serde_json::to_vec_pretty(&snapshot);
-                let result = match encoded {
-                    Ok(encoded) => match tokio::fs::write(&pending, encoded).await {
-                        Ok(()) => tokio::fs::rename(&pending, &path).await,
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(std::io::Error::other(error)),
-                };
-                if let Err(error) = result {
-                    tracing::warn!(%error, "runtime metrics snapshot failed");
-                }
-            }
-        })?;
-    }
-    let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
-    let endpoint = config.peer_endpoint.clone();
-    let signer = tls.signing_key().clone();
-    let certificate = tls.certificate();
-    let fleet = tls.fleet();
-    let capacity_runtime = node.runtime();
-    let capacity_dir = config.data_dir.clone();
-    let recovery_capable = config.follower_store_bytes.is_some();
-    let follower_store = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT);
-    let follower_ready = Arc::new(AtomicBool::new(false));
-    let recruitment_ready = Arc::new(AtomicBool::new(false));
-    let advertised_store = follower_store.clone();
-    let advertised_ready = follower_ready.clone();
-    let follower_durability_enabled = config.follower_durability_enabled;
-    let modules = application.registry().module_digests();
-    let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
-        let (capacity, placement) = if capacity_runtime.is_shutting_down() {
-            (NodeCapacity::default(), None)
-        } else {
-            match measured_node_capacity(&capacity_dir, capacity_runtime.stats()) {
-                Ok((mut capacity, placement)) => {
-                    if recovery_capable {
-                        capacity.log_protocol = NODE_LOG_PROTOCOL_VERSION;
-                    }
-                    // Only a listening authenticated receiver may be recruited.
-                    if follower_durability_enabled
-                        && advertised_ready.load(Ordering::Acquire)
-                        && let Some(store) = advertised_store.as_ref()
-                    {
-                        capacity.follower_free_bytes =
-                            store.available_bytes().min(capacity.free_disk_bytes);
-                    }
-                    (capacity, Some(placement))
-                }
-                Err(error) => {
-                    // Observation failure disables placement, not the serving lease.
-                    // Never renew a stale sample with the next advertisement's time.
-                    tracing::warn!(error = ?error, "node placement measurement unavailable");
-                    (NodeCapacity::default(), None)
-                }
-            }
-        };
-        let advertisement = NodeAdvertisement::sign(
-            node_id,
-            session,
-            endpoint.clone(),
-            fleet,
-            certificate,
-            image,
-            release,
-            &signer,
-            1,
-            now,
-            expires,
-            modules.clone(),
-            vec![1],
-            NodeFailureDomain::default(),
-            capacity,
-        )?;
-        match placement {
-            Some(placement) => advertisement.with_placement_capacity(placement, &signer),
-            None => Ok(advertisement),
+        let mut builder = AmazonS3Builder::from_env()
+            .with_bucket_name(&fleet.bucket)
+            .with_region(&config.region)
+            .with_conditional_put(S3ConditionalPut::ETagMatch)
+            .with_client_options(
+                ClientOptions::new()
+                    .with_timeout(Duration::from_secs(15))
+                    .with_connect_timeout(Duration::from_secs(3)),
+            );
+        if let Some(endpoint) = &fleet.endpoint {
+            builder = builder
+                .with_endpoint(endpoint)
+                .with_allow_http(endpoint.starts_with("http://"));
         }
-    })
-    .publish()
-    .await?;
-    let follower_guard = published.guard();
-    node.install_node_lease_for_startup(follower_guard.clone())?;
-    if config.follower_durability_enabled {
-        let store =
-            follower_store.ok_or_else(|| invalid("persistent follower store is unavailable"))?;
-        let mut transport = PeerNodeLogTransport::new(
-            directory.clone(),
-            tls.client_identity(),
-            session,
-            node_id,
-            follower_guard.clone(),
-        )
-        .with_local_follower_store(store);
-        if let Some(metrics) = &metrics {
-            transport = transport.with_runtime_metrics(metrics.clone());
-        }
-        let provider = PeerNodeDurabilityProvider::new(
-            published.log_authority(),
-            transport,
-            session,
-            node_id,
-            follower_guard.clone(),
-            node.runtime().telemetry_handle(),
-        )?
-        .with_recruitment_gate(recruitment_ready.clone());
-        node.install_node_durability_provider(
-            Arc::new(provider),
-            NodeDurabilitySupervisorConfig::new(
-                APPLICATION_ID,
-                Limits::default(),
-                REQUIRED_FOLLOWER_BYTES,
-                1024,
-                Duration::from_secs(1),
-                Duration::from_secs(30),
-                65_536,
-            )?,
+        let data = bucket(&builder, &fleet.bucket, &fleet.prefix)?;
+        let lease = bucket(&builder, &fleet.bucket, &fleet.prefix)?;
+        let storage = ReplicaStorage::new(
+            data.store.clone(),
+            ReplicaStorageOptions {
+                prefix: data.prefix.clone(),
+                ..Default::default()
+            },
         )?;
-    }
-    // Publication during drain still needs the node lease. The host cancels
-    // lease maintenance only after the runtime and its durable log close.
-    tasks.spawn_lease_maintenance(async move { published.run(&node_shutdown).await })?;
-    node.start()?;
-
-    let serving = serve_ready(
-        &node,
-        tasks,
-        &config,
-        session_dir.clone(),
-        layout,
-        directory.clone(),
-        application,
-        session,
-        follower_guard,
-        tls,
-        peer_listener,
-        public_listener,
-        public_tls,
-        encryption_key,
-        bootstrap_secret,
-        follower_ready,
-        recruitment_ready,
-        metrics,
-    )
-    .await;
-    let shutdown = shutdown_serving_node(&node, &directory, session).await;
-    let cleanup = if shutdown.is_ok() {
-        std::fs::remove_dir_all(session_dir)
+        Some(NodeFleet {
+            bucket: data,
+            lease_bucket: lease,
+            replica_storage: storage,
+            replication: ReplicationOptions::default(),
+            log_transport: Arc::new(SignedPeerTransport::from_clients(
+                peer_http.clone(),
+                stream_http,
+                auth.clone(),
+            )),
+            log: LogOptions::default(),
+            fleet_durability: fleet.follower_durability,
+        })
     } else {
-        Ok(())
+        None
     };
-    // Joining the supervised tasks exposes the cause of lost readiness. Preserve
-    // that source instead of returning only the serving loop's generic symptom.
-    shutdown?;
-    serving?;
-    cleanup?;
-    Ok(())
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the bound listeners and node identity are one serving lifecycle"
-)]
-async fn serve_ready(
-    node: &CellNode,
-    tasks: Arc<CellNodeTaskGroup>,
-    config: &Config,
-    session_dir: PathBuf,
-    layout: CellStorageLayout,
-    directory: NodeDirectory,
-    application: Arc<cellule_app::CompiledApplication>,
-    session: SessionId,
-    follower_guard: NodeLeaseGuard,
-    tls: LoadedPeerTls,
-    peer_listener: TcpListener,
-    public_listener: TcpListener,
-    public_tls: Option<ServerTlsConfig>,
-    encryption_key: [u8; 32],
-    bootstrap_secret: Option<Zeroizing<String>>,
-    follower_ready: Arc<AtomicBool>,
-    recruitment_ready: Arc<AtomicBool>,
-    metrics: Option<Arc<RuntimeMetrics>>,
-) -> ServerResult<()> {
-    let mut peers = BeyonddbPeers::new(node, layout.clone(), directory.clone(), session, &tls)?;
-    if let Some(metrics) = &metrics {
-        peers = peers.with_follower_metrics(metrics.clone());
-    }
-    let mut recovery_transport = None;
-    if let Some(store) = node.owned_component::<FollowerStore>(FOLLOWER_STORE_COMPONENT) {
-        let node_id = NodeId::from_bytes(*config.node_id.as_bytes());
-        let mut transport = PeerNodeLogTransport::new(
-            directory.clone(),
-            tls.client_identity(),
-            session,
-            node_id,
-            follower_guard.clone(),
-        )
-        .with_local_follower_store(store.clone());
-        if let Some(metrics) = &metrics {
-            transport = transport.with_runtime_metrics(metrics.clone());
+    let mode = match config.shutdown_mode {
+        StopMode::Preserve => ShutdownMode::Preserve,
+        StopMode::Handoff => {
+            ensure!(
+                fleet.is_some(),
+                "handoff shutdown requires a fleet and an eligible peer"
+            );
+            ShutdownMode::Handoff
         }
-        recovery_transport = Some(Arc::new(transport));
-        peers = peers.with_follower_store(node_id, store, follower_guard);
-    }
-    let peers = Arc::new(peers);
-    let mut provisioner = CellInitialPartitionProvisioner::new(
-        node.runtime(),
-        application,
-        layout.clone(),
-        session,
-        config.peer_endpoint.clone(),
-        session_dir,
-    )?
-    .with_initial_partition_count(config.initial_partitions)?
-    .with_peers(peers.clone());
-    if let Some(transport) = recovery_transport {
-        provisioner = provisioner.with_node_log_recovery(transport)?;
-    }
-    let provisioner = Arc::new(provisioner);
-    for account_id in &config.owned_accounts {
-        provisioner
-            .recover_configured_account(account_id, &directory)
+    };
+    // The SDK's clean-reload marker is a replication optimization. Local-only
+    // nodes close durability normally but cannot prepare that fleet marker.
+    let require_clean_reload = fleet.is_some() && mode == ShutdownMode::Preserve;
+    let actor = ActorOptions {
+        core: ActorPolicy {
+            max_resident: config.max_active_cells,
+            max_cached_routes: 1024,
+            max_activations: 32,
+            max_evictions: 4,
+            max_releases: 16,
+            max_outbound_websockets: 32,
+            ownership_on_evict: OwnershipOnEvict::Sticky,
+            require_node_lease: true,
+            peer_protocol: cellar::peer_auth::PROTOCOL_VERSION,
+            operation_deadline_ms: Some(30_000),
+            owner_log_recovery_backoff_ms: 1_000,
+            owner_log_recovery_attempts: 60,
+            alarm_resident_ms: 60_000,
+            idle_evict_ms: None,
+            pressure: Default::default(),
+        },
+        lease_ttl_ms: 10_000,
+        placement_weight: 1,
+        generation: signer.public_key_hex(),
+        resume_generation: None,
+    };
+    let mut node = NodeConfig::new(
+        ActorIdentity {
+            node: config.node_name,
+            advertise: config.peer_advertise,
+            region: config.region.clone(),
+        },
+        actor,
+        config.data_dir.join("cellar-ordered-v1"),
+    );
+    node.maintenance.rebalance = fleet.is_some();
+    node.runtime.max_stateless_requests = Some(128);
+    node.runtime.max_cell_requests = 16;
+    node.runtime.handler_budget = Duration::from_secs(30);
+    let services = ExternalNodeServices {
+        wall_clock: None,
+        http_client: None,
+        host_executor: host.clone(),
+        core_executor: core.clone(),
+        public_address: public.local_addr()?,
+        ingress_capacity: 128,
+        internal_listener: peer,
+        peer_http,
+        peer_auth: auth,
+        probe_signer: signer,
+        fleet,
+        containers: None,
+        metrics: None,
+    };
+    let server = CellarServer::start(
+        CellarServerConfig {
+            node,
+            region: config.region,
+            encryption_key,
+            initial_partitions: config.initial_partitions,
+            cache_enabled: config.auth_cache_enabled,
+        },
+        services,
+    )
+    .await?;
+    if let (Some(settings), Some(secret)) = (&config.bootstrap, secret) {
+        server
+            .provisioner()
+            .admit_account(&settings.account_id)
             .await?;
-    }
-    for key_id in &config.owned_access_keys {
-        provisioner
-            .recover_owned_credential(key_id, &directory)
-            .await?;
-    }
-    let client = peers.client_with_cache(provisioner.clone(), config.auth_cache_enabled);
-    if let (Some(bootstrap), Some(secret)) = (config.bootstrap.as_ref(), bootstrap_secret) {
-        let policy = std::fs::read_to_string(&bootstrap.policy_file)?;
-        CellCredentialStore::new(client.clone(), layout.clone(), encryption_key)
+        CellCredentialStore::new(server.client(), encryption_key)
             .put_credential(
-                &bootstrap.access_key_id,
+                &settings.access_key_id,
                 StoredCredential {
                     secret_key: secret.to_string(),
-                    account_id: bootstrap.account_id.clone(),
-                    principal_name: bootstrap.principal_name.clone(),
+                    account_id: settings.account_id.clone(),
+                    principal_name: settings.principal_name.clone(),
                     session_name: None,
                     is_session: false,
                     session_token: None,
@@ -571,193 +369,36 @@ async fn serve_ready(
                 },
             )
             .await?;
-        CellAuthorizationStore::new(client.clone())
+        CellAuthorizationStore::new(server.client())
             .put_user_policy(
-                &bootstrap.account_id,
-                &bootstrap.principal_name,
-                &bootstrap.policy_name,
-                &policy,
+                &settings.account_id,
+                &settings.principal_name,
+                &settings.policy_name,
+                &std::fs::read_to_string(&settings.policy_file)?,
             )
             .await?;
     }
-    let mut state = build_http_state_with_cache(
-        node,
-        client.clone(),
-        layout.clone(),
-        provisioner.clone(),
-        encryption_key,
-        &config.region,
-        config.public_endpoint.clone(),
-        config.auth_cache_enabled,
-    )?;
-    state.tls_enabled = public_tls.is_some();
-    let peer_cancel = CancellationToken::new();
-    let peer_shutdown = peer_cancel.clone();
-    let peer_router = peers.router_with_cache(provisioner.clone(), config.auth_cache_enabled);
-    // Other recovering nodes may need these local participants. Start private
-    // routing before resolving decisions, while public requests remain gated.
-    let mut peer_server = tokio::spawn(async move {
-        axum::serve(
-            tls.listener(peer_listener),
-            peer_router.into_make_service_with_connect_info::<PeerTlsIdentity>(),
-        )
-        .with_graceful_shutdown(async move { peer_shutdown.cancelled().await })
-        .await
-    });
-    follower_ready.store(true, Ordering::Release);
-    let recovery: ServerResult<()> = async {
-        let storage = CellStorage::new(client.clone(), config.region.clone());
-        for account_id in &config.owned_accounts {
-            provisioner
-                .recover_registered_account(account_id, &client, &storage, &directory)
-                .await?;
-            provisioner.install_account_capacity_loop(
-                &tasks,
-                account_id.clone(),
-                client.clone(),
-                config.split_threshold_bytes,
-                Duration::from_secs(3),
-            )?;
-        }
-        CellStorage::new(client.clone(), config.region.clone()).install_global_index_loop(
-            &tasks,
-            config.owned_accounts.clone(),
-            provisioner.clone(),
-            directory.clone(),
-        )?;
-        CellStorage::new(client.clone(), config.region.clone())
-            .install_statistics_loop(&tasks, config.owned_accounts.clone())?;
-        provisioner.install_transaction_recovery_loop(
-            &tasks,
-            storage,
-            directory.clone(),
-            config.owned_accounts.clone(),
-        )?;
-        provisioner.install_range_rebalance_loop(&tasks)?;
-        let storage = CellStorage::new(client.clone(), config.region.clone());
-        let runtime = node.runtime();
-        let cancellation = tasks.cancellation_token();
-        tasks.spawn(async move {
-            let mut ticks = tokio::time::interval(Duration::from_secs(30));
-            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
-                    _ = ticks.tick() => {}
-                }
-                if let Err(error) = storage.sweep_active_partition_stream_records(&runtime).await {
-                    tracing::warn!(%error, "routed stream retention sweep failed");
-                }
-            }
-        })?;
-        if !config.owned_accounts.is_empty() {
-            let storage = CellStorage::new(client.clone(), config.region.clone());
-            let accounts = config.owned_accounts.clone();
-            let stream_layout = layout.clone();
-            let cancellation = tasks.cancellation_token();
-            tasks.spawn(async move {
-                let mut ticks = tokio::time::interval(Duration::from_secs(30));
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        () = cancellation.cancelled() => return Ok::<(), std::io::Error>(()),
-                        _ = ticks.tick() => {}
-                    }
-                    for account_id in &accounts {
-                        if cancellation.is_cancelled() {
-                            return Ok(());
-                        }
-                        if let Err(error) = storage.sweep_account_ttl(account_id).await {
-                            tracing::warn!(account_id, %error, "TTL sweep failed");
-                        }
-                        if let Err(error) = storage.sweep_account_stream_records(account_id).await {
-                            tracing::warn!(account_id, %error, "account stream retention sweep failed");
-                        }
-                        // Cancellation leaves the durable shard cursor in place, so
-                        // the next owner can repeat an interrupted catalog scan.
-                        let result = tokio::select! {
-                            () = cancellation.cancelled() => return Ok(()),
-                            result = storage.sweep_account_catalog_stream_records(account_id, &stream_layout) => result,
-                        };
-                        if let Err(error) = result {
-                            tracing::warn!(account_id, %error, "catalog stream retention sweep failed");
-                        }
-                    }
-                }
-            })?;
-        }
-        Ok(())
-    }
-    .await;
-    if let Err(error) = recovery {
-        peer_cancel.cancel();
-        peer_server.await??;
-        return Err(error);
-    }
-    recruitment_ready.store(true, Ordering::Release);
-    let mut public_server = tokio::spawn(extenddb_server::start_server(
-        public_listener,
-        state,
-        None,
-        public_tls,
-    ));
-    enum Exit {
-        Public(ServerResult<()>),
-        Peer(ServerResult<()>),
-        Unready(ServerResult<()>),
-    }
-    let exit = tokio::select! {
-        result = &mut public_server => Exit::Public(match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(error.into_boxed_dyn_error()),
-            Err(error) => Err(Box::new(error)),
-        }),
-        result = &mut peer_server => Exit::Peer(join(result)),
-        result = wait_until_unready(node) => Exit::Unready(result),
+    server
+        .start_account_maintenance(config.accounts, config.split_threshold_bytes)
+        .await?;
+    let outcome = server
+        .serve(public, config.public_endpoint, tls, mode)
+        .await?;
+    let NodeOutcome::Stopped(report) = outcome else {
+        anyhow::bail!("Cellar node stopped abnormally: {outcome:?}");
     };
-    peer_cancel.cancel();
-    match exit {
-        Exit::Public(result) => {
-            peer_server.await??;
-            result
-        }
-        Exit::Peer(result) => {
-            public_server.abort();
-            let _ = public_server.await;
-            result
-        }
-        Exit::Unready(result) => {
-            public_server.abort();
-            let _ = public_server.await;
-            peer_server.await??;
-            result
-        }
-    }
-}
-
-async fn wait_until_unready(node: &CellNode) -> ServerResult<()> {
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if !node.is_ready() {
-            return Err(invalid("Cell node lost its serving lease or task health").into());
-        }
-    }
-}
-
-fn join<T, E>(result: Result<Result<T, E>, tokio::task::JoinError>) -> ServerResult<()>
-where
-    E: Error + Send + Sync + 'static,
-{
-    result??;
+    ensure!(
+        report.ingress_drained
+            && report.application_work_drained
+            && report.pending_application_events == 0
+            && report.cells_drained
+            && report.pending_dispatches == 0
+            && report.log_quiesced
+            && report.local_durability_closed
+            && (!require_clean_reload || report.clean_reload_prepared)
+            && !report.drain_timed_out
+            && !report.deadline_elapsed,
+        "Cellar shutdown did not finish its drain: {report:?}"
+    );
     Ok(())
-}
-
-fn read_encryption_key(path: &PathBuf) -> ServerResult<[u8; 32]> {
-    std::fs::read(path)?
-        .try_into()
-        .map_err(|_| invalid("encryption key file must contain exactly 32 bytes").into())
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
 }

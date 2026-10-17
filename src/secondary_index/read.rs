@@ -1,6 +1,6 @@
 //! Ordered local-index reads fenced by the base item's transaction intents.
 
-use cellule_runtime::registry::{Query, QueryContext};
+use bdb_cellar_runtime::registry::{Query, QueryContext};
 use extenddb_core::types::{KeyType, extract_key, item_size_bytes};
 
 use crate::item_storage::StoredValue;

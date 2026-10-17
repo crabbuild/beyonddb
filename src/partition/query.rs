@@ -1,12 +1,12 @@
-//! Ordered base-table Query within the HASH key's owning Cell.
+//! Ordered base-table Query within one independently owned cell range.
 
 use extenddb_core::types::{AttributeValue, Item, KeyType, extract_key, item_size_bytes};
 use serde::{Deserialize, Serialize};
 
 use super::key::{partition_key_bytes, sort_component, sort_prefix};
 use super::{
-    AccessState, DATA_MODULE, Json, Query, QueryContext, Result, SqlValue, data_key_hash,
-    decode_spec, query_access,
+    AccessState, DATA_MODULE, Json, Query, QueryContext, Result, SqlValue, decode_spec,
+    query_access,
 };
 use crate::Error;
 use crate::items::{item_key, valid_key};
@@ -81,7 +81,7 @@ impl SortPredicate {
     }
 }
 
-/// One bounded query against a HASH key's owner Cell.
+/// One bounded query against a fragment of a partition-key collection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PartitionQueryInput {
     pub table_id: String,
@@ -140,10 +140,14 @@ impl Query for PartitionQuery {
             AccessState::Sealed => return Ok(Json(PartitionQueryOutcome::Sealed)),
             AccessState::Importing => return Ok(Json(PartitionQueryOutcome::NotReady)),
         }
-        match data_key_hash(&spec.table.id, &input.partition_key, &spec.table.key_schema) {
-            Ok(hash) if spec.contains(hash) => {}
-            Ok(_) => return Ok(Json(PartitionQueryOutcome::WrongPartition)),
+        let span = match super::key::partition_span(&input.partition_key, &spec.table.key_schema) {
+            Ok(span) => span,
             Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
+        };
+        let owned = bdb_keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
+            .map_err(|_| Error::Command("invalid installed partition range"))?;
+        if span.intersection(&owned).is_none() {
+            return Ok(Json(PartitionQueryOutcome::WrongPartition));
         }
         if input.index_name.is_some() {
             return crate::secondary_index::query(context, &spec.table, input, true);

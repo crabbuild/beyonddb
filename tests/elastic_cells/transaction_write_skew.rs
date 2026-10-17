@@ -1,11 +1,30 @@
-use crate::*;
-use beyonddb::{TableRecord, TransactionFailure};
+use crate::local_node;
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::CellClient,
+    identity::{CellTarget, RequestId},
+};
+use beyonddb::*;
+use extenddb_core::types::AttributeValue;
+use std::sync::{Arc, atomic::AtomicI64};
+fn identity(byte: u8) -> MutationIdentity {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    MutationIdentity {
+        request_id: RequestId::from_bytes([byte; 16]),
+        issued_at_ms: now,
+        expires_at_ms: now + 60_000,
+    }
+}
 
 pub(super) async fn assert_condition_checks_prevent_write_skew(
     client: &CellClient,
     storage: &CellStorage,
-    bootstrap: &Bootstrap<'_>,
-    directory: &std::path::Path,
     table: &TableRecord,
     participants: &[(CellTarget, CoordinatorParticipant)],
 ) {
@@ -57,15 +76,6 @@ pub(super) async fn assert_condition_checks_prevent_write_skew(
     ] {
         let id = [byte; 16];
         let coordinator = coordinator_target(account_id, &id).unwrap();
-        bootstrap
-            .cell(
-                &coordinator,
-                "beyonddb-coordinator",
-                byte,
-                &directory.join(format!("write-skew-{byte}.sqlite")),
-                initialize_coordinator,
-            )
-            .await;
         transaction_command!(
             client,
             BeginCrossCellTransaction,
@@ -170,4 +180,35 @@ pub(super) async fn assert_condition_checks_prevent_write_skew(
             .await
             .unwrap();
     }
+}
+
+#[test]
+fn condition_checks_prevent_cross_cell_write_skew() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(identity(1).issued_at_ms));
+        let (node, client) =
+            local_node::start(directory.path(), clock, host.handle(), core.handle())
+                .await
+                .unwrap();
+        let fixture = crate::transaction_fixture::table(&client, "WriteSkew").await;
+        assert_condition_checks_prevent_write_skew(
+            &client,
+            &fixture.storage,
+            &fixture.table,
+            &fixture.participants,
+        )
+        .await;
+        local_node::stop(node).await.unwrap();
+    });
 }

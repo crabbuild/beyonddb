@@ -1,6 +1,6 @@
 //! Bounded stream record retention inside account and data Cells.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 
 use crate::table::statement;
 use crate::{DATA_MODULE, Error, Json, MODULE, Result, SqlValue};
@@ -154,148 +154,238 @@ impl Command for AdvanceStreamGcShard {
 
 #[cfg(test)]
 mod tests {
-    use cellule_app::CellApplication;
-    use cellule_ltx::rusqlite::{Connection, params};
-    use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, WireValue};
-    use cellule_runtime::control::OwnerFence;
-    use cellule_runtime::identity::{CellTarget, Digest, IncarnationId, TenantId};
-    use cellule_runtime::registry::{BuildDescriptor, CommandInvocation, QueryInvocation};
-
     use super::*;
+    use crate::test_support::{mutation, start, stop};
+    use crate::{
+        CreateTable, CreateTableOutcome, InstallPartition, PartitionInstall, PartitionPut,
+        PartitionPutInput, PartitionSpec, PutItem, PutItemInput, ReadAccountStreamJournal,
+        ReadPartitionStreamJournal, StreamConfig, StreamJournalInput, StreamJournalOutcome,
+        TableClass, TablePlacement, TableSpec,
+    };
+    use extenddb_core::types::{
+        AttributeDefinition, AttributeValue, BillingMode, Item, KeySchemaElement, KeyType,
+        ScalarAttributeType, StreamViewType,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    };
 
     #[test]
-    fn stream_prune_bounds_work_and_preserves_retained_records_in_both_cell_types() {
-        let application = crate::Beyonddb::compile(BuildDescriptor {
-            source_revision: "stream-retention-test".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap();
-        let registry = application.registry();
-        let account = crate::account_target("123456789012").unwrap();
-        let partition = CellTarget::new(
-            TenantId::from_bytes([1; 16]),
-            crate::APPLICATION,
-            crate::DATA_NAMESPACE,
-            b"stream-retention-test",
-        )
-        .unwrap();
-        for (module, target, query_id, command_id) in [
-            (
-                MODULE,
-                account,
-                HasExpiredAccountStreamRecords::ID,
-                PruneAccountStreamRecords::ID,
-            ),
-            (
-                DATA_MODULE,
-                partition,
-                HasExpiredPartitionStreamRecords::ID,
-                PrunePartitionStreamRecords::ID,
-            ),
-        ] {
-            let mut connection = Connection::open_in_memory().unwrap();
-            connection
-                .execute_batch(crate::stream_journal::SCHEMA)
-                .unwrap();
-            for index in 0..PRUNE_BATCH + 1 {
-                connection
-                    .execute(
-                        "INSERT INTO ddb_stream_records VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params!["old", "generation", format!("{index:023}"), 1_000, [1_u8]],
-                    )
-                    .unwrap();
-            }
-            connection
-                .execute(
-                    "INSERT INTO ddb_stream_records VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        "live",
-                        "generation",
-                        "00000000000000000000001",
-                        1_001,
-                        [2_u8]
-                    ],
-                )
-                .unwrap();
-            let mut encoder = BoundedEncoder::new(crate::OPERATION_BYTES).unwrap();
-            Json(()).encode(&mut encoder).unwrap();
-            let input = encoder.finish();
-            for (sequence, expected_old) in [(1, 1), (2, 0)] {
-                let query = registry
-                    .execute_query(
-                        &connection,
-                        QueryInvocation {
-                            module,
-                            operation_id: query_id,
-                            codec_version: 1,
-                            schema: 1,
-                            cell: target.cell_id(),
-                            commit_sequence: sequence - 1,
-                            now_ms: RETENTION_MS + 1_000,
-                            input: &input,
-                        },
-                    )
-                    .unwrap();
-                let mut decoder = BoundedDecoder::new(&query, crate::OPERATION_BYTES).unwrap();
-                let has_expired = Json::<bool>::decode(&mut decoder).unwrap().0;
-                decoder.finish().unwrap();
-                assert!(has_expired);
-                let transaction = connection.transaction().unwrap();
-                registry
-                    .execute_command(
-                        &transaction,
-                        CommandInvocation {
-                            module,
-                            operation_id: command_id,
-                            codec_version: 1,
-                            schema: 1,
-                            target: target.clone(),
-                            owner_fence: OwnerFence {
-                                incarnation: IncarnationId::from_bytes([1; 16]),
-                                epoch: 1,
+    fn stream_prune_bounds_work_and_preserves_retained_records_in_both_cell_types()
+    -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let host = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?;
+        let core = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        let clock = Arc::new(AtomicI64::new(1_000));
+        host.block_on(async {
+            let (node, client) = start(
+                directory.path(),
+                clock.clone(),
+                host.handle(),
+                core.handle(),
+            )
+            .await?;
+            let account = crate::account_target("123456789012")?;
+            for partitioned in [false, true] {
+                let base = if partitioned { 2 * RETENTION_MS } else { 1_000 };
+                clock.store(base, Ordering::SeqCst);
+                let created = client
+                    .command::<CreateTable>(
+                        &account,
+                        mutation(&clock),
+                        Json(TableSpec {
+                            table_class: TableClass::Standard,
+                            placement: TablePlacement::Routed {
+                                initial_partitions: 2,
                             },
-                            sequence,
-                            now_ms: RETENTION_MS + 1_000,
-                            input: &input,
-                        },
+                            table_name: format!("Retention{partitioned}"),
+                            key_schema: vec![KeySchemaElement {
+                                attribute_name: "pk".into(),
+                                key_type: KeyType::Hash,
+                            }],
+                            attribute_definitions: vec![AttributeDefinition {
+                                attribute_name: "pk".into(),
+                                attribute_type: ScalarAttributeType::S,
+                            }],
+                            local_secondary_indexes: Vec::new(),
+                            global_secondary_indexes: Vec::new(),
+                            billing_mode: BillingMode::PayPerRequest,
+                            provisioned_throughput: None,
+                            deletion_protection_enabled: false,
+                            initial_tags: Vec::new(),
+                            resource_arn: None,
+                            stream: Some(StreamConfig {
+                                region: "local".into(),
+                                label: "generation".into(),
+                                view_type: StreamViewType::NewImage,
+                            }),
+                        }),
                     )
-                    .unwrap();
-                transaction.commit().unwrap();
-                let old: i64 = connection
-                    .query_row(
-                        "SELECT count(*) FROM ddb_stream_records WHERE table_id = 'old'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap();
-                assert_eq!(old, expected_old);
+                    .await?;
+                let CreateTableOutcome::Created(table) = created.output.0 else {
+                    anyhow::bail!("table not created");
+                };
+                let target = if partitioned {
+                    let partition_id = [3; 16];
+                    let target = crate::data_target("123456789012", &table.id, &partition_id)?;
+                    client
+                        .command::<InstallPartition>(
+                            &target,
+                            mutation(&clock),
+                            Json(PartitionInstall::Serving(PartitionSpec {
+                                table: (*table).clone(),
+                                partition_id,
+                                lower: None,
+                                upper: None,
+                                epoch: 1,
+                            })),
+                        )
+                        .await?;
+                    target
+                } else {
+                    account.clone()
+                };
+                for index in 0..PRUNE_BATCH + 2 {
+                    if index == PRUNE_BATCH + 1 {
+                        clock.store(base + 1, Ordering::SeqCst);
+                    }
+                    let input = PutItemInput {
+                        table_name: table.table_name.clone(),
+                        table_id: table.id.clone(),
+                        item: Item::from([("pk".into(), AttributeValue::S(index.to_string()))]),
+                        condition: None,
+                    };
+                    if partitioned {
+                        client
+                            .command::<PartitionPut>(
+                                &target,
+                                mutation(&clock),
+                                Json(PartitionPutInput {
+                                    epoch: 1,
+                                    table_id: input.table_id,
+                                    item: input.item,
+                                    condition: input.condition,
+                                }),
+                            )
+                            .await?;
+                    } else {
+                        client
+                            .command::<PutItem>(&target, mutation(&clock), Json(input))
+                            .await?;
+                    }
+                }
+                clock.store(base + RETENTION_MS, Ordering::SeqCst);
+                if partitioned {
+                    assert!(
+                        client
+                            .query::<HasExpiredPartitionStreamRecords>(&target, None, Json(()))
+                            .await?
+                            .output
+                            .0
+                    );
+                    assert_eq!(
+                        client
+                            .command::<PrunePartitionStreamRecords>(
+                                &target,
+                                mutation(&clock),
+                                Json(())
+                            )
+                            .await?
+                            .output
+                            .0,
+                        PRUNE_BATCH as u64
+                    );
+                    assert_eq!(
+                        client
+                            .command::<PrunePartitionStreamRecords>(
+                                &target,
+                                mutation(&clock),
+                                Json(())
+                            )
+                            .await?
+                            .output
+                            .0,
+                        1
+                    );
+                    assert!(
+                        !client
+                            .query::<HasExpiredPartitionStreamRecords>(&target, None, Json(()))
+                            .await?
+                            .output
+                            .0
+                    );
+                } else {
+                    assert!(
+                        client
+                            .query::<HasExpiredAccountStreamRecords>(&target, None, Json(()))
+                            .await?
+                            .output
+                            .0
+                    );
+                    assert_eq!(
+                        client
+                            .command::<PruneAccountStreamRecords>(
+                                &target,
+                                mutation(&clock),
+                                Json(())
+                            )
+                            .await?
+                            .output
+                            .0,
+                        PRUNE_BATCH as u64
+                    );
+                    assert_eq!(
+                        client
+                            .command::<PruneAccountStreamRecords>(
+                                &target,
+                                mutation(&clock),
+                                Json(())
+                            )
+                            .await?
+                            .output
+                            .0,
+                        1
+                    );
+                    assert!(
+                        !client
+                            .query::<HasExpiredAccountStreamRecords>(&target, None, Json(()))
+                            .await?
+                            .output
+                            .0
+                    );
+                }
+                let input = Json(StreamJournalInput {
+                    table_id: table.id.clone(),
+                    label: "generation".into(),
+                    after_sequence: None,
+                    limit: 10,
+                });
+                let journal = if partitioned {
+                    client
+                        .query::<ReadPartitionStreamJournal>(&target, None, input)
+                        .await?
+                        .output
+                        .0
+                } else {
+                    client
+                        .query::<ReadAccountStreamJournal>(&target, None, input)
+                        .await?
+                        .output
+                        .0
+                };
+                let StreamJournalOutcome::Page { records, .. } = journal else {
+                    anyhow::bail!("missing retained stream");
+                };
+                assert_eq!(records.len(), 1);
             }
-            let query = registry
-                .execute_query(
-                    &connection,
-                    QueryInvocation {
-                        module,
-                        operation_id: query_id,
-                        codec_version: 1,
-                        schema: 1,
-                        cell: target.cell_id(),
-                        commit_sequence: 2,
-                        now_ms: RETENTION_MS + 1_000,
-                        input: &input,
-                    },
-                )
-                .unwrap();
-            let mut decoder = BoundedDecoder::new(&query, crate::OPERATION_BYTES).unwrap();
-            assert!(!Json::<bool>::decode(&mut decoder).unwrap().0);
-            decoder.finish().unwrap();
-            let retained: i64 = connection
-                .query_row(
-                    "SELECT count(*) FROM ddb_stream_records WHERE table_id = 'live'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(retained, 1);
-        }
+            stop(node).await
+        })
     }
 }

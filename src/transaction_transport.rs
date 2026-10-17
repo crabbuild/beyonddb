@@ -2,8 +2,8 @@
 
 use std::marker::PhantomData;
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use cellule_runtime::registry::{Command, CommandContext, CommandResult};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::table::statement;
@@ -19,8 +19,8 @@ pub(crate) const INLINE_BYTES: usize = CHUNK_BYTES - 4096;
 // Add that tolerance to the adapter's one-minute absolute upload deadline.
 const MAX_FUTURE_EXPIRY_MS: i64 = 6 * 60_000;
 
-pub(crate) const fn upload_operation(id: u32) -> cellule_runtime::registry::OperationDescriptor {
-    cellule_runtime::registry::OperationDescriptor {
+pub(crate) const fn upload_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         input_limit: CHUNK_BYTES as u32 + 4096,
         output_limit: 64,
         ..crate::operation(id)

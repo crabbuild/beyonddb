@@ -131,6 +131,7 @@ pub enum CreateTableOutcome {
 /// Durable identity and key contract for one account table.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TableRecord {
+    pub key_encoding_version: u32,
     /// Current table class for this generation and all its indexes.
     pub table_class: TableClass,
     /// At most two class changes retained for the trailing thirty-day limit.
@@ -212,6 +213,7 @@ impl Command for CreateTable {
             }
         }
         let record = TableRecord {
+            key_encoding_version: bdb_keyspace::KEY_ENCODING_VERSION,
             table_class: input.table_class,
             table_class_updates_ms: Vec::new(),
             placement: input.placement,
@@ -624,7 +626,11 @@ pub(super) fn decode_table(result: &SqlResultSet) -> Result<Option<TableRecord>>
     let [SqlValue::Blob(record)] = row.as_slice() else {
         return Err(Error::Command("invalid account table row"));
     };
-    Ok(Some(serde_json::from_slice(record)?))
+    let table: TableRecord = serde_json::from_slice(record)?;
+    if table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION {
+        return Err(Error::Command("unsupported table key encoding"));
+    }
+    Ok(Some(table))
 }
 
 pub(super) fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlBatch {
@@ -659,9 +665,7 @@ fn valid_table_spec(spec: &TableSpec) -> bool {
         return false;
     }
     if let TablePlacement::Routed { initial_partitions } = spec.placement
-        && (initial_partitions == 0
-            || initial_partitions > 256
-            || !initial_partitions.is_power_of_two())
+        && !(2..=256).contains(&initial_partitions)
     {
         return false;
     }

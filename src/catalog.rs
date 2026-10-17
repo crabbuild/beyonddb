@@ -5,7 +5,7 @@
 //! management, admin login, settings, and metrics are not implemented yet;
 //! those operations return explicit errors. Login rate checks fail closed.
 
-use cellule_runtime::client::CellClient;
+use bdb_cellar_runtime::client::CellClient;
 use extenddb_storage::authorization_store::{AuthorizationStore, SessionData};
 use extenddb_storage::management_store::{
     AccessKeyCreated, AccountDetail, AdminEntry, AdminStore, GroupDetail, GroupListEntry,

@@ -1,231 +1,125 @@
-use super::coordinator_residency::write;
-use crate::*;
+//! Settled discovery must not hide a later admitted transaction after handoff.
+use super::coordinator_residency::{
+    ACCOUNT, RESIDENT, assert_read_results, keys, pending_read, recover, runtimes, storage, tokens,
+    write,
+};
+use crate::{cellar_node, local_node, transaction_fixture};
+use beyonddb::*;
+use extenddb_core::types::AttributeValue;
+use extenddb_storage::{DataEngine, TableEngine};
+use std::sync::Arc;
 
-const ACCOUNT: &str = "123456789012";
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn settled_recovery_survives_restart_but_later_begin_is_not_skipped() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "settled-recovery".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
-    let directory = tempfile::tempdir().unwrap();
-    let account = account_target(ACCOUNT).unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("settled-recovery"),
-        *account.application().as_bytes(),
-    );
-    let nodes = NodeDirectory::new(
-        layout.clone(),
-        Digest::from_bytes([201; 32]),
-        Digest::from_bytes([202; 32]),
-        application.registry().release_digest(),
-    );
-    let session = SessionId::from_bytes([249; 16]);
-    let (host, provisioner, client, storage) = owner(
-        &application,
-        &layout,
-        session,
-        &directory.path().join("first"),
-    );
-    provisioner.admit_account(ACCOUNT).await.unwrap();
-    storage
-        .create_table(
-            ACCOUNT,
-            serde_json::from_value(serde_json::json!({
-                "TableName": "Residency",
-                "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
-                "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
-                "BillingMode": "PAY_PER_REQUEST"
-            }))
-            .unwrap(),
+#[test]
+fn settled_discovery_survives_restart_but_later_begin_is_not_skipped() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let files = tempfile::tempdir().unwrap();
+        let first = files.path().join("settled-discovery-a");
+        let bucket =
+            cellar::bucket::Bucket::open_dev(&files.path().join("objects.sqlite")).unwrap();
+        let (node, client) = cellar_node::start_limited(
+            local_node::application().unwrap(),
+            &first,
+            host.handle(),
+            core.handle(),
+            bucket.clone(),
+            RESIDENT,
         )
         .await
         .unwrap();
-    let info = storage.table_key_info(ACCOUNT, "Residency").await.unwrap();
-    let mut seen = std::collections::HashSet::new();
-    let tokens: Vec<_> = (0..100)
-        .map(|n| format!("checkpoint-{n}"))
-        .filter(|token| {
-            seen.insert(
-                coordinator_target(ACCOUNT, token.as_bytes())
-                    .unwrap()
-                    .cell_id(),
-            )
-        })
-        .take(3)
-        .collect();
-    assert_eq!(tokens.len(), 3);
-    for (version, token) in tokens.iter().enumerate() {
-        assert!(!write(&storage, &info, token, version).await);
-    }
-    // Observe settled roots through the public startup recovery path. One of
-    // those observations will deliberately become stale before this owner exits.
-    let authority = CellAuthority::new(layout.clone());
-    let before_recovery = authority
-        .load(account.cell_id())
-        .await
-        .unwrap()
-        .unwrap()
-        .value()
-        .root
-        .as_ref()
-        .unwrap()
-        .commit_sequence;
-    provisioner
-        .recover_registered_coordinators(ACCOUNT, &client, &storage, &nodes)
-        .await
-        .unwrap();
-    let after_recovery = authority.load(account.cell_id()).await.unwrap().unwrap();
-    assert_eq!(
-        after_recovery
-            .value()
-            .root
-            .as_ref()
-            .unwrap()
-            .commit_sequence
-            - before_recovery,
-        1,
-        "settled observations from one recovery page must share one account publication"
-    );
-    let stale = coordinator_target(ACCOUNT, tokens[0].as_bytes()).unwrap();
-    let id = (1_u128..100_000)
-        .map(u128::to_be_bytes)
-        .find(|id| coordinator_target(ACCOUNT, id).unwrap() == stale)
-        .unwrap();
-    let key = Item::from([("id".into(), AttributeValue::S("shared".into()))]);
-    let operation = TransactionOperation::Read(GetItemInput {
-        table_name: info.table_name.clone(),
-        table_id: info.table_id.clone(),
-        key: key.clone(),
-    });
-    transaction_command!(
-        client,
-        BeginCrossCellTransaction,
-        &stale,
-        identity(250),
-        Json(BeginCrossCellTransactionInput {
-            account_id: ACCOUNT.into(),
-            transaction_id: id,
-            token: None,
-            participants: vec![CoordinatorParticipant {
-                target: CoordinatorParticipantTarget::Account,
-                operations: vec![IndexedTransactionOperation {
-                    index: 0,
-                    operation: operation.clone()
-                }],
-            }],
-        }),
-    )
-    .await
-    .unwrap();
-    transaction_command!(
-        client,
-        beyonddb::PrepareAccountTransaction,
-        &account,
-        identity(251),
-        Json(beyonddb::PrepareAccountTransactionInput {
-            transaction_id: id,
-            coordinator_cell: *stale.cell_id().as_bytes(),
-            coordinator_key: id.to_vec(),
-            operations: vec![operation],
-        }),
-    )
-    .await
-    .unwrap();
-    host.shutdown().await.unwrap();
-    let authority = CellAuthority::new(layout.clone());
-    let mut before = Vec::new();
-    for token in &tokens {
-        let target = coordinator_target(ACCOUNT, token.as_bytes()).unwrap();
-        let observed = authority.load(target.cell_id()).await.unwrap().unwrap();
-        assert!(observed.value().owner.is_none());
-        before.push((target, observed.value().epoch));
-    }
-    let (host, provisioner, client, storage) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([250; 16]),
-        &directory.path().join("restored"),
-    );
-    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
-    provisioner
-        .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
-        .await
-        .unwrap();
-    for (target, epoch) in &before {
-        let observed = authority.load(target.cell_id()).await.unwrap().unwrap();
-        if *target == stale {
-            assert!(
-                observed.value().epoch > *epoch,
-                "changed root must be recovered"
-            );
-        } else {
-            assert_eq!(
-                observed.value().epoch,
-                *epoch,
-                "settled history was needlessly restored"
-            );
-            assert!(observed.value().owner.is_none());
+        let fixture = transaction_fixture::table(&client, "Residency").await;
+        let info = fixture
+            .storage
+            .table_key_info(ACCOUNT, "Residency")
+            .await
+            .unwrap();
+        let tokens = tokens("checkpoint", 3);
+        for (version, token) in tokens.iter().enumerate() {
+            assert!(!write(&fixture.storage, &info, token, version).await);
         }
-    }
-    // Inspect raw phase state before a public read could help recovery. Startup
-    // must abort BEGIN and release the prepared shared lock, despite its old hint.
-    let state = client
-        .query::<beyonddb::ReadAccountTransaction>(
-            &account,
-            None,
-            Json(ReadTransactionInput {
-                transaction_id: id,
-                coordinator_cell: *stale.cell_id().as_bytes(),
-            }),
+        let account = account_target(ACCOUNT).unwrap();
+        let input = Json(ListCoordinatorShardsInput {
+            account_id: ACCOUNT.into(),
+            after: None,
+            limit: 100,
+        });
+        let before = client
+            .query::<ListCoordinatorShards>(&account, None, input.clone())
+            .await
+            .unwrap();
+        assert_eq!(before.output.0.len(), 3);
+        let mut recovery =
+            TransactionRecovery::new(Arc::new(storage(&client, 2)), ACCOUNT.into()).unwrap();
+        for _ in 0..16 {
+            recovery.step().await.unwrap();
+        }
+        assert_eq!(
+            client
+                .query::<ListCoordinatorShards>(&account, None, input)
+                .await
+                .unwrap()
+                .receipt,
+            before.receipt
+        );
+        let oldest = coordinator_target(ACCOUNT, tokens[0].as_bytes()).unwrap();
+        let id = pending_read(&client, &fixture, &oldest).await;
+        let (successor, next) = cellar_node::start_limited(
+            local_node::application().unwrap(),
+            &files.path().join("settled-discovery-b"),
+            host.handle(),
+            core.handle(),
+            bucket.clone(),
+            RESIDENT,
         )
         .await
-        .unwrap()
-        .output
-        .0;
-    assert_eq!(state, ParticipantTransactionState::Aborted);
-    assert!(!write(&storage, &info, "after-checkpoint-recovery", 3).await);
-    assert!(write(&storage, &info, &tokens[1], 1).await);
-    let value = storage.get_item(&info, &key).await.unwrap().unwrap();
-    assert_eq!(value.get("version"), Some(&AttributeValue::N("3".into())));
-    host.shutdown().await.unwrap();
-}
-
-pub(super) fn owner(
-    application: &Arc<cellule_app::CompiledApplication>,
-    layout: &CellStorageLayout,
-    session: SessionId,
-    directory: &std::path::Path,
-) -> (
-    cellule_host::CellNode,
-    Arc<CellInitialPartitionProvisioner>,
-    CellClient,
-    CellStorage,
-) {
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 4).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
         .unwrap();
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application.clone(),
-            layout.clone(),
-            session,
-            "http://checkpoint.internal".into(),
-            directory.into(),
+        cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(first).unwrap();
+        // Inspect raw phase state before any public read could help recovery.
+        let read = Json(ReadTransactionInput {
+            transaction_id: id,
+            coordinator_cell: *oldest.cell_id().as_bytes(),
+        });
+        assert_eq!(
+            next.query::<ReadPartitionTransaction>(&fixture.participants[0].0, None, read.clone())
+                .await
+                .unwrap()
+                .output
+                .0,
+            ParticipantTransactionState::Prepared
+        );
+        assert_eq!(
+            next.query::<ReadPartitionTransaction>(&fixture.participants[1].0, None, read)
+                .await
+                .unwrap()
+                .output
+                .0,
+            ParticipantTransactionState::Missing
+        );
+        // Native live recovery resumes fresh BEGINs from their retained payload.
+        // Startup is not authority to abort a transaction in another live cell.
+        recover(&next, id).await;
+        assert_read_results(&next, &fixture, id, 2).await;
+        super::coordinator_residency::departure(
+            &bucket,
+            host.handle(),
+            "settled-discovery-a",
+            "settled-discovery-b",
         )
-        .unwrap(),
-    );
-    let client = CellClient::local_runtime(application.registry(), host.runtime(), layout.clone());
-    let storage = CellStorage::new(client.clone(), "us-east-1")
-        .with_transaction_coordinators(provisioner.clone());
-    (host, provisioner, client, storage)
+        .await;
+        let storage = storage(&next, 2);
+        assert!(!write(&storage, &info, "after-checkpoint-recovery", 3).await);
+        assert!(write(&storage, &info, &tokens[1], 1).await);
+        for key in keys() {
+            assert_eq!(
+                storage.get_item(&info, &key).await.unwrap().unwrap()["version"],
+                AttributeValue::N("3".into())
+            );
+        }
+        cellar_node::stop(successor, cellar::sdk::ShutdownMode::Preserve)
+            .await
+            .unwrap();
+    });
 }

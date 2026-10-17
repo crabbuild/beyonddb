@@ -1,66 +1,69 @@
-use super::global_indexes::{ACCOUNT, mutation, owner};
-use crate::*;
-use beyonddb::{
-    BeginDirectoryChange, DirectoryChange, DirectoryCopyReceipt, DirectoryInstall, DirectoryMode,
-    DirectoryPage, DirectoryPageInput, DirectorySpec, DirectorySplitPublication,
-    FinishDirectoryChange, FreezeDirectory, InstallDirectory, PublishDirectoryChange,
-    PublishDirectorySplit, ReadDirectory, ReadDirectoryPage, directory_target,
+use crate::{
+    cellar_node,
+    directory_fault::BlockedDirectory,
+    directory_fixture::{ACCOUNT, application, mutation, ranges},
+};
+use bdb_cellar_runtime::client::InvocationError;
+use beyonddb::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn directory_tree_fences_copy_cutover_and_stale_leaf_writers() {
-    for installed_children in 0..=2 {
-        interrupted_split(installed_children).await;
-    }
+#[test]
+fn directory_tree_fences_copy_cutover_and_stale_leaf_writers() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        for installed_children in 0..=2 {
+            interrupted_split(installed_children, host.handle(), core.handle()).await;
+        }
+    });
 }
-
-async fn interrupted_split(installed_children: usize) {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "directory-tree".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+async fn interrupted_split(
+    installed_children: usize,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+) {
+    let application = application();
     let account = account_target(ACCOUNT).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("directory-tree"),
-        *account.application().as_bytes(),
-    );
-    let (host, provisioner, client, _) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([86; 16]),
-        &directory.path().join("first"),
-    );
+    let bucket =
+        cellar::bucket::Bucket::open_dev(&directory.path().join("objects.sqlite")).unwrap();
+    let first_dir = directory.path().join("tree-owner-a");
+    let (node, client) =
+        cellar_node::start(application.clone(), &first_dir, host, core, bucket.clone())
+            .await
+            .unwrap();
+    let provisioner = CellInitialPartitionProvisioner::new(client.clone(), application.clone());
     let mut table = [0; 32];
     table[..16].copy_from_slice(account.tenant().as_bytes());
-    let root = DirectorySpec {
-        table_id: blake3::Hash::from_bytes(table).to_hex().to_string(),
-        node_id: [0; 16],
-        lower: [0; 16],
-        upper: None,
-        depth: 0,
-    };
+    let root = DirectorySpec::root(blake3::Hash::from_bytes(table).to_hex().to_string());
     let target = directory_target(ACCOUNT, &root).unwrap();
     assert!(
         provisioner
-            .admit_existing_directory(ACCOUNT, &root)
+            .split_directory(&client, ACCOUNT, &root)
             .await
             .is_err()
     );
-    provisioner.admit_directory(ACCOUNT, &root).await.unwrap();
-    let width = u128::MAX / 1024;
-    let ranges: Vec<_> = (0_u128..1024)
-        .map(|position| beyonddb::RoutePagePartition {
-            partition_id: position.to_be_bytes(),
-            lower: (position * width).to_be_bytes(),
-            upper: (position < 1023).then(|| ((position + 1) * width).to_be_bytes()),
-            epoch: 1,
-        })
-        .collect();
+    assert!(
+        client
+            .query::<ReadDirectory>(&target, None, Json(()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_none()
+    );
+    let ranges = ranges(1024);
     client
         .command::<InstallDirectory>(
             &target,
@@ -73,12 +76,31 @@ async fn interrupted_split(installed_children: usize) {
         )
         .await
         .unwrap();
+    for position in [0, 63, 64, 1023] {
+        let mut changed = ranges.clone();
+        changed[position].partition_id = [0xf0; 16];
+        assert!(matches!(
+            client
+                .command::<InstallDirectory>(
+                    &target,
+                    mutation(),
+                    Json(DirectoryInstall {
+                        spec: root.clone(),
+                        ranges: changed,
+                        source: None,
+                    })
+                )
+                .await,
+            Err(InvocationError::Rejected(_))
+        ));
+    }
     let page = client
         .query::<ReadDirectoryPage>(
             &target,
             None,
             Json(DirectoryPageInput {
-                hash: [0; 16],
+                reverse: false,
+                hash: bdb_keyspace::RangeKey::minimum(),
                 expected_version: Some(1),
             }),
         )
@@ -119,7 +141,6 @@ async fn interrupted_split(installed_children: usize) {
         if index >= installed_children {
             continue;
         }
-        provisioner.admit_directory(ACCOUNT, spec).await.unwrap();
         let mut corrupt = rows.clone();
         corrupt[4].partition_id = [200; 16];
         assert!(matches!(
@@ -154,7 +175,8 @@ async fn interrupted_split(installed_children: usize) {
                     &child,
                     None,
                     Json(DirectoryPageInput {
-                        hash: spec.lower,
+                        reverse: false,
+                        hash: spec.lower.clone(),
                         expected_version: None
                     })
                 )
@@ -183,19 +205,18 @@ async fn interrupted_split(installed_children: usize) {
             .await
             .unwrap();
     }
-    host.shutdown().await.unwrap();
-    // A new owner discovers the children from the durable parent after cutover;
-    // copies remain closed until recovery completes their opening protocol.
-    let (host, provisioner, client, _) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([87; 16]),
-        &directory.path().join("restored"),
-    );
-    provisioner
-        .admit_existing_directory(ACCOUNT, &root)
+    let next_dir = directory.path().join("tree-owner-b");
+    let (next_node, next_client) =
+        cellar_node::start(application.clone(), &next_dir, host, core, bucket.clone())
+            .await
+            .unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff)
         .await
         .unwrap();
+    std::fs::remove_dir_all(first_dir).unwrap();
+    let node = next_node;
+    let client = next_client;
+    let provisioner = CellInitialPartitionProvisioner::new(client.clone(), application.clone());
     let restored = client
         .query::<ReadDirectory>(&target, None, Json(()))
         .await
@@ -231,7 +252,8 @@ async fn interrupted_split(installed_children: usize) {
                 &target,
                 None,
                 Json(DirectoryPageInput {
-                    hash: [0; 16],
+                    reverse: false,
+                    hash: bdb_keyspace::RangeKey::minimum(),
                     expected_version: Some(1)
                 })
             )
@@ -281,7 +303,8 @@ async fn interrupted_split(installed_children: usize) {
                     child,
                     None,
                     Json(DirectoryPageInput {
-                        hash: plan.source.lower,
+                        reverse: false,
+                        hash: plan.source.lower.clone(),
                         expected_version: Some(split.version + 1)
                     })
                 )
@@ -296,7 +319,8 @@ async fn interrupted_split(installed_children: usize) {
                 child,
                 None,
                 Json(DirectoryPageInput {
-                    hash: plan.children[1].lower,
+                    reverse: false,
+                    hash: plan.children[1].lower.clone(),
                     expected_version: Some(split.version + 2),
                 }),
             )
@@ -368,13 +392,14 @@ async fn interrupted_split(installed_children: usize) {
     let mut unfinished_copies = Vec::new();
     for spec in &frozen.children {
         let mut rows = Vec::new();
-        let mut hash = spec.lower;
+        let mut hash = spec.lower.clone();
         loop {
             let page = client
                 .query::<ReadDirectoryPage>(
                     &grandchild,
                     None,
                     Json(DirectoryPageInput {
+                        reverse: false,
                         hash,
                         expected_version: Some(frozen.version),
                     }),
@@ -387,11 +412,11 @@ async fn interrupted_split(installed_children: usize) {
                 panic!("frozen copy lost its readable source");
             };
             rows.extend(
-                ranges
-                    .into_iter()
-                    .take_while(|range| spec.upper.is_none_or(|upper| range.lower < upper)),
+                ranges.into_iter().take_while(|range| {
+                    spec.upper.as_ref().is_none_or(|upper| &range.lower < upper)
+                }),
             );
-            let next = rows.last().unwrap().upper;
+            let next = rows.last().unwrap().upper.clone();
             if next == spec.upper {
                 break;
             }
@@ -405,10 +430,6 @@ async fn interrupted_split(installed_children: usize) {
     }
     // Interrupt deletion with zero, one or both unpublished child copies durable.
     for copy in unfinished_copies.iter().take(installed_children) {
-        provisioner
-            .admit_directory(ACCOUNT, &copy.spec)
-            .await
-            .unwrap();
         let target = directory_target(ACCOUNT, &copy.spec).unwrap();
         client
             .command::<InstallDirectory>(&target, mutation(), Json(copy.clone()))
@@ -433,7 +454,8 @@ async fn interrupted_split(installed_children: usize) {
                 &target,
                 None,
                 Json(DirectoryPageInput {
-                    hash: [0; 16],
+                    reverse: false,
+                    hash: bdb_keyspace::RangeKey::minimum(),
                     expected_version: None,
                 })
             )
@@ -473,26 +495,43 @@ async fn interrupted_split(installed_children: usize) {
         )
         .await
         .unwrap();
-    // Lose the grandchild's retirement receipt before its parent acknowledges it.
-    host.shutdown().await.unwrap();
-    let (unavailable, remote_provisioner, _, _) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([88; 16]),
-        &directory.path().join("unavailable"),
-    );
-    remote_provisioner
-        .admit_existing_directory(ACCOUNT, &split.children[1])
+    // Lose the grandchild's receipt before its parent acknowledges it.
+    let remote_dir = directory.path().join("tree-owner-c");
+    let (remote, remote_client) =
+        cellar_node::start(application.clone(), &remote_dir, host, core, bucket.clone())
+            .await
+            .unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff)
         .await
         .unwrap();
-    let (host, provisioner, client, _) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([89; 16]),
-        &directory.path().join("retiring"),
-    );
-    // The other child is still owned elsewhere. A failed restoration must leave
-    // the root pending, even after all reachable descendants are retired.
+    std::fs::remove_dir_all(next_dir).unwrap();
+    let right_target = directory_target(ACCOUNT, &split.children[1]).unwrap();
+    remote_client
+        .query::<ReadDirectory>(&right_target, None, Json(()))
+        .await
+        .unwrap();
+    let (node, base_client) = cellar_node::start(
+        application.clone(),
+        &directory.path().join("tree-owner-d"),
+        host,
+        core,
+        bucket,
+    )
+    .await
+    .unwrap();
+    let blocked = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let client = base_client.map_transport(|inner| {
+        Arc::new(BlockedDirectory {
+            inner,
+            target: right_target,
+            blocked: blocked.clone(),
+            attempts: attempts.clone(),
+        })
+    });
+    let provisioner = CellInitialPartitionProvisioner::new(client.clone(), application);
+    // One unavailable published child must keep the root pending while
+    // reachable descendants finish and publish their retirement receipts.
     let mut saw_unavailable = false;
     for _ in 0..8 {
         match provisioner
@@ -522,7 +561,9 @@ async fn interrupted_split(installed_children: usize) {
             ..
         }
     ));
-    unavailable.shutdown().await.unwrap();
+    assert!(attempts.load(Ordering::SeqCst) > 0);
+    assert!(remote.is_ready().await.unwrap());
+    blocked.store(false, Ordering::SeqCst);
     assert!(
         provisioner
             .retire_directory_step(&client, ACCOUNT, &root)
@@ -615,184 +656,42 @@ async fn interrupted_split(installed_children: usize) {
             .await
             .is_err()
     );
-    host.shutdown().await.unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Preserve)
+        .await
+        .unwrap();
+    cellar_node::stop(remote, cellar::sdk::ShutdownMode::Preserve)
+        .await
+        .unwrap();
 }
 
-fn change(source: &beyonddb::RoutePagePartition, id: u128) -> DirectoryChange {
-    let lower = u128::from_be_bytes(source.lower);
-    let upper = source.upper.map(u128::from_be_bytes).unwrap_or(u128::MAX);
-    let boundary = (lower + (upper - lower) / 2).to_be_bytes();
+fn change(source: &RoutePagePartition, id: u128) -> DirectoryChange {
+    // Metadata bounds admit ordered prefixes. Leave distinct points for the
+    // nested changes exercised below; data split planners use observed keys.
+    let boundary = [1_u8, 0]
+        .into_iter()
+        .find_map(|suffix| {
+            let mut bytes = source.lower.to_vec();
+            bytes.push(suffix);
+            let key = bdb_keyspace::RangeKey::new(bytes).unwrap();
+            (key > source.lower && source.upper.as_ref().is_none_or(|upper| &key < upper))
+                .then_some(key)
+        })
+        .unwrap();
     DirectoryChange {
         source: source.clone(),
         children: [
-            beyonddb::RoutePagePartition {
+            RoutePagePartition {
                 partition_id: id.to_be_bytes(),
-                lower: source.lower,
-                upper: Some(boundary),
+                lower: source.lower.clone(),
+                upper: Some(boundary.clone()),
                 epoch: source.epoch + 1,
             },
-            beyonddb::RoutePagePartition {
+            RoutePagePartition {
                 partition_id: (id + 1).to_be_bytes(),
                 lower: boundary,
-                upper: source.upper,
+                upper: source.upper.clone(),
                 epoch: source.epoch + 1,
             },
         ],
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retired_directories_make_room_for_new_data_without_losing_fences() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "directory-residency".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
-    let account = account_target(ACCOUNT).unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("directory-residency"),
-        *account.application().as_bytes(),
-    );
-    let (host, provisioner, client, _) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([85; 16]),
-        directory.path(),
-    );
-    let ranges = vec![beyonddb::RoutePagePartition {
-        partition_id: [0; 16],
-        lower: [0; 16],
-        upper: None,
-        epoch: 1,
-    }];
-    let mut directories = Vec::new();
-    for ordinal in 0..16u8 {
-        let mut id = [ordinal; 32];
-        id[..16].copy_from_slice(account.tenant().as_bytes());
-        let spec = DirectorySpec::root(blake3::Hash::from_bytes(id).to_hex().to_string());
-        let target = directory_target(ACCOUNT, &spec).unwrap();
-        provisioner.admit_directory(ACCOUNT, &spec).await.unwrap();
-        client
-            .command::<InstallDirectory>(
-                &target,
-                mutation(),
-                Json(DirectoryInstall {
-                    spec: spec.clone(),
-                    ranges: ranges.clone(),
-                    source: None,
-                }),
-            )
-            .await
-            .unwrap();
-        directories.push((spec, target));
-    }
-    assert_eq!(host.runtime().stats().active_cells(), 16);
-    let table_id = &directories[0].0.table_id;
-    let data = data_target(ACCOUNT, table_id, &[0; 16]).unwrap();
-    CellCatalog::new(layout.clone(), data.tenant())
-        .provision(
-            CatalogEntry::new(
-                &data,
-                CatalogRole::Sql,
-                application.registry().module_code("beyonddb-data").unwrap(),
-                1,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let authority = CellAuthority::new(layout);
-    assert!(matches!(
-        provisioner
-            .admit_existing_partition(ACCOUNT, table_id, &[0; 16])
-            .await,
-        Err(StorageError::LimitExceeded(_))
-    ));
-    assert!(
-        authority.load(data.cell_id()).await.unwrap().is_none(),
-        "capacity rejection must precede a new ownership claim"
-    );
-    // Metadata recovery can release live directory residency. Fresh data growth
-    // must wait for a terminal directory, preserving the live directory below.
-    for (spec, target) in &directories[1..] {
-        client
-            .command::<beyonddb::RetireDirectory>(target, mutation(), Json(spec.clone()))
-            .await
-            .unwrap();
-    }
-    // Durable retirement precedes the runtime's settled inventory refresh.
-    // Reclamation may release only candidates that have crossed both gates.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if host
-                .runtime()
-                .idle_transfer_candidates()
-                .await
-                .unwrap()
-                .iter()
-                .any(|(cell, _, _, _)| *cell != directories[0].1.cell_id())
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    provisioner
-        .admit_existing_partition(ACCOUNT, table_id, &[0; 16])
-        .await
-        .unwrap();
-    let mut released = Vec::new();
-    for (spec, target) in &directories {
-        if authority
-            .load(target.cell_id())
-            .await
-            .unwrap()
-            .unwrap()
-            .value()
-            .owner
-            .is_none()
-        {
-            released.push(spec.clone());
-        }
-    }
-    assert_eq!(released.len(), 1);
-    assert_ne!(released[0], directories[0].0);
-    let spec = &released[0];
-    provisioner
-        .admit_existing_directory(ACCOUNT, spec)
-        .await
-        .unwrap();
-    let target = directory_target(ACCOUNT, spec).unwrap();
-    assert_eq!(
-        client
-            .query::<ReadDirectory>(&target, None, Json(()))
-            .await
-            .unwrap()
-            .output
-            .0
-            .unwrap()
-            .mode,
-        DirectoryMode::Retired
-    );
-    assert!(matches!(
-        client
-            .command::<InstallDirectory>(
-                &target,
-                mutation(),
-                Json(DirectoryInstall {
-                    spec: spec.clone(),
-                    ranges,
-                    source: None,
-                })
-            )
-            .await,
-        Err(InvocationError::Rejected(_))
-    ));
-    host.shutdown().await.unwrap();
 }

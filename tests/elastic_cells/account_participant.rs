@@ -1,14 +1,16 @@
-use crate::*;
-use beyonddb::{
-    PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction,
-    ResolveAccountTransaction, TableRecord, TransactionFailure,
+use crate::{cellar_node, local_node, transaction_fixture};
+use bdb_cellar_runtime::{MutationIdentity, client::InvocationError};
+use beyonddb::*;
+use extenddb_core::{
+    expression::{Expr, ExpressionMaps, KeyCondition, PathElement, UpdateAction},
+    types::{AttributeValue, Item},
 };
-use extenddb_storage::{TransactGetOp, TransactWriteOp};
-
+use extenddb_storage::{
+    DataEngine, TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
+};
+use std::{collections::HashMap, sync::Arc};
 fn mutation() -> MutationIdentity {
-    let mut value = crate::identity(211);
-    value.request_id = RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-    value
+    local_node::wall_mutation()
 }
 
 fn key(value: &str) -> Item {
@@ -24,144 +26,48 @@ fn put(table: &TableRecord, value: &str) -> TransactionOperation {
     })
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "account-participant".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+#[test]
+fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+    let application = local_node::application().unwrap();
     let account_id = "123456789012";
     let account = account_target(account_id).unwrap();
-    let session = SessionId::from_bytes([211; 16]);
-    let directory = tempfile::TempDir::new().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("account-participant"),
-        *account.application().as_bytes(),
-    );
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 64 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let registry = application.registry();
-    let bootstrap = Bootstrap {
-        runtime: host.runtime(),
-        registry: &registry,
-        layout: &layout,
-        session,
-    };
-    let account_handle = bootstrap
-        .cell(
-            &account,
-            "beyonddb-account",
-            211,
-            &directory.path().join("account.sqlite"),
-            initialize_account,
-        )
-        .await;
-    let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application.clone(),
-            layout.clone(),
-            session,
-            "https://beyonddb-partition.internal:8081".into(),
-            directory.path().join("admitted"),
-        )
-        .unwrap(),
-    );
-    let storage =
-        CellStorage::new(client.clone(), "us-east-1").with_transaction_coordinators(provisioner);
+    let directory = tempfile::tempdir().unwrap();
+    let bucket = cellar::bucket::Bucket::open_dev(&directory.path().join("objects.sqlite")).unwrap();
+    let source_dir = directory.path().join("mixed-owner-a");
+    let (node, client) = cellar_node::start(application.clone(), &source_dir, host.handle(), core.handle(), bucket.clone()).await.unwrap();
+    let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), application.clone()).with_initial_partition_count(2).unwrap());
+    let storage = CellStorage::new(client.clone(), "local").with_initial_partitions(provisioner.clone()).with_transaction_coordinators(provisioner);
     let mut tables = Vec::new();
     for name in ["AccountItems", "DataItems", "OtherItems", "EmptyItems"] {
-        let result = client
-            .command::<CreateTable>(
-                &account,
-                mutation(),
-                Json(TableSpec {
-                    table_class: Default::default(),
-                    placement: if name == "DataItems" {
-                        beyonddb::TablePlacement::Routed {
-                            initial_partitions: 1,
-                        }
-                    } else {
-                        beyonddb::TablePlacement::Account
-                    },
-                    local_secondary_indexes: Vec::new(),
-                    global_secondary_indexes: Vec::new(),
-                    table_name: name.into(),
-                    key_schema: vec![KeySchemaElement {
-                        attribute_name: "id".into(),
-                        key_type: KeyType::Hash,
-                    }],
-                    attribute_definitions: vec![AttributeDefinition {
-                        attribute_name: "id".into(),
-                        attribute_type: ScalarAttributeType::S,
-                    }],
-                    billing_mode: BillingMode::PayPerRequest,
-                    provisioned_throughput: None,
-                    deletion_protection_enabled: false,
-                    initial_tags: vec![],
-                    resource_arn: None,
-                    stream: None,
-                }),
-            )
-            .await
-            .unwrap();
-        let CreateTableOutcome::Created(table) = result.output.0 else {
-            panic!("create table")
-        };
-        tables.push(*table);
+        if name == "DataItems" {
+            storage.create_table(account_id, serde_json::from_value(serde_json::json!({
+                "TableName": name, "KeySchema":[{"AttributeName":"id","KeyType":"HASH"}],
+                "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"
+            })).unwrap()).await.unwrap();
+        } else {
+            let result = client.command::<CreateTable>(&account, mutation(), Json(transaction_fixture::account_spec(name))).await.unwrap();
+            assert!(matches!(result.output.0, CreateTableOutcome::Created(_)));
+        }
+        tables.push(client.query::<DescribeTable>(&account, None, Json(name.into())).await.unwrap().output.0.unwrap());
     }
     let table = &tables[0];
     let data_table = &tables[1];
     let empty_table = &tables[3];
-    let data = data_target(account_id, &data_table.id, &[212; 16]).unwrap();
-    let data_handle = bootstrap
-        .cell(
-            &data,
-            "beyonddb-data",
-            212,
-            &directory.path().join("data.sqlite"),
-            initialize_partition,
-        )
-        .await;
-    let spec = PartitionSpec {
-        table: data_table.clone(),
-        partition_id: [212; 16],
-        lower: None,
-        upper: None,
-        epoch: 1,
-    };
-    client
-        .command::<InstallPartition>(
-            &data,
-            mutation(),
-            Json(PartitionInstall::Serving(spec.clone())),
-        )
-        .await
-        .unwrap();
-    let (directory_handle, publication) = bootstrap
-        .directory(
-            TableRoute {
-                table_id: data_table.id.clone(),
-                epoch: 1,
-                partitions: vec![spec],
-            },
-            210,
-            &directory.path().join("directory.sqlite"),
-        )
-        .await;
-    client
-        .command::<ActivateTableRoute>(&account, mutation(), Json(publication))
-        .await
-        .unwrap();
+    let data_info = storage.table_key_info(account_id, &data_table.table_name).await.unwrap();
+    let (data, participant) = transaction_fixture::participant_for_key(&client, &data_info, &key("created")).await;
+    let CoordinatorParticipantTarget::Data {partition_id, epoch, ..} = participant else {unreachable!()};
+    assert_eq!(epoch, 1);
     let info = storage
         .table_key_info(account_id, &table.table_name)
         .await
@@ -188,15 +94,6 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     ];
     let transaction_id = [213; 16];
     let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
-    let coordinator_handle = bootstrap
-        .cell(
-            &coordinator,
-            "beyonddb-coordinator",
-            213,
-            &directory.path().join("coordinator.sqlite"),
-            initialize_coordinator,
-        )
-        .await;
     let account_participant = CoordinatorParticipant {
         target: CoordinatorParticipantTarget::Account,
         operations: operations
@@ -211,7 +108,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     let data_participant = CoordinatorParticipant {
         target: CoordinatorParticipantTarget::Data {
             table_id: data_table.id.clone(),
-            partition_id: [212; 16],
+            partition_id,
             epoch: 1,
         },
         operations: vec![IndexedTransactionOperation {
@@ -377,77 +274,10 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             Err(InvocationError::Rejected(result)) if result.output.0 == DeleteTableOutcome::TransactionConflict)
         );
     }
-    for handle in [
-        account_handle,
-        data_handle,
-        coordinator_handle,
-        directory_handle,
-    ] {
-        handle.drain().await.unwrap();
-    }
-    host.shutdown().await.unwrap();
-
-    let next_session = SessionId::from_bytes([214; 16]);
-    let restored = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 64 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(next_session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let directory_target = beyonddb::directory_target(
-        account_id,
-        &beyonddb::DirectorySpec::root(data_table.id.clone()),
-    )
-    .unwrap();
-    for (target, incarnation) in [
-        (&account, 211),
-        (&data, 212),
-        (&coordinator, 213),
-        (&directory_target, 210),
-    ] {
-        let proof = CellCatalog::new(layout.clone(), target.tenant())
-            .lookup(target.cell_id())
-            .await
-            .unwrap()
-            .unwrap();
-        let authority = CellAuthority::new(layout.clone());
-        let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
-        restored
-            .runtime()
-            .acquire_idle_restored(
-                proof,
-                CellReplica::new(
-                    layout.clone(),
-                    *target.cell_id().as_bytes(),
-                    [incarnation; 16],
-                    {
-                        let cell_type = application
-                            .cell_types()
-                            .iter()
-                            .find(|kind| kind.namespace() == target.namespace())
-                            .unwrap();
-                        Limits {
-                            max_database_bytes: cell_type.database_limit_bytes(),
-                            max_capture_bytes: cell_type.capture_limit_bytes(),
-                            ..Limits::default()
-                        }
-                    },
-                )
-                .unwrap(),
-                authority,
-                idle,
-                directory
-                    .path()
-                    .join(format!("restored-{incarnation}.sqlite")),
-                Owner {
-                    session: next_session,
-                    endpoint: "https://restored.internal:8081".into(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    let client = CellClient::local_runtime(registry.clone(), restored.runtime(), layout.clone());
+    // Transfer every prepared cell and coordinator to a fresh SDK owner.
+    let (restored, client) = cellar_node::start(application.clone(), &directory.path().join("mixed-owner-b"), host.handle(), core.handle(), bucket).await.unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff).await.unwrap();
+    std::fs::remove_dir_all(source_dir).unwrap();
     let storage = CellStorage::new(client.clone(), "us-east-1");
     assert!(matches!(
         storage.get_item(&info, &key("created")).await,
@@ -535,21 +365,6 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
     // A mixed request whose account condition fails must leave its data write absent.
     let failed_id = [216; 16];
     let failed_coordinator = coordinator_target(account_id, &failed_id).unwrap();
-    let bootstrap = Bootstrap {
-        runtime: restored.runtime(),
-        registry: &registry,
-        layout: &layout,
-        session: next_session,
-    };
-    bootstrap
-        .cell(
-            &failed_coordinator,
-            "beyonddb-coordinator",
-            216,
-            &directory.path().join("failed.sqlite"),
-            initialize_coordinator,
-        )
-        .await;
     let mut failing = put(table, "created");
     let TransactionOperation::Put(input) = &mut failing else {
         unreachable!()
@@ -573,7 +388,7 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
             CoordinatorParticipant {
                 target: CoordinatorParticipantTarget::Data {
                     table_id: data_table.id.clone(),
-                    partition_id: [212; 16],
+                    partition_id,
                     epoch: 1,
                 },
                 operations: vec![IndexedTransactionOperation {
@@ -689,24 +504,8 @@ async fn mixed_participants_preserve_locks_and_finish_after_owner_restart() {
         .table_key_info(account_id, &data_table.table_name)
         .await
         .unwrap();
-    let admission = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            restored.runtime(),
-            application.clone(),
-            layout.clone(),
-            next_session,
-            "https://restored.internal:8081".into(),
-            directory.path().join("public-admission"),
-        )
-        .unwrap(),
-    );
-    super::public_transactions::assert_lost_replies_and_canceled_token_reuse(
-        &restored,
-        registry,
-        layout,
-        admission,
-        [info, data_info],
-    )
-    .await;
-    restored.shutdown().await.unwrap();
+    let admission = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), application));
+    super::public_transactions::assert_lost_replies_and_canceled_token_reuse(&client, admission, [info, data_info]).await;
+    cellar_node::stop(restored, cellar::sdk::ShutdownMode::Preserve).await.unwrap();
+    });
 }

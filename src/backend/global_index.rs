@@ -1,7 +1,8 @@
 //! Replay durable base changes into independently owned index ranges.
 
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::InvocationError;
+use bdb_cellar_runtime::identity::CellTarget;
+use bdb_keyspace::RangeKey;
 use extenddb_core::types::{Item, extract_key};
 use extenddb_storage::error::StorageError;
 
@@ -201,13 +202,27 @@ impl CellStorage {
             && let Some(old) = old
         {
             let key = extract_key(&old, &schema);
-            self.apply_index_change(account_id, index, key, None, change.version)
-                .await?;
+            self.apply_index_change(
+                account_id,
+                index,
+                &change.table.key_schema,
+                key,
+                None,
+                change.version,
+            )
+            .await?;
         }
         if let Some(new) = new {
             let key = extract_key(&new, &schema);
-            self.apply_index_change(account_id, index, key, Some(new), change.version)
-                .await?;
+            self.apply_index_change(
+                account_id,
+                index,
+                &change.table.key_schema,
+                key,
+                Some(new),
+                change.version,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -216,12 +231,19 @@ impl CellStorage {
         &self,
         account_id: &str,
         index: &GlobalIndexRecord,
+        base_schema: &[extenddb_core::types::KeySchemaElement],
         key: Item,
         item: Option<Item>,
         version: crate::ProjectionVersion,
     ) -> Result<(), StorageError> {
         let (destination, epoch) = self
-            .index_owner(account_id, &index.id, &index.specification.key_schema, &key)
+            .index_owner(
+                account_id,
+                &index.id,
+                &index.specification.key_schema,
+                base_schema,
+                &key,
+            )
             .await?;
         let result = self
             .client
@@ -267,16 +289,17 @@ impl CellStorage {
         account_id: &str,
         index_id: &str,
         schema: &[extenddb_core::types::KeySchemaElement],
+        base_schema: &[extenddb_core::types::KeySchemaElement],
         key: &Item,
     ) -> Result<(CellTarget, u64), StorageError> {
-        let hash = crate::data_key_hash(index_id, key, schema)
+        let hash = crate::partition::key::ordered_index_key(key, schema, base_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let page = crate::read_route_page(
             &self.client,
             &target(account_id)?,
             RoutePageInput {
                 table_id: index_id.into(),
-                start_hash: Some(hash),
+                start_key: Some(hash.clone()),
                 after_lower: None,
                 expected_epoch: None,
             },
@@ -289,7 +312,9 @@ impl CellStorage {
         };
         let range = partitions
             .first()
-            .filter(|range| range.lower <= hash && range.upper.is_none_or(|upper| hash < upper))
+            .filter(|range| {
+                range.lower <= hash && range.upper.clone().is_none_or(|upper| hash < upper)
+            })
             .ok_or_else(|| StorageError::Internal("global index route has no owner".into()))?;
         let destination = global_index_target(account_id, index_id, &range.partition_id)
             .map_err(|error| StorageError::Internal(error.to_string()))?;
@@ -301,7 +326,7 @@ impl CellStorage {
 struct ProjectionCursor {
     after_table: Option<String>,
     table: Option<TableRecord>,
-    after_range: Option<[u8; 16]>,
+    after_range: Option<RangeKey>,
     epoch: Option<u64>,
     index: Option<usize>,
 }
@@ -322,10 +347,8 @@ impl CellStorage {
     /// Supervise bounded, fair journal replay for configured accounts.
     pub fn install_global_index_loop(
         self,
-        tasks: &cellule_host::CellNodeTaskGroup,
+        tasks: &crate::server::TaskGroup,
         accounts: Vec<String>,
-        provisioner: std::sync::Arc<crate::CellInitialPartitionProvisioner>,
-        nodes: cellule_runtime::node::NodeDirectory,
     ) -> Result<(), StorageError> {
         use std::time::Duration;
         let mut accounts: std::collections::VecDeque<_> = accounts
@@ -354,7 +377,7 @@ impl CellStorage {
                 }
                 let result = tokio::select! {
                     () = cancellation.cancelled() => return Ok(()),
-                    result = self.project_account_page(&account, &mut cursor, &provisioner, &nodes) => result,
+                    result = self.project_account_page(&account, &mut cursor) => result,
                 };
                 // An exhausted table scan or failed admission has no immediate
                 // work to retry. Keep active directory pages at the 100 ms pace.
@@ -372,8 +395,6 @@ impl CellStorage {
         &self,
         account: &str,
         cursor: &mut ProjectionCursor,
-        provisioner: &crate::CellInitialPartitionProvisioner,
-        nodes: &cellule_runtime::node::NodeDirectory,
     ) -> Result<bool, StorageError> {
         use futures_util::{StreamExt, stream};
         if cursor.table.is_none() {
@@ -419,26 +440,13 @@ impl CellStorage {
         let index_count = table.global_secondary_indexes.len();
         let input = Json(RoutePageInput {
             table_id: index_id.unwrap_or(&table_id).to_owned(),
-            start_hash: None,
-            after_lower: cursor.after_range,
+            start_key: None,
+            after_lower: cursor.after_range.clone(),
             expected_epoch: cursor.epoch,
         });
         let account_target = target(account)?;
-        let page = async {
-            if table.placement.is_routed() {
-                provisioner
-                    .recover_route_directory_path(
-                        &self.client,
-                        account,
-                        index_id.unwrap_or(&table_id),
-                        cursor.after_range,
-                        nodes,
-                    )
-                    .await?;
-            }
-            crate::read_route_page(&self.client, &account_target, input.0).await
-        }
-        .await;
+        let page =
+            async { crate::read_route_page(&self.client, &account_target, input.0).await }.await;
         let page = match page {
             Ok(page) => page,
             Err(error) => {
@@ -467,7 +475,7 @@ impl CellStorage {
                 has_more,
             } => {
                 cursor.after_range = if has_more {
-                    partitions.last().map(|range| range.lower)
+                    partitions.last().map(|range| range.lower.clone())
                 } else {
                     None
                 };
@@ -492,7 +500,6 @@ impl CellStorage {
         let table_id = table_id.as_str();
         let mut jobs = stream::iter(sources)
             .map(|source| async move {
-                provisioner.recover_projection_owner(&source, nodes).await?;
                 if project {
                     self.project_index_changes_bounded(account, &source, table_id, 4)
                         .await

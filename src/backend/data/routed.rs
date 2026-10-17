@@ -1,14 +1,14 @@
 //! Routing a published table across independently owned data Cells.
 
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo, extract_key, item_size_bytes};
 use extenddb_storage::error::StorageError;
 
-use super::{CellStorage, cell_error, segment_bounds, target};
+use super::{CellStorage, cell_error, target};
 use crate::{
     Json, PartitionDeleteOutcome, PartitionPutOutcome, PartitionScan, PartitionScanInput,
-    PartitionScanOutcome, PartitionUpdateOutcome, RoutePageInput, RoutePageOutcome, data_key_hash,
-    data_target,
+    PartitionScanOutcome, PartitionUpdateOutcome, RoutePageInput, RoutePageOutcome, data_target,
+    ordered_data_key,
 };
 
 impl CellStorage {
@@ -38,11 +38,11 @@ impl CellStorage {
         if !key_info.table_id.is_empty() && self.account_placement_cached(&key_info.table_id) {
             return Ok(None);
         }
-        let hash = data_key_hash(&key_info.table_id, key, &key_info.base_key_schema)
+        let hash = ordered_data_key(&key_info.table_id, key, &key_info.base_key_schema)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
         let cache_key = (key_info.account_id.clone(), key_info.table_id.clone());
         if self.route_cache_enabled
-            && let Some(partition) = self.cached_route(&cache_key, hash)
+            && let Some(partition) = self.cached_route(&cache_key, hash.clone())
         {
             return Ok(Some(partition));
         }
@@ -52,7 +52,7 @@ impl CellStorage {
             &account,
             RoutePageInput {
                 table_id: key_info.table_id.clone(),
-                start_hash: Some(hash),
+                start_key: Some(hash),
                 after_lower: None,
                 expected_epoch: None,
             },
@@ -108,7 +108,7 @@ impl CellStorage {
         key_info: &TableKeyInfo,
         limit: Option<u32>,
         exclusive_start_key: Option<Item>,
-        segment: Option<(u64, u64)>,
+        _segment: Option<(u64, u64)>,
         index_name: Option<&str>,
     ) -> Result<Option<(Vec<Item>, Option<Item>)>, StorageError> {
         let global = key_info
@@ -136,22 +136,25 @@ impl CellStorage {
                 "scan limit must be positive".into(),
             ));
         }
-        let start_hash = exclusive_start_key
+        let start_key = exclusive_start_key
             .as_ref()
-            .map(|key| data_key_hash(route_id, key, route_schema))
+            .map(|key| {
+                if global.is_some() {
+                    crate::partition::key::ordered_index_key(
+                        key,
+                        route_schema,
+                        &key_info.base_key_schema,
+                    )
+                } else {
+                    ordered_data_key(route_id, key, route_schema)
+                }
+            })
             .transpose()
             .map_err(|error| StorageError::Validation(error.to_string()))?;
-        let bounds = segment.map(|(segment, total)| segment_bounds(segment, total));
-        // Contiguous hash intervals let each segment skip unrelated Cell ranges.
-        let start_hash = match (start_hash, bounds) {
-            (Some(hash), Some((lower, _))) => Some(hash.max(lower)),
-            (None, Some((lower, _))) => Some(lower),
-            (hash, None) => hash,
-        };
         let account = target(&key_info.account_id)?;
         let mut route_page = RoutePageInput {
             table_id: route_id.clone(),
-            start_hash,
+            start_key,
             after_lower: None,
             expected_epoch: None,
         };
@@ -188,17 +191,9 @@ impl CellStorage {
             let last_range = partitions
                 .last()
                 .ok_or_else(|| StorageError::Internal("route page is empty".into()))?;
-            let next_lower = last_range.upper;
-            let after_lower = last_range.lower;
+            let next_lower = last_range.upper.clone();
+            let after_lower = last_range.lower.clone();
             for (index, partition) in partitions.into_iter().enumerate() {
-                if let Some((lower, upper)) = bounds {
-                    if partition.upper.is_some_and(|end| end <= lower) {
-                        continue;
-                    }
-                    if upper.is_some_and(|end| partition.lower >= end) {
-                        return Ok(Some((items, None)));
-                    }
-                }
                 let owner = if global.is_some() {
                     crate::global_index_target(
                         &key_info.account_id,
@@ -295,7 +290,7 @@ impl CellStorage {
                 StorageError::Internal("route page ends before next page".into())
             })?);
             // A split between pages must restart the request, or ranges may be missed.
-            route_page.start_hash = None;
+            route_page.start_key = None;
             route_page.after_lower = Some(after_lower);
             route_page.expected_epoch = Some(epoch);
         }

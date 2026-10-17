@@ -1,0 +1,27 @@
+[package]
+name = "bdb-cellar-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.97"
+description = "BeyondDB commands and SQL running inside the Cellar SDK"
+
+[dependencies]
+anyhow = "1"
+blake3 = "1.8"
+bytes = "1"
+cellar.workspace = true
+http = "1"
+http-body-util = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlparser = { version = "0.62", default-features = false, features = ["std", "visitor"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+bdb-keyspace = { path = "../bdb-keyspace" }
+getrandom = "0.3"
+reqwest = { version = "0.12", default-features = false }
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

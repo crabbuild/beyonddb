@@ -1,9 +1,10 @@
 //! Bounded sampling and publication of table and index statistics.
 
+use bdb_keyspace::RangeKey;
 use std::{collections::VecDeque, time::Duration};
 
-use cellule_host::CellNodeTaskGroup;
-use cellule_runtime::client::InvocationError;
+use crate::server::TaskGroup;
+use bdb_cellar_runtime::client::InvocationError;
 use extenddb_core::types::{TableDescription, TableStatus};
 use extenddb_storage::error::StorageError;
 
@@ -21,7 +22,7 @@ struct Sweep {
     table: TableRecord,
     snapshot: StatisticsSnapshot,
     index: Option<usize>,
-    after: Option<[u8; 16]>,
+    after: Option<RangeKey>,
     leaf: Option<(crate::DirectorySpec, u64, TableStatistics)>,
 }
 
@@ -100,8 +101,9 @@ impl Sweep {
         {
             return Err(changed());
         }
-        let hash = self.after.unwrap_or([0; 16]);
-        let page = crate::read_directory_leaf(&storage.client, account.tenant(), id, hash).await?;
+        let hash = self.after.clone().unwrap_or_else(RangeKey::minimum);
+        let page =
+            crate::read_directory_leaf(&storage.client, account.tenant(), id, hash.clone()).await?;
         let (spec, version, values) = self
             .leaf
             .get_or_insert_with(|| (page.spec.clone(), page.version, Default::default()));
@@ -141,7 +143,7 @@ impl Sweep {
                 .0;
             add_statistics(values, &sampled)?;
         }
-        self.after = range.upper;
+        self.after = range.upper.clone();
         if range.upper != spec.upper {
             return Ok(false);
         }
@@ -153,7 +155,8 @@ impl Sweep {
                 &leaf,
                 None,
                 Json(crate::DirectoryPageInput {
-                    hash: spec.lower,
+                    reverse: false,
+                    hash: spec.lower.clone(),
                     expected_version: Some(*version),
                 }),
             )
@@ -243,7 +246,7 @@ impl CellStorage {
     /// restart; interrupted sampling restarts from the table's first range.
     pub fn install_statistics_loop(
         &self,
-        tasks: &CellNodeTaskGroup,
+        tasks: &TaskGroup,
         accounts: Vec<String>,
     ) -> Result<(), StorageError> {
         for account in &accounts {

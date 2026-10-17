@@ -1,0 +1,16 @@
+[package]
+name = "bdb-keyspace"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.97"
+description = "Ordered DynamoDB primary keys and cell range planning"
+
+
+[dependencies]
+bigdecimal = "0.4"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

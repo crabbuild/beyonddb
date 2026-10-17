@@ -1,8 +1,8 @@
-use cellule_ltx::rusqlite::{Connection, DatabaseName, params};
+use rusqlite::{Connection, DatabaseName, params};
 
 fn assert_usage(connection: &Connection) {
     let measured: (i64, i64, i64) = connection.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(length(item) + length(item_key) + length(partition_key) + length(sort_key)), 0), COALESCE(SUM(logical_bytes), 0) FROM ddb_partition_items",
+        "SELECT COUNT(*), COALESCE(SUM(length(item) + length(item_key) + length(partition_key) + length(sort_key) + length(ordered_key)), 0), COALESCE(SUM(logical_bytes), 0) FROM ddb_partition_items",
         [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap();
     let maintained = connection
@@ -19,20 +19,39 @@ fn assert_usage(connection: &Connection) {
 fn partition_usage_tracks_row_changes_and_rollback() {
     let mut connection = Connection::open_in_memory().unwrap();
     let transaction = connection.transaction().unwrap();
-    beyonddb::initialize_partition(&transaction).unwrap();
+    let application = crate::local_node::application().unwrap();
+    let registry = application.registry();
+    let data_type = application
+        .cell_types()
+        .iter()
+        .find(|cell| cell.name() == "beyonddb-data")
+        .unwrap();
+    let module = registry.module_for(data_type.namespace()).unwrap();
+    for migration in module.migrations {
+        transaction.execute_batch(migration.sql).unwrap();
+    }
     transaction.commit().unwrap();
     assert_usage(&connection);
     for n in 0_u32..128 {
         connection.execute(
-            "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, zeroblob(?4), ?4)",
+            "INSERT INTO ddb_partition_items (item_key, ordered_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?1, ?2, ?3, zeroblob(?4), ?4)",
             params![n.to_be_bytes(), [0_u8; 32], n.to_le_bytes(), n * 17],
         ).unwrap();
         assert_usage(&connection);
     }
+    // Ordered routing bytes contribute to physical item usage independently
+    // of the wire identity. Updating only that index must update the counter.
+    connection
+        .execute(
+            "UPDATE ddb_partition_items SET ordered_key = ?1 WHERE item_key = ?2",
+            params![[7_u8; 32], 0_u32.to_be_bytes()],
+        )
+        .unwrap();
+    assert_usage(&connection);
     // Exercise the reset/allocation/incremental-write shape used by StoredValue.
     let key = 0_u32.to_be_bytes();
     connection.execute(
-        "INSERT INTO ddb_partition_items (item_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?2, ?3, X'', 300000) ON CONFLICT(item_key) DO UPDATE SET partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
+        "INSERT INTO ddb_partition_items (item_key, ordered_key, partition_key, sort_key, item, logical_bytes) VALUES (?1, ?1, ?2, ?3, X'', 300000) ON CONFLICT(item_key) DO UPDATE SET ordered_key = excluded.ordered_key, partition_key = excluded.partition_key, sort_key = excluded.sort_key, item = excluded.item, logical_bytes = excluded.logical_bytes",
         params![key, [1_u8; 48], [2_u8; 8]],
     ).unwrap();
     connection

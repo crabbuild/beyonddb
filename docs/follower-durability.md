@@ -1,177 +1,80 @@
-# Follower durability for low-latency writes
+# Native Cellar follower durability
 
-## Why this work is needed
-
-The default BeyondDB server acknowledges a mutation after its Cell state is
-published to the configured object store. On the recent four-partition local
-RustFS fixture, this path remained far below file-backed ExtendDB SQLite for
-`PutItem`, `UpdateItem`, `BatchWriteItem`, and transactions. A separate
-[direct RustFS PUT probe](../benchmarks/2026-09-29-rustfs-put-probe/README.md)
-also observed material object-store latency under heavy host contention. Those
-short runs do not establish an idle-host throughput limit, but removing small
-amounts of item SQL cannot eliminate the object publication round trip.
-
-The pinned Cellule revision already exposes a node-log durability supervisor,
-follower stores, and a durability gate. BeyondDB has a lease-bound authority
-adapter, an opt-in inbound follower receiver, a pinned mTLS outbound
-transport, and a host-provider enrollment adapter. Experimental
-`follower_durability_enabled` now installs that provider. Recruitment waits for
-startup recovery; available follower capacity is advertised only after the
-private receiver starts. A three-process signed SDK crash test passes, while
-broader fault and performance qualification remains open.
-
-```text
-Default serving path                  Experimental multi-node path
-
-AWS SDK request                       AWS SDK request
-       |                                      |
-Cell command + local capture          Cell command + local capture
-       |                                      |
-object-store publication              append to every enrolled follower
-       |                                      |
-durable object proof                   follower fsync receipts
-       |                                      |
-SDK success                            authoritative log activation/proof
-                                              |
-                                          SDK success
-
-                                   Object tiering continues; recovery must
-                                   replay any acknowledged untiered frames.
-```
-
-Cellule's gate requires every member in the enrolled follower set to fsync a
-ticket before a fleet proof. Its first fleet proof also requires an
-authoritative activation of that exact log epoch. Object proof remains a
-fallback. These are durability conditions, not optional performance hints.
-
-## Product integration boundary
-
-| BeyondDB component | Required behavior |
-| --- | --- |
-| Follower store | Open `FollowerStore` in each node's durable data directory, reserve disk, and retain lanes across process restart. Advertise follower capacity only after the store and authenticated listener are ready. |
-| Peer transport | Implement Cellule's `NodeLogTransport` append, seal, retire, and bounded tail operations over the private mTLS listener. Pin each remote certificate to its live node advertisement. Bound request bytes, time, and concurrent work. |
-| Follower authorization | Match the mTLS identity to the advertised session. For each append, load one fresh `NodeDirectory::peer_verifier`, match caller to leader, and consume `EnrolledPeerVerifier::authorize_log_append`. Retirement and recovery use `NodeDirectory::authorize_log_retire` and `authorize_log_recovery` before touching a lane. Reject wrong members, epochs, coverage watermarks, and unfenced recovery attempts. |
-| Enrollment and authority | Implement `NodeDurabilityProvider` using `NodeDirectory::try_recruit_log`. Implement `NodeLogAuthority` with the directory's activate, coverage, and close CAS operations; reconcile CAS races with lease heartbeats without losing the enrolled log. Supply the exact session, node ID, members, lease guard, transport, and limits to `NodeDurabilityConfig`. |
-| Recovery | Before public readiness after an owner loss, seal and fetch the failed owner's authorized follower tail, reconcile object coverage, and restore acknowledged Cell commits. Do not return success for a write whose proof cannot be recovered on a successor. |
-| Lifecycle | Rotate and retire only after the recorded coverage barrier. Drain the node, settle publications, and preserve follower files if withdrawal or recovery has not completed. |
-
-The private `BeyonddbPeers` router now has a bounded node-log receiver when
-`follower_store_bytes` is configured. It opens Cellule's persistent
-`FollowerStore` beneath `data_dir`, requires a live mTLS identity bound to the
-advertised session, and checks the directory's append, retirement, or fenced
-recovery authority before touching a lane. Append identity and authority use the same fresh canonical signed record:
-certificate/key/fleet/image/release are validated during enrollment, then lease
-expiry is rechecked after I/O along with ensemble, epoch, open phase, and covered
-watermark. The canonical read is the authorization observation for this request;
-concurrent record changes after it do not cause a second read. A new proof is
-loaded for every request. Local lease fencing, durable append and the final
-response fence still apply. The outbound
-`PeerNodeLogTransport` resolves a live advertised member, pins its certificate
-and key, and bounds requests, replies, and tail paging. Tests cover a durable
-append and duplicate append over real two-identity mTLS, follower-store
-reopen, wrong certificate, wrong epoch, and a seal attempt before owner
-fencing. The recovery claimant test also fences the expired leader,
-seals its own follower lane under directory authority, and passes that lane
-through Cellule's bounded witness reader. A separate three-identity mTLS test
-lets another claimant fence the leader, seal a remote follower, and read its
-persisted tail through the bounded witness reader; sealing before the claim
-is rejected. The test also confirms that a recovery claimant must advertise
-Cellule's node-log protocol even when it offers no follower bytes. With an
-opt-in persistent store, the serving binary now advertises that protocol but
-zero follower bytes unless experimental follower durability is also enabled.
-It can therefore claim recovery without being recruited for write
-acknowledgments. The process test now exercises successor overlay attachment;
-retirement under concurrent load still needs qualification.
-
-The lease-bound `PublishedNodeLogAuthority` adapter can enroll a follower set
-and apply the directory's activation, coverage, and close transitions. It
-serializes those mutations with heartbeat refreshes and reloads the exact
-session after an ambiguous CAS. `PeerNodeDurabilityProvider` gives Cellule's
-host supervisor the enrolled members, authority, transport, and lease for
-each epoch. The server installs it before `CellNode::start` and uses a startup
-gate to keep recruitment disabled until recovery finishes. With the option
-enabled, ready receivers advertise their remaining disk budget. Adding a
-local in-process follower under a second logical node ID would not provide
-an independent failure domain and must not be used as a production durability
-shortcut.
-
-`recover_fenced_node_log` now composes Cellule's bounded witness reader,
-tenant catalog inventory, overlay manifest pinning, and final directory seal
-for a caller that already holds a fenced recovery claim. It resolves every
-authenticated Cell scope through a durable tenant catalog and rejects missing,
-ambiguous, or over-limit inventory before attaching an overlay. When normal
-Cell takeover encounters an active, untiered node log, the opt-in serving path
-claims fenced recovery, runs this coordinator, and only then passes its
-takeover proof to Cellule. A product test now captures a real account Cell
-frame, appends it to a persistent follower lane, and verifies that a
-successor restores the untiered commit before takeover. A separate
-[server process test](../tests/server_binary/follower_durability.rs) now kills
-the owner after SDK success while its data Cell object uploads are withheld.
-The replacement recovers PutItem, UpdateItem return values, DeleteItem,
-BatchWriteItem, and a same-partition TransactWriteItems outcome. Replaying the
-transaction preserves its conditional-insert result, and the AWS Streams CLI
-finds exactly one corresponding record for each tested mutation. All nodes use
-separate processes, keys, and persistent directories on one workstation.
-
-This test also exposed an S3 configuration gap: recovery's immutable overlay
-pinning requires conditional copy support. BeyondDB now uses Cellule's S3
-provider builder, which configures multipart conditional copies. No dependency
-source was patched.
-
-The signed SDK component test in
-[`tests/peer_network/residency/follower_durability.rs`](../tests/peer_network/residency/follower_durability.rs)
-now connects the real host provider to two persistent followers over mTLS.
-It withholds only the data Cell's immutable object uploads and verifies that
-the signed `PutItem` succeeds while the object root remains unchanged. After
-fencing the owner and stopping renewal, a successor recovers the item through
-the authorized follower tail. A matching object-only control uses the same
-fixture and confirms that the write waits for publication.
-
-This test runs the nodes within one process. It establishes the composition
-of enrollment, fsync proof, SDK acknowledgement, and successor recovery;
-it does not by itself establish process-crash durability, independent failure
-domains, transaction or stream recovery, or release throughput. The separate
-server test above covers the listed process-crash cases. The provider must be
-installed during node startup, before `CellNode::start`. Cellule selects a
-complete follower ensemble from the live fleet, so this fixture's additional
-frontend means two eligible followers are required for recruitment.
-
-## Enable the experimental path
-
-Add these fields to each node's existing server configuration:
+The Cellar executable requires bucket publication by default. Opt in to native
+follower proofs with this fleet setting:
 
 ```json
 {
-  "follower_store_bytes": 1073741824,
-  "follower_durability_enabled": true
+  "fleet": {
+    "bucket": "my-bdb-bucket",
+    "prefix": "beyonddb-cellar/ordered-v1",
+    "follower_durability": true
+  }
 }
 ```
 
-Use distinct node IDs, certificates, and persistent directories. A three-node
-fixture provides two enrolled followers for each leader. When an eligible
-ensemble is unavailable, SDK writes retain the object-publication path. The
-server verification and release comparison
-records the tested scope, request errors, and remaining performance gaps.
+All nodes need the same privately provisioned peer authentication key and a
+dedicated deployment prefix. Keep each node's data directory persistent. This
+is the native Cellar protocol; the old Cellule `follower_store_bytes`,
+`follower_durability_enabled` and mTLS configuration fields are rejected.
 
-## Verification before comparing throughput
+With the option enabled, the SDK installs its coupled log shipper and bundle
+sink. A write can be proven by follower fsyncs or bucket publication, whichever
+wins. Node bundles and per-cell LTX files are distinct publication paths.
+Without an eligible follower ensemble, writes wait for bucket proof. The
+pinned SDK recruits two followers and can serve with one in-sync witness; this
+flag does not introduce a configurable quorum or require two receipts for every
+write. Provision and qualify the failure policy required by your deployment.
 
-1. Prove append, duplicate append, lost acknowledgement, seal, tail paging,
-   retirement, wrong epoch, and forged peer rejection against persisted
-   follower lanes.
-2. Run at least three BeyondDB nodes with separate data directories and
-   authenticated private endpoints. Kill an owner after an acknowledged
-   signed SDK write and verify the item, stream intent, and transaction result
-   through a replacement owner before reporting that API as supported in
-   follower mode.
-3. Repeat the full signed boto3 API fixture on a release build with raw JSON,
-   errors, p50/p95/p99, host and object-store load, node count, follower proof
-   source, and background-work logs. Run sustained mixed traffic and hot-key
-   cases as well as short closed-loop samples.
-4. Compare every API and client count with a fresh file-backed ExtendDB SQLite
-   fixture. Report the differing IAM and durability contracts. A local
-   three-process fixture establishes functionality, not fleet-scale capacity
-   or independent-host fault tolerance.
+BeyondDB still commits each partition-local mutation, result, index intent and
+stream intent atomically in its cell. Cross-cell transactions retain their
+durable coordinator decision and idempotent participant resolution. The SDK
+owns follower files, ensemble transitions, sequence coverage, authenticated
+transport and log recovery. BeyondDB does not implement a second authority or
+rewrite SDK ownership records.
 
-The all-API SQLite performance objective remains open. Follower durability is
-the principal architectural path to test for durable write latency; its actual
-gain must be measured after the complete recovery contract works.
+An owner process dying does not immediately expire its lease. Takeover waits
+for the native authority fence. When a failed generation may have acknowledged
+fleet writes, Cellar seals and validates its retained log range before
+certifying recovered cells. Keep surviving follower data available until the
+SDK has recovered and tiered those writes. A generic transport error remains
+an ambiguous result and must retain the original mutation identity.
+
+`preserve` shutdown drains application work and log tasks, closes durability
+and prepares the SDK's clean-reload proof. `handoff` requires an eligible live
+peer. A kill or canceled shutdown supplies no graceful proof; recovery must
+follow the retained native records.
+
+## Verified process boundary
+
+`acknowledged_untiered_item_survives_owner_process_kill` runs three real
+executables against pinned RustFS. It creates a public two-cell table and a
+published warmup under bucket proof, then enables native follower durability.
+The test waits for two enrolled followers and pauses balancing through native
+management to select a stable crash target.
+
+An S3 proxy then rejects both node-bundle and per-cell LTX uploads. Admission
+closes atomically, and every previously forwarded payload finishes before the
+bucket cut is recorded. Rejected request bodies are discarded, so releasing
+the fault after a kill cannot publish an old queued body.
+
+Signed SDK Put, Update, Delete, BatchWrite and transaction requests still
+succeed. The native lease records possible fleet acknowledgements, while the
+bucket payload keys, ETags and sizes remain unchanged. The
+test kills the actual cell owner, removes its local directory, checks the same
+bucket cut, waits for lease expiry and starts a new logical node with an empty
+directory. The new node reads the acknowledged items, retains the deletion,
+replays the conditional transaction without reevaluation and exposes exactly
+one stream event for each operation. Ownership advances and the failed log is
+sealed. No credential or IAM-policy bootstrap runs on the successor.
+
+Run the fixture explicitly:
+
+```sh
+cargo test --test cellar_process --locked acknowledged_untiered_item_survives_owner_process_kill -- --ignored --nocapture
+```
+
+It requires Docker, AWS CLI and the pinned RustFS image. Ordinary ignored-test
+counts do not qualify recovery. This case covers one owner loss with surviving
+followers; simultaneous witness loss, network partitions, slow-disk behavior,
+resource admission and fleet-scale latency/throughput remain unqualified.

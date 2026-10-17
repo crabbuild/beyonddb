@@ -1,6 +1,7 @@
 //! Range replacement reservations stay with one metadata leaf until completion.
 
 use super::*;
+use bdb_keyspace::RangeKey;
 
 /// One data or GSI range replacement, independent of unrelated leaf versions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -12,7 +13,7 @@ pub struct DirectoryChange {
 impl DirectoryChange {
     fn valid(&self) -> bool {
         let [left, right] = &self.children;
-        let Some(boundary) = left.upper else {
+        let Some(boundary) = left.upper.clone() else {
             return false;
         };
         let Some(epoch) = self.source.epoch.checked_add(1) else {
@@ -25,14 +26,14 @@ impl DirectoryChange {
             && right.lower == boundary
             && right.upper == self.source.upper
             && boundary > left.lower
-            && right.upper.is_none_or(|upper| boundary < upper)
+            && right.upper.clone().is_none_or(|upper| boundary < upper)
             && left.partition_id != right.partition_id
             && left.partition_id != self.source.partition_id
             && right.partition_id != self.source.partition_id
     }
 }
 
-fn change(context: &CommandContext<'_, '_>, lower: [u8; 16]) -> Result<Option<DirectoryChange>> {
+fn change(context: &CommandContext<'_, '_>, lower: RangeKey) -> Result<Option<DirectoryChange>> {
     let rows = context.sql(&statement(
         "SELECT plan FROM ddb_directory_changes WHERE lower_bound = ?1",
         vec![SqlValue::Blob(lower.to_vec())],
@@ -45,7 +46,7 @@ fn change(context: &CommandContext<'_, '_>, lower: [u8; 16]) -> Result<Option<Di
 }
 
 fn current(context: &CommandContext<'_, '_>, range: &RoutePagePartition) -> Result<bool> {
-    Ok(ranges(|batch| context.sql(batch), range.lower, 1)?.first() == Some(range))
+    Ok(ranges(|batch| context.sql(batch), range.lower.clone(), 1)?.first() == Some(range))
 }
 
 /// Reserve a source and both replacement identities before any data owner seals.
@@ -66,7 +67,7 @@ impl Command for BeginDirectoryChange {
         if !matches!(state.mode, DirectoryMode::Leaf) || !input.valid() {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        if let Some(existing) = change(context, input.source.lower)? {
+        if let Some(existing) = change(context, input.source.lower.clone())? {
             return Ok(if existing == input {
                 CommandResult::Success(Json(true))
             } else {
@@ -76,11 +77,13 @@ impl Command for BeginDirectoryChange {
         if !current(context, &input.source)? {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        let rows=context.sql(&statement("SELECT (SELECT COUNT(*) FROM ddb_directory_ranges) + (SELECT COUNT(*) FROM ddb_directory_changes)",vec![]))?;
-        let Some([SqlValue::Integer(count)]) = rows[0].rows.first().map(Vec::as_slice) else {
+        let rows=context.sql(&statement("SELECT (SELECT COUNT(*) FROM ddb_directory_ranges) + (SELECT COUNT(*) FROM ddb_directory_changes), (SELECT COALESCE(SUM(length(record)), 0) FROM ddb_directory_ranges) + (SELECT COALESCE(SUM(length(plan)), 0) FROM ddb_directory_changes)",vec![]))?;
+        let Some([SqlValue::Integer(count), SqlValue::Integer(bytes)]) =
+            rows[0].rows.first().map(Vec::as_slice)
+        else {
             return Err(Error::Command("invalid directory occupancy"));
         };
-        if *count >= MAX_RANGES as i64 {
+        if *count >= MAX_RANGES as i64 || *bytes >= LEAF_BYTES {
             return Ok(CommandResult::Rejected(Json(false)));
         }
         let existing = all_ranges(context)?;
@@ -137,7 +140,7 @@ impl Command for PublishDirectoryChange {
             return Ok(CommandResult::Rejected(Json(false)));
         };
         if !matches!(state.mode, DirectoryMode::Leaf)
-            || change(context, input.source.lower)?.as_ref() != Some(&input)
+            || change(context, input.source.lower.clone())?.as_ref() != Some(&input)
         {
             return Ok(CommandResult::Rejected(Json(false)));
         }
@@ -183,7 +186,7 @@ impl Command for FinishDirectoryChange {
         if !current(context, &input.children[0])? || !current(context, &input.children[1])? {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        if let Some(existing) = change(context, input.source.lower)? {
+        if let Some(existing) = change(context, input.source.lower.clone())? {
             if existing != input {
                 return Ok(CommandResult::Rejected(Json(false)));
             }
@@ -202,7 +205,7 @@ impl Query for ReadDirectoryChanges {
     const MODULE: &'static str = MODULE;
     const ID: u32 = 3;
     const CODEC_VERSION: u32 = 1;
-    type Input = Json<Option<[u8; 16]>>;
+    type Input = Json<Option<RangeKey>>;
     type Output = Json<Vec<DirectoryChange>>;
     fn execute(context: &mut QueryContext<'_>, Json(after): Self::Input) -> Result<Self::Output> {
         if !state(|batch| context.sql(batch))?
@@ -210,7 +213,7 @@ impl Query for ReadDirectoryChanges {
         {
             return Ok(Json(Vec::new()));
         }
-        let rows=context.sql(&statement("SELECT plan FROM ddb_directory_changes WHERE (?1 IS NULL OR lower_bound > ?1) ORDER BY lower_bound LIMIT 64",
+        let rows=context.sql(&statement("WITH eligible AS (SELECT lower_bound, plan FROM ddb_directory_changes WHERE (?1 IS NULL OR lower_bound > ?1) ORDER BY lower_bound LIMIT 64), measured AS (SELECT lower_bound, plan, ROW_NUMBER() OVER (ORDER BY lower_bound) AS n, SUM(length(plan)) OVER (ORDER BY lower_bound) AS bytes FROM eligible) SELECT plan FROM measured WHERE n = 1 OR bytes <= 368640 ORDER BY lower_bound",
             vec![after.map_or(SqlValue::Null,|key|SqlValue::Blob(key.to_vec()))]))?;
         Ok(Json(
             rows[0]
@@ -234,10 +237,12 @@ impl Query for DirectoryNeedsSplit {
     type Input = Json<()>;
     type Output = Json<bool>;
     fn execute(context: &mut QueryContext<'_>, _: Self::Input) -> Result<Self::Output> {
-        let rows = context.sql(&statement("SELECT (SELECT COUNT(*) FROM ddb_directory_ranges) + (SELECT COUNT(*) FROM ddb_directory_changes)", vec![]))?;
-        let Some([SqlValue::Integer(count)]) = rows[0].rows.first().map(Vec::as_slice) else {
+        let rows = context.sql(&statement("SELECT (SELECT COUNT(*) FROM ddb_directory_ranges) + (SELECT COUNT(*) FROM ddb_directory_changes), (SELECT COALESCE(SUM(length(record)), 0) FROM ddb_directory_ranges) + (SELECT COALESCE(SUM(length(plan)), 0) FROM ddb_directory_changes)", vec![]))?;
+        let Some([SqlValue::Integer(count), SqlValue::Integer(bytes)]) =
+            rows[0].rows.first().map(Vec::as_slice)
+        else {
             return Err(Error::Command("invalid directory occupancy"));
         };
-        Ok(Json(*count >= MAX_RANGES as i64))
+        Ok(Json(*count >= MAX_RANGES as i64 || *bytes >= LEAF_BYTES))
     }
 }

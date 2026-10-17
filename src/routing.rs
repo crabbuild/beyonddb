@@ -1,8 +1,14 @@
 //! Durable initial placement of a table's independently owned data ranges.
 
+use bdb_keyspace::RangeKey;
+#[cfg(test)]
+mod ordered_tests;
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashSet;
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use crate::table::{TableRecord, decode_table, statement};
@@ -15,13 +21,16 @@ pub struct TableRoute {
     pub table_id: String,
     /// Directory version; each data Cell retains its own partition epoch.
     pub epoch: u64,
-    /// Ranges ordered by lower hash bound, covering the full hash space.
+    /// Ranges ordered by lower ordered bound, covering the full key space.
     pub partitions: Vec<PartitionSpec>,
 }
 
 impl TableRoute {
     pub(crate) fn valid_for(&self, table: &TableRecord) -> bool {
-        if self.table_id != table.id || self.epoch == 0 || self.partitions.is_empty() {
+        if self.table_id != table.id
+            || self.epoch == 0
+            || !initial_partition_count_matches(table.placement, self.partitions.len())
+        {
             return false;
         }
         let mut next_lower = None;
@@ -37,17 +46,28 @@ impl TableRoute {
                 || partition.lower != next_lower
                 || partition
                     .lower
-                    .zip(partition.upper)
+                    .clone()
+                    .zip(partition.upper.clone())
                     .is_some_and(|(low, high)| low >= high)
                 || !ids.insert(partition.partition_id)
                 || (index + 1 < self.partitions.len() && partition.upper.is_none())
             {
                 return false;
             }
-            next_lower = partition.upper;
+            next_lower = partition.upper.clone();
         }
         next_lower.is_none()
     }
+}
+
+// Publication must verify the durable creation policy, even if a caller bypasses
+// the HTTP provisioning path. A partial install cannot make a table active.
+pub(crate) fn initial_partition_count_matches(
+    placement: crate::TablePlacement,
+    installed: usize,
+) -> bool {
+    matches!(placement, crate::TablePlacement::Routed { initial_partitions }
+        if initial_partitions >= 2 && installed == usize::from(initial_partitions))
 }
 
 /// A durable, validated intent to replace one source range with two children.
@@ -69,17 +89,20 @@ impl SplitPlan {
         let Some(next_epoch) = self.next_epoch() else {
             return false;
         };
-        let Some(boundary) = left.upper else {
+        let Some(boundary) = left.upper.clone() else {
             return false;
         };
         self.source.table.id == table.id
+            && (table.local_secondary_indexes.is_empty()
+                || crate::partition::key::is_partition_fence(&boundary, &table.key_schema))
             && self.source.table.key_schema == table.key_schema
             && self.source.table.attribute_definitions == table.attribute_definitions
             && self.source.epoch > 0
             && self
                 .source
                 .lower
-                .zip(self.source.upper)
+                .clone()
+                .zip(self.source.upper.clone())
                 .is_none_or(|(low, high)| low < high)
             && left.table == self.source.table
             && right.table == self.source.table
@@ -89,10 +112,14 @@ impl SplitPlan {
             && left.epoch == next_epoch
             && right.epoch == next_epoch
             && left.lower == self.source.lower
-            && right.lower == Some(boundary)
+            && right.lower == Some(boundary.clone())
             && right.upper == self.source.upper
-            && boundary > self.source.lower.unwrap_or([0; 16])
-            && self.source.upper.is_none_or(|upper| boundary < upper)
+            && boundary > self.source.lower.clone().unwrap_or_else(RangeKey::minimum)
+            && self
+                .source
+                .upper
+                .clone()
+                .is_none_or(|upper| boundary < upper)
     }
 }
 
@@ -191,8 +218,8 @@ impl Command for ActivateTableRoute {
             .iter()
             .map(|part| RoutePagePartition {
                 partition_id: part.partition_id,
-                lower: part.lower.unwrap_or([0; 16]),
-                upper: part.upper,
+                lower: part.lower.clone().unwrap_or_else(RangeKey::minimum),
+                upper: part.upper.clone(),
                 epoch: part.epoch,
             })
             .collect::<Vec<_>>();
@@ -244,10 +271,10 @@ impl Command for ActivateTableRoute {
 pub struct RoutePageInput {
     /// Immutable table identity.
     pub table_id: String,
-    /// First page starts at the partition containing this hash, if present.
-    pub start_hash: Option<[u8; 16]>,
+    /// First page starts at the partition containing this key, if present.
+    pub start_key: Option<RangeKey>,
     /// Later pages start after this range lower bound.
-    pub after_lower: Option<[u8; 16]>,
+    pub after_lower: Option<RangeKey>,
     /// Membership version of the leaf containing the previous logical bound.
     pub expected_epoch: Option<u64>,
 }
@@ -257,10 +284,10 @@ pub struct RoutePageInput {
 pub struct RoutePagePartition {
     /// Installed data Cell identity.
     pub partition_id: [u8; 16],
-    /// Inclusive lower hash boundary; zero represents the first range.
-    pub lower: [u8; 16],
-    /// Exclusive upper hash boundary, or the end of the hash space.
-    pub upper: Option<[u8; 16]>,
+    /// Inclusive ordered boundary; the minimum sentinel starts the first range.
+    pub lower: RangeKey,
+    /// Exclusive ordered boundary, or the end of the key space.
+    pub upper: Option<RangeKey>,
     /// Installed data Cell epoch.
     pub epoch: u64,
 }
@@ -304,33 +331,51 @@ impl Query for ReadRouteDirectory {
         context: &mut QueryContext<'_>,
         Json(directory_id): Self::Input,
     ) -> Result<Self::Output> {
-        let rows = context.sql(&statement("SELECT 1 FROM ddb_directory_roots r JOIN ddb_live_tables t ON t.table_id = r.base_table_id WHERE r.table_id = ?1 AND r.initial_fingerprint IS NOT NULL", vec![SqlValue::Text(directory_id.clone())]))?;
+        let rows = context.sql(&statement("SELECT t.record FROM ddb_directory_roots r JOIN ddb_live_tables t ON t.table_id = r.base_table_id WHERE r.table_id = ?1 AND r.initial_fingerprint IS NOT NULL", vec![SqlValue::Text(directory_id.clone())]))?;
         Ok(Json(
-            (!rows[0].rows.is_empty()).then(|| crate::DirectorySpec::root(directory_id)),
+            decode_table(&rows[0])?
+                .is_some()
+                .then(|| crate::DirectorySpec::root(directory_id)),
         ))
     }
 }
 
 /// Page a published base or index directory through bounded, independently versioned metadata leaves.
 pub async fn read_route_page(
-    client: &cellule_runtime::client::CellClient,
-    account: &cellule_runtime::identity::CellTarget,
+    client: &bdb_cellar_runtime::client::CellClient,
+    account: &bdb_cellar_runtime::identity::CellTarget,
     input: RoutePageInput,
+) -> std::result::Result<RoutePageOutcome, extenddb_storage::error::StorageError> {
+    read_route_page_direction(client, account, input, true).await
+}
+pub async fn read_route_page_direction(
+    client: &bdb_cellar_runtime::client::CellClient,
+    account: &bdb_cellar_runtime::identity::CellTarget,
+    input: RoutePageInput,
+    forward: bool,
 ) -> std::result::Result<RoutePageOutcome, extenddb_storage::error::StorageError> {
     use crate::backend::cell_error;
     use extenddb_storage::error::StorageError;
-    let client = client
-        .clone()
-        .with_read_policy(cellule_runtime::client::ReadPolicy::CurrentOwner);
-    if input.start_hash.is_some() && input.after_lower.is_some() {
+    let client = client.clone();
+    if input.start_key.is_some() && input.after_lower.is_some() {
         return Err(StorageError::Validation("invalid directory cursor".into()));
     }
-    let hash = input.after_lower.or(input.start_hash).unwrap_or([0; 16]);
+    let hash = input
+        .after_lower
+        .clone()
+        .or(input.start_key)
+        .unwrap_or_else(RangeKey::minimum);
     // The directory is installed before its live anchor is published. Read
     // both independently, but let the anchor decide whether the route exists.
     let (anchor, page) = tokio::join!(
         client.query::<ReadRouteDirectory>(account, None, Json(input.table_id.clone())),
-        crate::read_directory_leaf(&client, account.tenant(), &input.table_id, hash),
+        crate::read_directory_leaf_direction(
+            &client,
+            account.tenant(),
+            &input.table_id,
+            hash,
+            forward
+        ),
     );
     if anchor.map_err(cell_error)?.output.0.is_none() {
         return Ok(RoutePageOutcome::Unrouted);
@@ -363,16 +408,16 @@ pub async fn read_route_page(
 
 /// Resolve the leaf owning a logical position after checking its live anchor.
 pub async fn route_directory_target(
-    client: &cellule_runtime::client::CellClient,
-    account: &cellule_runtime::identity::CellTarget,
+    client: &bdb_cellar_runtime::client::CellClient,
+    account: &bdb_cellar_runtime::identity::CellTarget,
     directory_id: &str,
-    lower: [u8; 16],
-) -> std::result::Result<cellule_runtime::identity::CellTarget, extenddb_storage::error::StorageError>
-{
+    lower: RangeKey,
+) -> std::result::Result<
+    bdb_cellar_runtime::identity::CellTarget,
+    extenddb_storage::error::StorageError,
+> {
     use extenddb_storage::error::StorageError;
-    let client = client
-        .clone()
-        .with_read_policy(cellule_runtime::client::ReadPolicy::CurrentOwner);
+    let client = client.clone();
     if client
         .query::<ReadRouteDirectory>(account, None, Json(directory_id.into()))
         .await
@@ -391,7 +436,7 @@ pub async fn route_directory_target(
 }
 
 pub(crate) async fn split_route_state(
-    client: &cellule_runtime::client::CellClient,
+    client: &bdb_cellar_runtime::client::CellClient,
     account_id: &str,
     plan: &crate::DirectoryTransfer,
 ) -> std::result::Result<crate::SplitRouteState, extenddb_storage::error::StorageError> {
@@ -403,7 +448,7 @@ pub(crate) async fn split_route_state(
         &account,
         RoutePageInput {
             table_id: plan.table_id().to_owned(),
-            start_hash: Some(change.source.lower),
+            start_key: Some(change.source.lower.clone()),
             after_lower: None,
             expected_epoch: None,
         },
@@ -423,7 +468,7 @@ pub(crate) async fn split_route_state(
         &account,
         RoutePageInput {
             table_id: plan.table_id().to_owned(),
-            start_hash: Some(change.children[1].lower),
+            start_key: Some(change.children[1].lower.clone()),
             after_lower: None,
             expected_epoch: None,
         },

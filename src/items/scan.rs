@@ -106,6 +106,7 @@ impl Query for ScanItems {
                 &cursor,
                 false,
                 64,
+                &table.key_schema,
             )?;
             if key_rows.is_empty() {
                 break;
@@ -151,6 +152,7 @@ impl Query for ScanItems {
                 &cursor,
                 false,
                 1,
+                &table.key_schema,
             )?;
             if remaining.is_empty() {
                 None

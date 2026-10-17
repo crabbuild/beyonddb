@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 

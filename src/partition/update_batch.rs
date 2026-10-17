@@ -1,6 +1,6 @@
 //! Independent updates sharing one commit and retaining individual results.
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 
 use super::*;
 

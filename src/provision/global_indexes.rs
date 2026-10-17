@@ -1,12 +1,10 @@
 //! Recoverable index range transfer and directory cutover through routed Cells.
 
-use cellule_runtime::{
-    cell::catalog::CellCatalog,
-    client::{CellClient, InvocationError, ReadPolicy},
-};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_keyspace::RangeKey;
 use extenddb_storage::{BoxedFuture, error::StorageError};
 
-use super::{CellInitialPartitionProvisioner, provision_error, split_boundary};
+use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::{cell_error, mutation_identity};
 use crate::{
     ActivateGlobalIndexImport, BeginDirectoryTransfer, DirectoryPartitionInput,
@@ -14,7 +12,7 @@ use crate::{
     GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete, GlobalIndexSplitPlan,
     GlobalIndexState, ImportGlobalIndexEntry, Json, OpenGlobalIndexImport, PrepareGlobalIndexSplit,
     ReadDirectoryRange, ReadDirectoryTransfer, ReadGlobalIndexPartition, ReadGlobalIndexState,
-    SplitRouteState, account_target, data_key_hash, global_index_target,
+    SplitRouteState, account_target, global_index_target,
 };
 
 fn changed() -> StorageError {
@@ -22,7 +20,7 @@ fn changed() -> StorageError {
 }
 
 fn committed(
-    result: Result<cellule_runtime::client::Committed<Json<bool>>, InvocationError<Json<bool>>>,
+    result: Result<bdb_cellar_runtime::client::Committed<Json<bool>>, InvocationError<Json<bool>>>,
 ) -> Result<(), StorageError> {
     match result {
         Ok(result) if result.output.0 => Ok(()),
@@ -39,7 +37,7 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         index_id: &str,
         partition_id: [u8; 16],
-        lower: [u8; 16],
+        lower: RangeKey,
         max_database_bytes: u64,
     ) -> Result<Option<GlobalIndexSplitPlan>, StorageError> {
         if max_database_bytes == 0 {
@@ -47,9 +45,10 @@ impl CellInitialPartitionProvisioner {
                 "database byte split threshold must be positive".into(),
             ));
         }
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
         let account = account_target(account_id).map_err(provision_error)?;
-        let directory = crate::route_directory_target(&client, &account, index_id, lower).await?;
+        let directory =
+            crate::route_directory_target(&client, &account, index_id, lower.clone()).await?;
         let pending = client
             .query::<ReadDirectoryTransfer>(
                 &directory,
@@ -92,13 +91,12 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         index_id: &'a str,
         partition_id: [u8; 16],
-        lower: [u8; 16],
+        lower: RangeKey,
     ) -> BoxedFuture<'a, Result<GlobalIndexSplitPlan, StorageError>> {
         Box::pin(async move {
-            let client = client.with_read_policy(ReadPolicy::CurrentOwner);
             let account = account_target(account_id).map_err(provision_error)?;
             let directory =
-                crate::route_directory_target(&client, &account, index_id, lower).await?;
+                crate::route_directory_target(&client, &account, index_id, lower.clone()).await?;
             let input = DirectoryPartitionInput {
                 table_id: index_id.to_owned(),
                 partition_id,
@@ -146,7 +144,7 @@ impl CellInitialPartitionProvisioner {
                 .ok_or_else(changed)?;
             if source.index.id != index_id
                 || source.partition_id != partition_id
-                || source.lower.unwrap_or([0; 16]) != published.lower
+                || source.lower.clone().unwrap_or_else(RangeKey::minimum) != published.lower
                 || source.upper != published.upper
                 || source.epoch != published.epoch
             {
@@ -155,13 +153,21 @@ impl CellInitialPartitionProvisioner {
             let directory = self
                 .split_ready_directory(&client, account_id, index_id, lower)
                 .await?;
-            let boundary = split_boundary(source.lower, source.upper)?;
+            let boundary = client
+                .query::<crate::GlobalIndexSplitPoint>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or_else(|| {
+                    StorageError::LimitExceeded("index has no separable ordered keys".into())
+                })?;
             let epoch = published.epoch.checked_add(1).ok_or_else(|| {
                 StorageError::LimitExceeded("index directory epoch exhausted".into())
             })?;
             let mut children = [source.clone(), source.clone()];
             children[0].partition_id = *uuid::Uuid::now_v7().as_bytes();
-            children[0].upper = Some(boundary);
+            children[0].upper = Some(boundary.clone());
             children[0].epoch = epoch;
             children[1].partition_id = *uuid::Uuid::now_v7().as_bytes();
             children[1].lower = Some(boundary);
@@ -197,14 +203,14 @@ impl CellInitialPartitionProvisioner {
             if !plan.valid() {
                 return Err(changed());
             }
-            let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
             let account = account_target(account_id).map_err(provision_error)?;
             let index = &plan.source.index;
             let directory = crate::route_directory_target(
                 &client,
                 &account,
                 &index.id,
-                plan.source.lower.unwrap_or([0; 16]),
+                plan.source.lower.clone().unwrap_or_else(RangeKey::minimum),
             )
             .await?;
             let pending = client
@@ -242,19 +248,7 @@ impl CellInitialPartitionProvisioner {
                 global_index_target(account_id, &index.id, &plan.children[1].partition_id)
                     .map_err(provision_error)?,
             ];
-            if CellCatalog::new(self.layout.clone(), source.tenant())
-                .lookup(source.cell_id())
-                .await
-                .map_err(provision_error)?
-                .is_none()
-            {
-                return Err(StorageError::Transient(
-                    "index split source is not cataloged".into(),
-                ));
-            }
             for target in children.iter().chain([&source]) {
-                self.reclaim_retired_ranges(&client, &account, Some(source.cell_id()))
-                    .await?;
                 self.provision_range(target, &client).await?;
                 committed(
                     client
@@ -287,10 +281,14 @@ impl CellInitialPartitionProvisioner {
                     .0
                     .ok_or_else(changed)?;
                 for entry in page.entries {
-                    let hash =
-                        data_key_hash(&index.id, &entry.key, &index.specification.key_schema)
-                            .map_err(provision_error)?;
-                    let child = usize::from(hash >= plan.children[1].lower.ok_or_else(changed)?);
+                    let hash = crate::partition::key::ordered_index_key(
+                        &entry.key,
+                        &index.specification.key_schema,
+                        &plan.source.table.key_schema,
+                    )
+                    .map_err(provision_error)?;
+                    let child =
+                        usize::from(hash >= plan.children[1].lower.clone().ok_or_else(changed)?);
                     expected[child]
                         .include(&entry, &plan.children[child])
                         .map_err(provision_error)?;

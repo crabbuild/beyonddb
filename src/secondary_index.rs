@@ -3,7 +3,7 @@
 mod read;
 pub(crate) use read::{QueryAccountIndex, query};
 
-use cellule_runtime::registry::CommandContext;
+use bdb_cellar_runtime::registry::CommandContext;
 use extenddb_core::types::{Item, KeySchemaElement, LsiInput, extract_key};
 use serde::{Deserialize, Serialize};
 
@@ -184,13 +184,42 @@ pub(crate) fn valid_cursor(key: &Item, table: &TableRecord, index: &LsiInput) ->
 }
 
 pub(crate) fn scan_keys(
-    context: &cellule_runtime::registry::QueryContext<'_>,
+    context: &bdb_cellar_runtime::registry::QueryContext<'_>,
     table_id: &str,
     index_name: Option<&str>,
     cursor: &[u8],
     routed: bool,
     limit: u32,
+    base_schema: &[extenddb_core::types::KeySchemaElement],
 ) -> Result<Vec<Vec<SqlValue>>> {
+    if routed {
+        let bound = if cursor.is_empty() {
+            Vec::new()
+        } else {
+            let key: extenddb_core::types::Item = serde_json::from_slice(cursor)?;
+            crate::ordered_data_key(table_id, &key, base_schema)?.to_vec()
+        };
+        let (sql, parameters) = if let Some(name) = index_name {
+            (
+                format!(
+                    "SELECT l.item_key FROM ddb_local_index_items l JOIN ddb_partition_items b ON b.item_key = l.item_key WHERE l.table_id = ?1 AND l.index_name = ?2 AND b.ordered_key > ?3 ORDER BY b.ordered_key LIMIT {limit}"
+                ),
+                vec![
+                    SqlValue::Text(table_id.into()),
+                    SqlValue::Text(name.into()),
+                    SqlValue::Blob(bound),
+                ],
+            )
+        } else {
+            (
+                format!(
+                    "SELECT item_key FROM ddb_partition_items WHERE ordered_key > ?1 ORDER BY ordered_key LIMIT {limit}"
+                ),
+                vec![SqlValue::Blob(bound)],
+            )
+        };
+        return Ok(context.sql(&statement(&sql, parameters))?.remove(0).rows);
+    }
     let (source, predicate, parameters) = if let Some(name) = index_name {
         (
             "ddb_local_index_items",

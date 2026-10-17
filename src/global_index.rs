@@ -1,8 +1,11 @@
 //! Independently owned, versioned global-index projections.
 
+use bdb_keyspace::RangeKey;
 pub(crate) mod outbox;
 pub use outbox::*;
 mod read;
+mod split_point;
+pub use split_point::*;
 mod routing;
 mod transfer;
 pub use read::*;
@@ -11,10 +14,10 @@ pub use transfer::*;
 
 use std::sync::OnceLock;
 
-use cellule_app::CellType;
-use cellule_runtime::cell::catalog::CatalogRole;
-use cellule_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::app::CellType;
+use bdb_cellar_runtime::descriptors::CatalogRole;
+use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -32,7 +35,7 @@ pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x46; 16]);
 const SCHEMA: &str = include_str!("global_index_schema.sql");
 // Lifecycle and projection mutations only return status values. Reserving an
 // item-sized response would reduce concurrency without carrying images back.
-static COMMANDS: [cellule_runtime::registry::OperationDescriptor; 6] = [
+static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 6] = [
     status_operation(1),
     status_operation(2),
     status_operation(3),
@@ -41,14 +44,14 @@ static COMMANDS: [cellule_runtime::registry::OperationDescriptor; 6] = [
     status_operation(6),
 ];
 
-const fn status_operation(id: u32) -> cellule_runtime::registry::OperationDescriptor {
-    cellule_runtime::registry::OperationDescriptor {
+const fn status_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         output_limit: 4096,
         ..crate::operation(id)
     }
 }
 
-static QUERIES: [cellule_runtime::registry::OperationDescriptor; 7] = [
+static QUERIES: [bdb_cellar_runtime::registry::OperationDescriptor; 8] = [
     crate::operation(1),
     crate::operation(2),
     crate::operation(3),
@@ -56,6 +59,7 @@ static QUERIES: [cellule_runtime::registry::OperationDescriptor; 7] = [
     crate::operation(5),
     status_operation(6),
     status_operation(7),
+    crate::operation(8),
 ];
 
 /// One immutable index generation within a base table.
@@ -143,16 +147,20 @@ pub struct GlobalIndexPartitionSpec {
     pub table: TableRecord,
     pub index: GlobalIndexRecord,
     pub partition_id: [u8; 16],
-    pub lower: Option<[u8; 16]>,
-    pub upper: Option<[u8; 16]>,
+    pub lower: Option<RangeKey>,
+    pub upper: Option<RangeKey>,
     pub epoch: u64,
 }
 
 impl GlobalIndexPartitionSpec {
     fn contains(&self, key: &Item) -> Result<bool> {
-        let hash = crate::data_key_hash(&self.index.id, key, &self.index.specification.key_schema)?;
-        Ok(self.lower.is_none_or(|lower| hash >= lower)
-            && self.upper.is_none_or(|upper| hash < upper))
+        let hash = crate::partition::key::ordered_index_key(
+            key,
+            &self.index.specification.key_schema,
+            &self.table.key_schema,
+        )?;
+        Ok(self.lower.clone().is_none_or(|lower| hash >= lower)
+            && self.upper.clone().is_none_or(|upper| hash < upper))
     }
 
     fn valid_key(&self, key: &Item) -> bool {
@@ -210,7 +218,7 @@ pub enum GlobalIndexApplyOutcome {
 
 pub(crate) struct GlobalIndexModule;
 
-impl cellule_runtime::registry::CellModule for GlobalIndexModule {
+impl bdb_cellar_runtime::registry::CellModule for GlobalIndexModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -220,6 +228,7 @@ impl cellule_runtime::registry::CellModule for GlobalIndexModule {
             hash.update(include_bytes!("global_index.rs"));
             hash.update(include_bytes!("statistics.rs"));
             hash.update(include_bytes!("global_index/read.rs"));
+            hash.update(include_bytes!("global_index/split_point.rs"));
             hash.update(include_bytes!("global_index/transfer.rs"));
             hash.update(include_bytes!("table.rs"));
             hash.update(include_bytes!("item_storage.rs"));
@@ -265,6 +274,7 @@ impl cellule_runtime::registry::CellModule for GlobalIndexModule {
         registry.bind_query::<ExportGlobalIndexEntries>()?;
         registry.bind_query::<ReadGlobalIndexPartition>()?;
         registry.bind_query::<GlobalIndexUsage>()?;
+        registry.bind_query::<GlobalIndexSplitPoint>()?;
         registry.bind_query::<GlobalIndexQuery>()?;
         registry.bind_query::<GlobalIndexScan>()
     }
@@ -305,11 +315,7 @@ pub fn global_index_target(
     target_for_tenant(account_target(account_id)?.tenant(), index_id, partition_id)
 }
 
-/// Install the global-index SQL schema during Cell bootstrap.
-pub fn initialize_global_index(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(SCHEMA)?;
-    Ok(())
-}
+// Schema installation is performed by the compiled Cellar module migration.
 
 /// Install one immutable global-index range before publishing its route.
 pub struct InstallGlobalIndexPartition;
@@ -331,10 +337,12 @@ impl Command for InstallGlobalIndexPartition {
             &spec.partition_id,
         )?;
         if target != *context.target()
+            || spec.table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION
             || spec.epoch == 0
             || spec
                 .lower
-                .zip(spec.upper)
+                .clone()
+                .zip(spec.upper.clone())
                 .is_some_and(|(low, high)| low >= high)
             || !spec.table.global_secondary_indexes.contains(&spec.index)
         {
@@ -369,7 +377,13 @@ fn read_spec(
     ))?;
     match rows[0].rows.first().map(Vec::as_slice) {
         None => Ok(None),
-        Some([SqlValue::Blob(bytes)]) => Ok(Some(serde_json::from_slice(bytes)?)),
+        Some([SqlValue::Blob(bytes)]) => {
+            let spec: GlobalIndexPartitionSpec = serde_json::from_slice(bytes)?;
+            if spec.table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION {
+                return Err(Error::Command("unsupported installed index encoding"));
+            }
+            Ok(Some(spec))
+        }
         _ => Err(Error::Command("invalid global-index spec")),
     }
 }
@@ -473,10 +487,11 @@ fn apply(
     let (partition, sort) = index_key(&input.key, &spec.index.specification.key_schema)?;
     // Retain tombstones: an older delivery may arrive after deletion or a
     // key move. The full index/base key also separates both arms of a move.
-    context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item, logical_bytes) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL, logical_bytes = excluded.logical_bytes", vec![
+    context.sql(&statement("INSERT INTO ddb_global_index_items (item_key, partition_key, sort_key, version, digest, item, logical_bytes, ordered_key) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7) ON CONFLICT(item_key) DO UPDATE SET version = excluded.version, digest = excluded.digest, item = NULL, logical_bytes = excluded.logical_bytes", vec![
             SqlValue::Blob(key.clone()), SqlValue::Blob(partition), SqlValue::Blob(sort),
             SqlValue::Blob(version), SqlValue::Blob(digest.as_bytes().to_vec()),
             SqlValue::Integer(input.item.as_ref().map(crate::statistics::item_bytes).transpose()?.unwrap_or(0)),
+            SqlValue::Blob(crate::partition::key::ordered_index_key(&input.key, &spec.index.specification.key_schema, &spec.table.key_schema)?.to_vec()),
         ]))?;
     if let Some(item) = input.item {
         StoredValue::GlobalIndex(&key).write(context, &item)?;

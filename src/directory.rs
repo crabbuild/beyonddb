@@ -4,13 +4,14 @@ use crate::{
     APPLICATION, Error, Json, Result, RoutePagePartition, SqlBatch, SqlResultSet, SqlValue,
     account_target, table::statement,
 };
-use cellule_app::CellType;
-use cellule_runtime::cell::catalog::CatalogRole;
-use cellule_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::app::CellType;
+use bdb_cellar_runtime::descriptors::CatalogRole;
+use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, Query, QueryContext, RegistryBuilder,
 };
+use bdb_keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -31,71 +32,82 @@ const SCHEMA: &str = include_str!("directory/schema.sql");
 const MAX_RANGES: usize = 1024;
 const PAGE_SIZE: usize = 64;
 
-static COMMANDS: [cellule_runtime::registry::OperationDescriptor; 12] = [
-    cellule_runtime::registry::OperationDescriptor {
+const fn directory_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         input_limit: 1024 * 1024,
-        ..crate::participant::phase_operation(1)
+        output_limit: 512 * 1024,
+        ..crate::operation(id)
+    }
+}
+const PAGE_BYTES: usize = 360 * 1024;
+const LEAF_BYTES: i64 = 512 * 1024;
+
+static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 12] = [
+    bdb_cellar_runtime::registry::OperationDescriptor {
+        input_limit: 1024 * 1024,
+        ..directory_operation(1)
     },
-    crate::participant::phase_operation(2),
-    crate::participant::phase_operation(3),
-    crate::participant::phase_operation(4),
-    crate::participant::phase_operation(5),
-    crate::participant::phase_operation(6),
-    crate::participant::phase_operation(7),
-    cellule_runtime::registry::OperationDescriptor {
+    directory_operation(2),
+    directory_operation(3),
+    directory_operation(4),
+    directory_operation(5),
+    directory_operation(6),
+    directory_operation(7),
+    bdb_cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
-        ..crate::participant::phase_operation(8)
+        ..directory_operation(8)
     },
-    crate::participant::phase_operation(9),
-    cellule_runtime::registry::OperationDescriptor {
+    directory_operation(9),
+    bdb_cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
-        ..crate::participant::phase_operation(10)
+        ..directory_operation(10)
     },
-    cellule_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
-        ..crate::participant::phase_operation(11)
+        ..directory_operation(11)
     },
-    cellule_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
-        ..crate::participant::phase_operation(12)
+        ..directory_operation(12)
     },
 ];
-static QUERIES: [cellule_runtime::registry::OperationDescriptor; 6] = [
-    cellule_runtime::registry::OperationDescriptor {
+static QUERIES: [bdb_cellar_runtime::registry::OperationDescriptor; 6] = [
+    bdb_cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
-        ..crate::participant::phase_operation(1)
+        ..directory_operation(1)
     },
-    cellule_runtime::registry::OperationDescriptor {
-        output_limit: 64 * 1024,
+    bdb_cellar_runtime::registry::OperationDescriptor {
+        output_limit: 512 * 1024,
         codec_version: 2,
-        ..crate::participant::phase_operation(2)
+        ..directory_operation(2)
     },
-    cellule_runtime::registry::OperationDescriptor {
-        output_limit: 128 * 1024,
-        ..crate::participant::phase_operation(3)
+    bdb_cellar_runtime::registry::OperationDescriptor {
+        output_limit: 512 * 1024,
+        ..directory_operation(3)
     },
-    cellule_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
-        ..crate::participant::phase_operation(4)
+        ..directory_operation(4)
     },
-    cellule_runtime::registry::OperationDescriptor {
+    bdb_cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
         output_limit: crate::OPERATION_BYTES,
-        ..crate::participant::phase_operation(5)
+        ..directory_operation(5)
     },
-    crate::participant::phase_operation(6),
+    directory_operation(6),
 ];
 
 /// Immutable scope and coverage of one node in a table generation's directory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DirectorySpec {
+    pub key_encoding_version: u32,
     pub table_id: String,
     pub node_id: [u8; 16],
-    pub lower: [u8; 16],
-    pub upper: Option<[u8; 16]>,
+    pub lower: RangeKey,
+    pub upper: Option<RangeKey>,
     pub depth: u8,
 }
 
@@ -104,19 +116,22 @@ impl DirectorySpec {
     pub fn root(table_id: String) -> Self {
         Self {
             table_id,
+            key_encoding_version: bdb_keyspace::KEY_ENCODING_VERSION,
             node_id: [0; 16],
-            lower: [0; 16],
+            lower: RangeKey::minimum(),
             upper: None,
             depth: 0,
         }
     }
 
     fn valid(&self) -> bool {
-        self.depth < 128 && self.upper.is_none_or(|upper| self.lower < upper)
+        self.key_encoding_version == bdb_keyspace::KEY_ENCODING_VERSION
+            && self.depth < 128
+            && self.upper.clone().is_none_or(|upper| self.lower < upper)
     }
 
-    fn contains(&self, hash: [u8; 16]) -> bool {
-        hash >= self.lower && self.upper.is_none_or(|upper| hash < upper)
+    fn contains(&self, hash: RangeKey) -> bool {
+        hash >= self.lower && self.upper.clone().is_none_or(|upper| hash < upper)
     }
 }
 
@@ -154,7 +169,7 @@ pub struct DirectoryState {
 }
 
 pub(crate) struct DirectoryModule;
-impl cellule_runtime::registry::CellModule for DirectoryModule {
+impl bdb_cellar_runtime::registry::CellModule for DirectoryModule {
     const NAME: &'static str = MODULE;
     fn descriptor(&self) -> &'static ModuleDescriptor {
         static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
@@ -240,11 +255,7 @@ pub fn directory_target(account_id: &str, spec: &DirectorySpec) -> Result<CellTa
     target_for_tenant(account_target(account_id)?.tenant(), spec)
 }
 
-/// Install the directory schema during Cell bootstrap.
-pub fn initialize_directory(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(SCHEMA)?;
-    Ok(())
-}
+// Schema installation is performed by the compiled Cellar module migration.
 
 pub(crate) fn state(
     sql: impl FnOnce(&SqlBatch) -> Result<Vec<SqlResultSet>>,
@@ -255,7 +266,13 @@ pub(crate) fn state(
     ))?;
     match rows[0].rows.first().map(Vec::as_slice) {
         None => Ok(None),
-        Some([SqlValue::Blob(value)]) => Ok(Some(serde_json::from_slice(value)?)),
+        Some([SqlValue::Blob(value)]) => {
+            let state: DirectoryState = serde_json::from_slice(value)?;
+            if !state.spec.valid() {
+                return Err(Error::Command("unsupported or invalid directory contract"));
+            }
+            Ok(Some(state))
+        }
         _ => Err(Error::Command("invalid directory state")),
     }
 }
@@ -270,20 +287,23 @@ fn valid_ranges(spec: &DirectorySpec, ranges: &[RoutePagePartition]) -> bool {
     if !spec.valid() || ranges.is_empty() || ranges.len() > MAX_RANGES {
         return false;
     }
-    let mut lower = spec.lower;
+    let mut lower = spec.lower.clone();
     let mut ids = std::collections::HashSet::new();
     for (position, range) in ranges.iter().enumerate() {
         if range.lower != lower
             || range.epoch == 0
             || !ids.insert(range.partition_id)
-            || range.upper.is_some_and(|upper| upper <= range.lower)
+            || range
+                .upper
+                .clone()
+                .is_some_and(|upper| upper <= range.lower)
         {
             return false;
         }
         if position + 1 == ranges.len() {
             return range.upper == spec.upper;
         }
-        let Some(next) = range.upper else {
+        let Some(next) = range.upper.clone() else {
             return false;
         };
         lower = next;
@@ -305,14 +325,30 @@ fn insert_range(context: &CommandContext<'_, '_>, range: &RoutePagePartition) ->
 
 fn ranges(
     sql: impl FnOnce(&SqlBatch) -> Result<Vec<SqlResultSet>>,
-    lower: [u8; 16],
+    lower: RangeKey,
     limit: usize,
 ) -> Result<Vec<RoutePagePartition>> {
+    range_page(sql, lower, limit, false)
+}
+fn range_page(
+    sql: impl FnOnce(&SqlBatch) -> Result<Vec<SqlResultSet>>,
+    lower: RangeKey,
+    limit: usize,
+    reverse: bool,
+) -> Result<Vec<RoutePagePartition>> {
+    let (op, order) = if reverse {
+        ("<=", "DESC")
+    } else {
+        (">=", "ASC")
+    };
     let rows = sql(&statement(
-        "SELECT record FROM ddb_directory_ranges WHERE lower_bound >= ?1 ORDER BY lower_bound LIMIT ?2",
+        &format!(
+            "WITH eligible AS (SELECT lower_bound, record FROM ddb_directory_ranges WHERE lower_bound {op} ?1 ORDER BY lower_bound {order} LIMIT ?2), measured AS (SELECT lower_bound, record, ROW_NUMBER() OVER (ORDER BY lower_bound {order}) AS n, SUM(length(record)) OVER (ORDER BY lower_bound {order}) AS bytes FROM eligible) SELECT record FROM measured WHERE n = 1 OR bytes <= ?3 ORDER BY lower_bound {order}"
+        ),
         vec![
             SqlValue::Blob(lower.to_vec()),
             SqlValue::Integer(limit as i64),
+            SqlValue::Integer(PAGE_BYTES as i64),
         ],
     ))?;
     rows[0]
@@ -327,13 +363,13 @@ fn ranges(
 
 fn all_ranges(context: &CommandContext<'_, '_>) -> Result<Vec<RoutePagePartition>> {
     let mut result = Vec::new();
-    let mut lower = [0; 16];
+    let mut lower = RangeKey::minimum();
     loop {
         let page = ranges(|batch| context.sql(batch), lower, PAGE_SIZE)?;
         if page.is_empty() {
             break;
         }
-        let next = page.last().and_then(|range| range.upper);
+        let next = page.last().and_then(|range| range.upper.clone());
         result.extend(page);
         if result.len() > MAX_RANGES {
             return Err(Error::Command("directory exceeds range bound"));
@@ -382,7 +418,7 @@ impl Command for InstallDirectory {
         let mode = match &input.source {
             None if input.spec.depth == 0
                 && input.spec.node_id == [0; 16]
-                && input.spec.lower == [0; 16]
+                && input.spec.lower == RangeKey::minimum()
                 && input.spec.upper.is_none() =>
             {
                 DirectoryMode::Leaf
@@ -457,7 +493,8 @@ impl Query for ReadDirectory {
 /// Logical starting position and optional leaf-version fence for a route page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectoryPageInput {
-    pub hash: [u8; 16],
+    pub reverse: bool,
+    pub hash: RangeKey,
     pub expected_version: Option<u64>,
 }
 
@@ -485,7 +522,17 @@ impl Query for ReadDirectoryPage {
         let Some(state) = state(|batch| context.sql(batch))? else {
             return Ok(Json(DirectoryPage::Unavailable));
         };
-        if !state.spec.contains(input.hash) {
+        let contained = if input.reverse {
+            input.hash > state.spec.lower
+                && state
+                    .spec
+                    .upper
+                    .as_ref()
+                    .is_none_or(|upper| &input.hash <= upper)
+        } else {
+            state.spec.contains(input.hash.clone())
+        };
+        if !contained {
             return Ok(Json(DirectoryPage::Changed));
         }
         match state.mode {
@@ -503,7 +550,8 @@ impl Query for ReadDirectoryPage {
         {
             return Ok(Json(DirectoryPage::Changed));
         }
-        let rows = context.sql(&statement("SELECT lower_bound FROM ddb_directory_ranges WHERE lower_bound <= ?1 ORDER BY lower_bound DESC LIMIT 1",vec![SqlValue::Blob(input.hash.to_vec())]))?;
+        let op = if input.reverse { "<" } else { "<=" };
+        let rows = context.sql(&statement(&format!("SELECT lower_bound FROM ddb_directory_ranges WHERE lower_bound {op} ?1 ORDER BY lower_bound DESC LIMIT 1"),vec![SqlValue::Blob(input.hash.to_vec())]))?;
         let Some([SqlValue::Blob(lower)]) = rows[0].rows.first().map(Vec::as_slice) else {
             return Err(Error::Command("directory coverage is missing"));
         };
@@ -513,7 +561,7 @@ impl Query for ReadDirectoryPage {
             .map_err(|_| Error::Command("invalid directory bound"))?;
         Ok(Json(DirectoryPage::Leaf {
             version: state.version,
-            ranges: ranges(|batch| context.sql(batch), lower, PAGE_SIZE)?,
+            ranges: range_page(|batch| context.sql(batch), lower, PAGE_SIZE, input.reverse)?,
         }))
     }
 }

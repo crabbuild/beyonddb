@@ -1,6 +1,6 @@
 //! Bounded preparation discovery from one coordinator observation.
 
-use cellule_runtime::registry::{Query, QueryContext};
+use bdb_cellar_runtime::registry::{Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::{

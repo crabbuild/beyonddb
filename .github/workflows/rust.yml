@@ -28,5 +28,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Build server
         run: cargo build --bin beyonddb --locked
-      - name: Library tests
-        run: cargo test --lib --locked
+      - name: Cellar libraries and domain fixtures
+        run: >-
+          cargo test --workspace --lib --test account_cell --test cellar_sdk
+          --test cellar_transactions --test cellar_domain --test cellar_directories
+          --test embedded --test ranges --locked

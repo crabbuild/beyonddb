@@ -1,56 +1,38 @@
-use crate::*;
-use extenddb_core::types::TableKeyInfo;
-use extenddb_storage::TransactWriteOp;
-
-use super::transaction_driver::DropPhaseReplies;
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::client::{CellClient, Invocation, InvocationTransport};
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use extenddb_core::{
+    expression::{Expr, ExpressionMaps, PathElement},
+    types::{AttributeValue, Item, ReturnValuesOnConditionCheckFailure, TableKeyInfo},
+};
+use extenddb_storage::{
+    DataEngine, IdempotencyKey, TransactGetOp, TransactWriteOp, error::StorageError,
+};
+use http_body_util::{BodyExt, Full};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, AtomicU8, Ordering},
+    },
+};
 
 pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
-    owner: &cellule_host::CellNode,
-    registry: Arc<Registry>,
-    layout: CellStorageLayout,
+    base: &CellClient,
     provisioner: Arc<CellInitialPartitionProvisioner>,
     infos: [TableKeyInfo; 2],
 ) {
-    let session = SessionId::from_bytes([221; 16]);
-    let runtime =
-        CellRuntime::new(SqlWorkerPool::new(1, 8).unwrap(), 64 * 1024 * 1024, session).unwrap();
-    let signer = PeerSigner::new(
-        session,
-        registry.release_digest(),
-        SigningKey::from_bytes(&[221; 32]),
-    );
-    let signer = Arc::new(signer);
-    let verifier = Arc::new(PeerVerifier::new(
-        session,
-        registry.release_digest(),
-        signer.verifying_key(),
-    ));
-    let dispatcher = Arc::new(PeerDispatcher::new(
-        registry.clone(),
-        Arc::new(LocalRuntimePeerResolver {
-            runtime: owner.runtime(),
-            layout: layout.clone(),
-        }),
-        Arc::new(TestPeerAuthorizer),
-    ));
     let phase_client = |enabled, lost| {
-        CellClient::runtime_with_peer(
-            registry.clone(),
-            runtime.clone(),
-            layout.clone(),
-            signer.clone(),
-            PeerPrincipal {
-                issuer: "admission-test".into(),
-                subject: "admission".into(),
-                actions: vec!["beyonddb.cell.invoke".into()],
-            },
+        base.map_transport(|inner| {
             Arc::new(DropPhaseReplies {
-                verifier: verifier.clone(),
-                dispatcher: dispatcher.clone(),
+                inner,
                 lost,
                 enabled,
-            }),
-        )
+            })
+        })
     };
     // Drop only completion replies so BEGIN and COMMIT are acknowledged and
     // the fresh-write shortcut is exercised. A missing participant reply can
@@ -111,13 +93,10 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
     }
     let lost = Arc::new(std::sync::atomic::AtomicU8::new(0));
     let client = phase_client(127, lost.clone());
-    // The adapter must keep transaction decisions and intent barriers on the
-    // owner even when its caller supplies a snapshot-read capability.
-    let storage = CellStorage::new(
-        client.with_read_policy(cellule_runtime::client::ReadPolicy::Replica),
-        "us-east-1",
-    )
-    .with_transaction_coordinators(provisioner.clone());
+    // Native ingress routes all decision and intent reads to the authority.
+    // The replacement adapter exposes no replica-read override.
+    let storage = CellStorage::new(client.clone(), "us-east-1")
+        .with_transaction_coordinators(provisioner.clone());
     let maps = ExpressionMaps::default();
     let item = Item::from([("id".into(), AttributeValue::S("lost-admission".into()))]);
     let ops = infos
@@ -342,7 +321,6 @@ pub(super) async fn assert_lost_replies_and_canceled_token_reuse(
             Some(old_key)
         );
     }
-    runtime.shutdown().await.unwrap();
 }
 
 async fn assert_large_participant_payloads(storage: &CellStorage, infos: &[TableKeyInfo; 2]) {
@@ -413,4 +391,76 @@ async fn assert_large_participant_payloads(storage: &CellStorage, infos: &[Table
     for (i, key) in keys.iter().enumerate() {
         assert_eq!(storage.get_item(&infos[i % 2], key).await.unwrap(), None);
     }
+}
+
+pub(super) struct DropPhaseReplies {
+    pub(super) inner: Arc<dyn InvocationTransport>,
+    pub(super) lost: Arc<AtomicU8>,
+    pub(super) enabled: u8,
+}
+impl InvocationTransport for DropPhaseReplies {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
+        Box::pin(async move {
+            let phase = if invocation.mutation.is_some() {
+                match invocation.operation {
+                    12 | 21 | 28 | 57 => 1,
+                    3 | 11 => 2,
+                    1 => 4,
+                    13 | 22 => 8,
+                    5 => 16,
+                    10 => 128,
+                    14 => 32,
+                    23 => 64,
+                    _ => 0,
+                }
+            } else {
+                0
+            } & self.enabled;
+            let response = self.inner.call(invocation, request).await;
+            if response.status() == http::StatusCode::OK
+                && phase != 0
+                && self.lost.fetch_or(phase, Ordering::SeqCst) & phase == 0
+            {
+                // Complete the SDK body gate before losing the response. A
+                // durable rejection is uncertain too until its receipt is read.
+                response.into_body().collect().await.unwrap();
+                let body = Full::new(Bytes::new())
+                    .map_err(|never| -> std::io::Error { match never {} })
+                    .boxed_unsync();
+                let mut unknown = http::Response::new(body);
+                *unknown.status_mut() = http::StatusCode::SERVICE_UNAVAILABLE;
+                unknown
+            } else {
+                response
+            }
+        })
+    }
+}
+#[test]
+fn public_transactions_recover_lost_phases_large_payloads_and_canceled_tokens() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(local_node::wall_mutation().issued_at_ms));
+        let (node, client) =
+            local_node::start(directory.path(), clock, host.handle(), core.handle())
+                .await
+                .unwrap();
+        let (provisioner, infos) = transaction_fixture::mixed(&client).await;
+        assert_lost_replies_and_canceled_token_reuse(&client, provisioner, infos).await;
+        local_node::stop(node).await.unwrap();
+    });
 }

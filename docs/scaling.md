@@ -1,5 +1,10 @@
 # BeyondDB elastic Cell topology
 
+The Cellar migration now requires ordered `(PK, SK)` ranges and multiple data
+cells for every table. See [ordered cell partitioning](ordered-cell-partitioning.md)
+for the new contract and delivery gates. The HASH routing and optional single-cell
+models below describe the existing Cellule server, not the intended Cellar layout.
+
 ## At a glance
 
 ```text

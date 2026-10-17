@@ -1,12 +1,10 @@
 //! Routed capacity sweeps and recoverable data-range splits.
 
+use bdb_keyspace::RangeKey;
 use std::{sync::Arc, time::Duration};
 
-use cellule_host::CellNodeTaskGroup;
-use cellule_runtime::{
-    cell::catalog::CellCatalog,
-    client::{CellClient, InvocationError, ReadPolicy},
-};
+use crate::server::TaskGroup;
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::{BoxedFuture, error::StorageError};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -41,11 +39,15 @@ impl CellInitialPartitionProvisioner {
             ));
         }
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
         let (name, after_lower, index) = if let Some(cursor) = cursor.as_ref()
             && (cursor.after_lower.is_some() || cursor.index.is_some())
         {
-            (cursor.table_name.clone(), cursor.after_lower, cursor.index)
+            (
+                cursor.table_name.clone(),
+                cursor.after_lower.clone(),
+                cursor.index,
+            )
         } else {
             let page = client
                 .query::<ListTables>(
@@ -107,7 +109,7 @@ impl CellInitialPartitionProvisioner {
         };
         let input = Json(RoutePageInput {
             table_id: index_record.map_or_else(|| table.id.clone(), |index| index.id.clone()),
-            start_hash: None,
+            start_key: None,
             after_lower,
             expected_epoch: None,
         });
@@ -166,7 +168,7 @@ impl CellInitialPartitionProvisioner {
                         &account,
                         RoutePageInput {
                             table_id: table.id,
-                            start_hash: None,
+                            start_key: None,
                             after_lower: None,
                             expected_epoch: None,
                         },
@@ -197,7 +199,7 @@ impl CellInitialPartitionProvisioner {
         *cursor = Some(CapacityCursor {
             table_name: name,
             after_lower: if more {
-                partition.map(|partition| partition.lower)
+                partition.map(|partition| partition.lower.clone())
             } else {
                 None
             },
@@ -215,7 +217,7 @@ impl CellInitialPartitionProvisioner {
                 client,
                 &index.id,
                 partition.partition_id,
-                partition.lower,
+                partition.lower.clone(),
                 max_database_bytes,
             )
             .await
@@ -226,7 +228,7 @@ impl CellInitialPartitionProvisioner {
                 client,
                 &table.id,
                 partition.partition_id,
-                partition.lower,
+                partition.lower.clone(),
                 max_database_bytes,
             )
             .await
@@ -282,7 +284,7 @@ impl CellInitialPartitionProvisioner {
     /// Node shutdown cancels the loop before draining Cell owners.
     pub fn install_account_capacity_loop(
         self: &Arc<Self>,
-        tasks: &CellNodeTaskGroup,
+        tasks: &TaskGroup,
         account_id: String,
         client: CellClient,
         max_database_bytes: u64,
@@ -307,7 +309,7 @@ impl CellInitialPartitionProvisioner {
                     )
                     .await
             })
-            .map_err(provision_error)
+            .map_err(|error| StorageError::Internal(error.to_string()))
     }
 
     /// Inspect ranges in order and resume their leaf-owned transfers before splitting.
@@ -326,7 +328,7 @@ impl CellInitialPartitionProvisioner {
             ));
         }
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
         let mut after_lower = None;
         let mut expected_epoch = None;
         loop {
@@ -335,7 +337,7 @@ impl CellInitialPartitionProvisioner {
                 &account,
                 RoutePageInput {
                     table_id: table_id.to_owned(),
-                    start_hash: None,
+                    start_key: None,
                     after_lower,
                     expected_epoch,
                 },
@@ -356,7 +358,7 @@ impl CellInitialPartitionProvisioner {
                     ));
                 }
             };
-            let last_lower = partitions.last().map(|partition| partition.lower);
+            let last_lower = partitions.last().map(|partition| partition.lower.clone());
             for partition in partitions {
                 if let Some(plan) = self
                     .split_if_over_database_bytes(
@@ -391,7 +393,7 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         table_id: &str,
         source_partition_id: [u8; 16],
-        lower: [u8; 16],
+        lower: RangeKey,
         max_database_bytes: u64,
     ) -> Result<Option<SplitPlan>, StorageError> {
         if max_database_bytes == 0 {
@@ -400,8 +402,9 @@ impl CellInitialPartitionProvisioner {
             ));
         }
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
-        let directory = crate::route_directory_target(&client, &account, table_id, lower).await?;
+
+        let directory =
+            crate::route_directory_target(&client, &account, table_id, lower.clone()).await?;
         let input = DirectoryPartitionInput {
             table_id: table_id.into(),
             partition_id: source_partition_id,
@@ -465,15 +468,15 @@ impl CellInitialPartitionProvisioner {
         client: CellClient,
         table_id: &'a str,
         source_partition_id: [u8; 16],
-        lower: [u8; 16],
+        lower: RangeKey,
     ) -> BoxedFuture<'a, Result<SplitPlan, StorageError>> {
         // Split recovery nests admission and replay futures. Keep that state off
         // the capacity caller's stack, including retries of completed splits.
         Box::pin(async move {
             let account = account_target(account_id).map_err(provision_error)?;
-            let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
             let directory =
-                crate::route_directory_target(&client, &account, table_id, lower).await?;
+                crate::route_directory_target(&client, &account, table_id, lower.clone()).await?;
             let input = DirectoryPartitionInput {
                 table_id: table_id.into(),
                 partition_id: source_partition_id,
@@ -515,7 +518,7 @@ impl CellInitialPartitionProvisioner {
                 .spec;
             if source.table.id != table_id
                 || source.partition_id != source_partition_id
-                || source.lower.unwrap_or([0; 16]) != published.lower
+                || source.lower.clone().unwrap_or_else(RangeKey::minimum) != published.lower
                 || source.upper != published.upper
                 || source.epoch != published.epoch
             {
@@ -531,7 +534,16 @@ impl CellInitialPartitionProvisioner {
             let directory = self
                 .split_ready_directory(&client, account_id, table_id, lower)
                 .await?;
-            let plan = split_plan(&source)?;
+            let boundary = client
+                .query::<crate::PartitionSplitPoint>(&target, None, Json(()))
+                .await
+                .map_err(cell_error)?
+                .output
+                .0
+                .ok_or_else(|| {
+                    StorageError::LimitExceeded("partition has no separable ordered keys".into())
+                })?;
+            let plan = split_plan(&source, boundary)?;
             match client
                 .command::<BeginDirectoryTransfer>(
                     &directory,
@@ -562,15 +574,6 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<Option<SplitPlan>, StorageError> {
         let target =
             data_target(account_id, table_id, &source_partition_id).map_err(provision_error)?;
-        let catalog = CellCatalog::new(self.layout.clone(), target.tenant());
-        if catalog
-            .lookup(target.cell_id())
-            .await
-            .map_err(provision_error)?
-            .is_none()
-        {
-            return Ok(None);
-        }
         let status = client
             .query::<ReadPartitionState>(&target, None, Json(()))
             .await
@@ -594,7 +597,7 @@ impl CellInitialPartitionProvisioner {
         }
         let mut left = source.clone();
         left.partition_id = seal.left_partition_id;
-        left.upper = Some(seal.boundary);
+        left.upper = Some(seal.boundary.clone());
         left.epoch = seal.next_epoch;
         let mut right = source.clone();
         right.partition_id = seal.right_partition_id;
@@ -621,12 +624,12 @@ impl CellInitialPartitionProvisioner {
     ) -> Result<(), StorageError> {
         let (source, children, _) = split_contract(plan)?;
         let account = account_target(account_id).map_err(provision_error)?;
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
+
         let directory = crate::route_directory_target(
             &client,
             &account,
             &source.table.id,
-            source.lower.unwrap_or([0; 16]),
+            source.lower.clone().unwrap_or_else(RangeKey::minimum),
         )
         .await?;
         let pending = client
@@ -662,22 +665,7 @@ impl CellInitialPartitionProvisioner {
                 "split plan or published route changed".into(),
             ));
         }
-        let source_target = data_target(account_id, &source.table.id, &source.partition_id)
-            .map_err(provision_error)?;
-        let catalog = CellCatalog::new(self.layout.clone(), source_target.tenant());
-        if catalog
-            .lookup(source_target.cell_id())
-            .await
-            .map_err(provision_error)?
-            .is_none()
-        {
-            return Err(StorageError::Transient(
-                "split source is not cataloged".into(),
-            ));
-        }
         for spec in children {
-            self.reclaim_retired_ranges(&client, &account, Some(source_target.cell_id()))
-                .await?;
             let target = data_target(account_id, &spec.table.id, &spec.partition_id)
                 .map_err(provision_error)?;
             self.provision_range(&target, &client).await?;

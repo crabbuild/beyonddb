@@ -3,6 +3,7 @@
 //! The Cell's installed stream policy decides capture during the item command;
 //! an ExtendDB caller hint may be stale and cannot authorize or suppress it.
 
+mod query;
 mod routed;
 
 use super::batch::NoReturnMutation;
@@ -41,8 +42,8 @@ use crate::{
     TransactionFailure, TransactionOperation, TransactionOutcome, TransactionReadOutcome,
     UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
 };
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::InvocationError;
+use bdb_cellar_runtime::identity::CellTarget;
 
 impl CellStorage {
     async fn try_local_transaction_read(
@@ -105,8 +106,8 @@ impl CellStorage {
                             Err(transaction_canceled(index, reason, count, &[]))
                         }
                     },
-                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
-                        cellule_runtime::codec::CodecError::Limit,
+                    Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Codec(
+                        bdb_cellar_runtime::codec::CodecError::Limit,
                     ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }
@@ -134,8 +135,8 @@ impl CellStorage {
                     Ok(committed) => {
                         local_partition_transaction_read_result(committed.output.0, count)
                     }
-                    Err(InvocationError::NotStarted(cellule_runtime::Error::Codec(
-                        cellule_runtime::codec::CodecError::Limit,
+                    Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Codec(
+                        bdb_cellar_runtime::codec::CodecError::Limit,
                     ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }
@@ -689,117 +690,29 @@ impl DataEngine for CellStorage {
                 sort,
                 extra_range_equals,
             } = prepared?;
-            let global = key_info
-                .global_secondary_indexes
-                .iter()
-                .find(|index| Some(index.index_name.as_str()) == index_name.as_deref());
-            if global.is_some()
-                || key_info
-                    .key_schema
-                    .iter()
-                    .any(|key| key.key_type == KeyType::Range)
-            {
-                let owner = if let Some(index) = global {
-                    Some(
-                        self.index_owner(
-                            &key_info.account_id,
-                            &index.index_id,
-                            &index.key_schema,
-                            &partition_key,
-                        )
-                        .await?,
-                    )
-                } else {
-                    self.routed_owner(&key_info, &partition_key).await?
-                };
-                let epoch = owner.as_ref().map_or(0, |(_, epoch)| *epoch);
-                let limit = limit
-                    .map(|value| {
-                        u32::try_from(value).map_err(|_| {
-                            StorageError::Validation(
-                                "query limit is outside supported range".into(),
-                            )
-                        })
+            let limit = limit
+                .map(|value| {
+                    u32::try_from(value).map_err(|_| {
+                        StorageError::Validation("query limit is outside supported range".into())
                     })
-                    .transpose()?
-                    .unwrap_or(10_000);
-                let input = Json(PartitionQueryInput {
+                })
+                .transpose()?
+                .unwrap_or(10_000);
+            self.query_cells(
+                &key_info,
+                PartitionQueryInput {
+                    table_id: key_info.table_id.clone(),
+                    epoch: 0,
                     index_name,
-                    table_id: global
-                        .map_or(&key_info.table_id, |index| &index.index_id)
-                        .clone(),
-                    epoch,
                     partition_key,
                     sort,
                     extra_range_equals,
                     forward,
                     limit,
                     exclusive_start_key,
-                });
-                let output = if let Some((owner, _)) = owner {
-                    if global.is_some() {
-                        self.client
-                            .query::<crate::GlobalIndexQuery>(&owner, None, input)
-                            .await
-                            .map_err(cell_error)?
-                    } else {
-                        self.query_resolving::<PartitionQuery>(&owner, &key_info.account_id, input)
-                            .await?
-                    }
-                } else {
-                    let account = target(&key_info.account_id)?;
-                    if input.0.index_name.is_some() {
-                        self.query_resolving::<crate::secondary_index::QueryAccountIndex>(
-                            &account,
-                            &key_info.account_id,
-                            input,
-                        )
-                        .await?
-                    } else {
-                        self.query_resolving::<crate::QueryAccountItems>(
-                            &account,
-                            &key_info.account_id,
-                            input,
-                        )
-                        .await?
-                    }
-                };
-                return match output.output.0 {
-                    PartitionQueryOutcome::Page {
-                        items,
-                        last_evaluated_key,
-                    } => Ok((items, last_evaluated_key)),
-                    PartitionQueryOutcome::Conflict(_) => Err(StorageError::Transient(
-                        "query is waiting for transaction resolution".into(),
-                    )),
-                    PartitionQueryOutcome::InvalidKey | PartitionQueryOutcome::InvalidCondition => {
-                        Err(StorageError::Validation(
-                            "invalid Query key condition or continuation".into(),
-                        ))
-                    }
-                    PartitionQueryOutcome::InvalidLimit => Err(StorageError::Validation(
-                        "query limit must be positive".into(),
-                    )),
-                    PartitionQueryOutcome::NotInstalled
-                    | PartitionQueryOutcome::StaleRoute
-                    | PartitionQueryOutcome::Sealed
-                    | PartitionQueryOutcome::NotReady
-                    | PartitionQueryOutcome::WrongPartition => {
-                        self.invalidate_route_cache(&key_info.account_id, &key_info.table_id);
-                        Err(stale_partition())
-                    }
-                };
-            }
-            if let Some(start) = exclusive_start_key {
-                if start != partition_key {
-                    return Err(StorageError::Validation(
-                        "query continuation key does not match partition key".into(),
-                    ));
-                }
-                return Ok((Vec::new(), None));
-            }
-            let item = self.get_item(&key_info, &partition_key).await?;
-            Ok((item.into_iter().collect(), None))
+                },
+            )
+            .await
         })
     }
 
@@ -1055,17 +968,6 @@ fn scan_segment(
 fn segment_for_hash(hash: [u8; 16], total: u64) -> u64 {
     let prefix = u128::from_be_bytes(hash) >> 64;
     ((prefix * u128::from(total)) >> 64) as u64
-}
-
-fn segment_bounds(segment: u64, total: u64) -> ([u8; 16], Option<[u8; 16]>) {
-    let space = 1_u128 << 64;
-    let total = u128::from(total);
-    let start = (u128::from(segment) * space).div_ceil(total);
-    let end = ((u128::from(segment) + 1) * space).div_ceil(total);
-    (
-        (start << 64).to_be_bytes(),
-        (end < space).then(|| (end << 64).to_be_bytes()),
-    )
 }
 
 impl CellStorage {

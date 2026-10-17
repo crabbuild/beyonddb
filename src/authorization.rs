@@ -1,7 +1,7 @@
 //! Durable user and role policies and boundaries for ExtendDB authorization decisions.
 
-use cellule_runtime::client::{CellClient, InvocationError};
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_auth::policy::document::PolicyDocument;
 use extenddb_storage::BoxedFuture;
 use extenddb_storage::authorization_store::{AuthorizationStore, SessionData};

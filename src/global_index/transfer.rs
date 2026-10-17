@@ -1,6 +1,7 @@
 //! Fenced transfer of projection versions, images, and deletion tombstones.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_keyspace::RangeKey;
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +29,7 @@ impl GlobalIndexSplitPlan {
         let Some(next) = self.expected_epoch.checked_add(1) else {
             return false;
         };
-        let Some(boundary) = left.upper else {
+        let Some(boundary) = left.upper.clone() else {
             return false;
         };
         source.epoch > 0
@@ -45,9 +46,9 @@ impl GlobalIndexSplitPlan {
             && right.epoch == next
             && left.lower == source.lower
             && right.upper == source.upper
-            && right.lower == Some(boundary)
-            && boundary > source.lower.unwrap_or([0; 16])
-            && source.upper.is_none_or(|upper| boundary < upper)
+            && right.lower == Some(boundary.clone())
+            && boundary > source.lower.clone().unwrap_or_else(RangeKey::minimum)
+            && source.upper.clone().is_none_or(|upper| boundary < upper)
             && left.partition_id != right.partition_id
             && left.partition_id != source.partition_id
             && right.partition_id != source.partition_id

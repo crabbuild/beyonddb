@@ -1,117 +1,48 @@
-use crate::*;
-use beyonddb::{ReadCoordinatorResume, TableRecord, TransactionFailure};
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "transaction-driver".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
-    let account_id = "123456789012";
-    let account = account_target(account_id).unwrap();
-    let session = SessionId::from_bytes([180; 16]);
-    let directory = tempfile::TempDir::new().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("transaction-driver"),
-        *account.application().as_bytes(),
-    );
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 17).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::{
+    Error, MutationIdentity,
+    client::{CellClient, Invocation, InvocationAdmission, InvocationError, InvocationTransport},
+    identity::RequestId,
+    registry::Query,
+};
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use extenddb_core::types::AttributeValue;
+use http_body_util::Full;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, AtomicU8, Ordering},
+    },
+};
+fn identity(_: u8) -> MutationIdentity {
+    local_node::wall_mutation()
+}
+#[test]
+fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
         .unwrap();
-    let registry = application.registry();
-    let bootstrap = Bootstrap {
-        runtime: host.runtime(),
-        registry: &registry,
-        layout: &layout,
-        session,
-    };
-    let mut table_bytes = [180; 32];
-    table_bytes[..16].copy_from_slice(account.tenant().as_bytes());
-    let table = TableRecord {
-        table_class: Default::default(),
-        table_class_updates_ms: Vec::new(),
-        placement: beyonddb::TablePlacement::Routed {
-            initial_partitions: 2,
-        },
-        local_secondary_indexes: Vec::new(),
-        global_secondary_indexes: Vec::new(),
-        id: blake3::Hash::from_bytes(table_bytes).to_hex().to_string(),
-        created_at_ms: 1000,
-        table_name: "Driver".into(),
-        key_schema: vec![KeySchemaElement {
-            attribute_name: "id".into(),
-            key_type: KeyType::Hash,
-        }],
-        attribute_definitions: vec![AttributeDefinition {
-            attribute_name: "id".into(),
-            attribute_type: ScalarAttributeType::S,
-        }],
-        billing_mode: BillingMode::PayPerRequest,
-        provisioned_throughput: None,
-        deletion_protection_enabled: false,
-        pay_per_request_since_ms: Some(1000),
-        stream: None,
-    };
-    let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let storage = CellStorage::new(client.clone(), "us-east-1");
-    let boundary = [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let mut participants = Vec::new();
-    for (position, left) in [true, false].into_iter().enumerate() {
-        let partition_id = [u8::try_from(position + 1).unwrap(); 16];
-        let target = data_target(account_id, &table.id, &partition_id).unwrap();
-        bootstrap
-            .cell(
-                &target,
-                "beyonddb-data",
-                partition_id[0],
-                &directory.path().join(format!("data-{position}.sqlite")),
-                initialize_partition,
-            )
-            .await;
-        client
-            .command::<InstallPartition>(
-                &target,
-                identity(180),
-                Json(PartitionInstall::Serving(PartitionSpec {
-                    table: table.clone(),
-                    partition_id,
-                    lower: (!left).then_some(boundary),
-                    upper: left.then_some(boundary),
-                    epoch: 1,
-                })),
-            )
-            .await
-            .unwrap();
-        let mut item = key_in_range(&table.id, &table.key_schema, left, 1000);
-        item.insert("value".into(), AttributeValue::N("1".into()));
-        participants.push((
-            target,
-            CoordinatorParticipant {
-                target: CoordinatorParticipantTarget::Data {
-                    table_id: table.id.clone(),
-                    partition_id,
-                    epoch: 1,
-                },
-                operations: vec![IndexedTransactionOperation {
-                    index: u8::try_from(position).unwrap(),
-                    operation: TransactionOperation::Put(PutItemInput {
-                        table_name: table.table_name.clone(),
-                        table_id: table.id.clone(),
-                        item,
-                        condition: None,
-                    }),
-                }],
-            },
-        ));
-    }
-    participants.sort_by_key(|(target, _)| *target.cell_id().as_bytes());
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(AtomicI64::new(identity(1).issued_at_ms));
+    let (node, client) = local_node::start(directory.path(), clock, host.handle(), core.handle()).await.unwrap();
+    let fixture = transaction_fixture::table(&client, "Driver").await;
+    let table = fixture.table;
+    let storage = fixture.storage;
+    let mut participants = fixture.participants;
+    let account_id = "123456789012";
+    let mut completed = Vec::new();
     // Operation indexes deliberately oppose participant order.
     for (position, (_, participant)) in participants.iter_mut().enumerate() {
         participant.operations[0].index = u8::try_from(1 - position).unwrap();
@@ -119,18 +50,6 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
     for scenario in [180_u8, 181, 182, 183, 184, 185, 186, 187, 188] {
         let transaction_id = [scenario; 16];
         let coordinator = coordinator_target(account_id, &transaction_id).unwrap();
-        let mut coordinator_file = directory
-            .path()
-            .join(format!("coordinator-{scenario}.sqlite"));
-        let coordinator_handle = bootstrap
-            .cell(
-                &coordinator,
-                "beyonddb-coordinator",
-                scenario,
-                &coordinator_file,
-                initialize_coordinator,
-            )
-            .await;
         let mut request: Vec<_> = participants
             .iter()
             .map(|(_, participant)| participant.clone())
@@ -285,16 +204,7 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                 assert_eq!(remaining.len(), 1);
                 assert_eq!(remaining[0].position, 1);
                 assert_eq!(remaining[0].participant, request[1]);
-                coordinator_file = super::transaction_commit::assert_atomic_prepared_commit(
-                    &client,
-                    &bootstrap,
-                    &coordinator_handle,
-                    application.clone(),
-                    directory.path(),
-                    &participants[1],
-                    transaction_id,
-                )
-                .await;
+                super::transaction_commit::assert_atomic_prepared_commit(&client, &participants[1], transaction_id).await;
             }
         }
         let decision = if scenario == 181 {
@@ -306,71 +216,16 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             assert_eq!(second.as_ref().unwrap(), &CoordinatorDecision::Commit);
             first.unwrap()
         } else if scenario >= 185 {
-            let peer_session = SessionId::from_bytes([200; 16]);
-            let peer_runtime = CellRuntime::new(
-                SqlWorkerPool::new(1, 8).unwrap(),
-                16 * 1024 * 1024,
-                peer_session,
-            )
-            .unwrap();
-            let signer = PeerSigner::new(
-                peer_session,
-                registry.release_digest(),
-                SigningKey::from_bytes(&[200; 32]),
-            );
-            let lost = Arc::new(std::sync::atomic::AtomicU8::new(0));
-            let transport = DropPhaseReplies {
-                verifier: Arc::new(PeerVerifier::new(
-                    peer_session,
-                    registry.release_digest(),
-                    signer.verifying_key(),
-                )),
-                dispatcher: Arc::new(PeerDispatcher::new(
-                    registry.clone(),
-                    Arc::new(LocalRuntimePeerResolver {
-                        runtime: host.runtime(),
-                        layout: layout.clone(),
-                    }),
-                    Arc::new(TestPeerAuthorizer),
-                )),
-                lost: lost.clone(),
-                enabled: if scenario == 185 { 3 } else { 0 },
-            };
-            let transport: Arc<dyn PeerRoundTrip> = if scenario == 185 {
-                Arc::new(transport)
+            let lost = Arc::new(AtomicU8::new(0));
+            let remote_client = if scenario == 185 {
+                client.map_transport(|inner| Arc::new(super::public_transactions::DropPhaseReplies {inner, lost: lost.clone(), enabled: 3}))
             } else if scenario == 188 {
-                Arc::new(FinishDuringPayload {
-                    inner: transport,
-                    client: client.clone(),
-                    transaction_id,
-                    seen: lost.clone(),
-                })
+                client.map_transport(|inner| Arc::new(FinishDuringPayload {inner, client: client.clone(), transaction_id, seen: lost.clone()}))
             } else {
-                Arc::new(RefusePhase {
-                    inner: transport,
-                    // These scenarios send small participant payloads, so the
-                    // production adapter selects the bounded prepare opcode.
-                    command: 28,
-                    persistent: scenario == 187,
-                    winner: (scenario == 186).then(|| (client.clone(), transaction_id)),
-                    refused: lost.clone(),
-                })
+                client.with_admission(Arc::new(RefusePhase {command: 28, persistent: scenario == 187,
+                    winner: (scenario == 186).then(|| (client.clone(), transaction_id)), refused: lost.clone()}))
             };
-            let remote = CellStorage::new(
-                CellClient::runtime_with_peer(
-                    registry.clone(),
-                    peer_runtime.clone(),
-                    layout.clone(),
-                    Arc::new(signer),
-                    PeerPrincipal {
-                        issuer: "driver-test".into(),
-                        subject: "driver".into(),
-                        actions: vec!["beyonddb.cell.invoke".into()],
-                    },
-                    transport,
-                ),
-                "us-east-1",
-            );
+            let remote = CellStorage::new(remote_client, "local");
             let decision = remote
                 .resume_cross_cell_transaction(account_id, &transaction_id, transaction_id)
                 .await
@@ -384,7 +239,6 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     "scenario={scenario}"
                 );
             }
-            peer_runtime.shutdown().await.unwrap();
             decision
         } else {
             storage
@@ -433,24 +287,12 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
             .unwrap();
         let status = status.output.0.unwrap();
         assert_eq!(status.resolved_count, 2);
-        let database = rusqlite::Connection::open_with_flags(
-            &coordinator_file,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .unwrap();
-        let retained: (i64, i64) = database
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM ddb_transaction_payloads WHERE position >= 0), \
-             (SELECT COUNT(*) FROM ddb_coordinator_participants WHERE operation_chunks IS NULL)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            retained,
-            (0, 2),
-            "completed operation images must be released"
-        );
+        completed.push(transaction_id);
+        for position in 0..2 {
+            assert!(client.query::<ReadCoordinatorParticipant>(&coordinator, None, Json(ReadCoordinatorParticipantInput {
+                account_id: account_id.into(), transaction_id, routing_key: transaction_id.to_vec(), position, chunk: 0,
+            })).await.unwrap().output.is_none());
+        }
         for (position, (target, _)) in participants.iter().enumerate() {
             let outcome = transaction_command!(
                 client,
@@ -552,226 +394,90 @@ async fn driver_resumes_prepares_and_resolves_commit_condition_and_lock_failures
                     .unwrap();
             }
         }
-        if scenario == 188 {
-            drop(database);
-            coordinator_handle.drain().await.unwrap();
-        }
+
     }
     super::transaction_write_skew::assert_condition_checks_prevent_write_skew(
         &client,
         &storage,
-        &bootstrap,
-        directory.path(),
         &table,
         &participants,
     )
     .await;
-    super::transaction_recovery::assert_background_recovery(
-        &host,
-        application,
-        &bootstrap,
-        directory.path(),
-        &table,
-        &participants,
-    )
-    .await;
-}
-
-pub(super) struct DropPhaseReplies {
-    pub(super) verifier: Arc<PeerVerifier>,
-    pub(super) dispatcher: Arc<PeerDispatcher>,
-    pub(super) lost: Arc<std::sync::atomic::AtomicU8>,
-    pub(super) enabled: u8,
-}
-
-impl PeerRoundTrip for DropPhaseReplies {
-    fn send(
-        &self,
-        target: CellTarget,
-        request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        let verifier = self.verifier.clone();
-        let dispatcher = self.dispatcher.clone();
-        let lost = self.lost.clone();
-        let enabled = self.enabled;
-        Box::pin(async move {
-            use cellule_runtime::peer::wire::{mutation_request, peer_request};
-            let now_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis(),
-            )
-            .unwrap();
-            let verified = verifier.verify(&request, now_ms)?;
-            assert_eq!(verified.target(), &target);
-            let phase = match verified.operation() {
-                Some(peer_request::Operation::Mutate(mutation)) => match &mutation.operation {
-                    Some(mutation_request::Operation::CellCommand(command)) => {
-                        match command.command_id {
-                            12 | 21 | 28 | 57 => 1,
-                            3 | 11 => 2,
-                            1 => 4,
-                            13 | 22 => 8,
-                            5 => 16,
-                            // Separate bit lets fresh completion tests lose the
-                            // batched coordinator receipt without losing BEGIN.
-                            10 => 128,
-                            14 => 32,
-                            23 => 64,
-                            _ => 0,
-                        }
-                    }
-                    _ => 0,
-                },
-                _ => 0,
-            };
-            let phase = phase & enabled;
-            let response = dispatcher.dispatch_bytes(&verified, now_ms).await?;
-            if phase != 0 && lost.fetch_or(phase, Ordering::SeqCst) & phase == 0 {
-                return Err(cellule_runtime::Error::PeerTransportUnknown {
-                    context: "injected lost phase reply",
-                    // Neither SQLite FULL nor runtime capacity nested inside
-                    // a lost reply proves that a published phase was refused.
-                    source: if phase == 1 {
-                        Box::new(cellule_runtime::Error::Sqlite(
-                            cellule_ltx::rusqlite::Error::SqliteFailure(
-                                cellule_ltx::rusqlite::ffi::Error::new(
-                                    cellule_ltx::rusqlite::ffi::SQLITE_FULL,
-                                ),
-                                None,
-                            ),
-                        ))
-                    } else if phase == 2 {
-                        Box::new(cellule_runtime::Error::Capacity(
-                            "injected after publication",
-                        ))
-                    } else {
-                        Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
-                    },
-                });
-            }
-            Ok(response)
-        })
-    }
+    super::transaction_recovery::assert_background_recovery(&client, &table, &participants).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), local_node::stop(node)).await.unwrap().unwrap();
+    crate::offline_sqlite::assert_coordinator_write_payloads_collected(directory.path(), &completed);
+    });
 }
 
 struct RefusePhase {
-    inner: DropPhaseReplies,
     command: u32,
     persistent: bool,
     winner: Option<(CellClient, [u8; 16])>,
-    refused: Arc<std::sync::atomic::AtomicU8>,
+    refused: Arc<AtomicU8>,
 }
-
-impl PeerRoundTrip for RefusePhase {
-    fn send(
-        &self,
-        target: CellTarget,
-        request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        let verifier = self.inner.verifier.clone();
-        let dispatcher = self.inner.dispatcher.clone();
-        let winner = self.winner.clone();
-        let command = self.command;
-        let persistent = self.persistent;
-        let refused = self.refused.clone();
+impl InvocationAdmission for RefusePhase {
+    fn check<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            use cellule_runtime::peer::wire::{mutation_request, peer_request};
-            let now_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis(),
-            )
-            .unwrap();
-            let verified = verifier.verify(&request, now_ms)?;
-            assert_eq!(verified.target(), &target);
-            let selected = matches!(verified.operation(),
-                Some(peer_request::Operation::Mutate(mutation)) if matches!(&mutation.operation,
-                    Some(mutation_request::Operation::CellCommand(input)) if input.command_id == command));
-            if selected && (persistent || refused.swap(1, Ordering::SeqCst) == 0) {
-                refused.store(1, Ordering::SeqCst);
-                if let Some((client, transaction_id)) = winner {
-                    let storage = CellStorage::new(client, "us-east-1");
+            if invocation.mutation.is_some()
+                && invocation.operation == self.command
+                && (self.persistent || self.refused.swap(1, Ordering::SeqCst) == 0)
+            {
+                self.refused.store(1, Ordering::SeqCst);
+                if let Some((client, transaction_id)) = &self.winner {
                     assert_eq!(
-                        storage
+                        CellStorage::new(client.clone(), "local")
                             .resume_cross_cell_transaction(
                                 "123456789012",
-                                &transaction_id,
-                                transaction_id
+                                transaction_id,
+                                *transaction_id
                             )
                             .await
                             .unwrap(),
                         CoordinatorDecision::Commit
                     );
                 }
-                // This attempt was never submitted. A competing driver may
-                // nevertheless have committed before the refusal reaches it.
-                return Err(cellule_runtime::Error::Capacity(
-                    "injected before submission",
-                ));
+                // This attempt has not entered ingress. The other driver may
+                // already have decided; that decision still takes precedence.
+                return Err(Error::Capacity("injected before SDK submission"));
             }
-            dispatcher.dispatch_bytes(&verified, now_ms).await
+            Ok(())
         })
     }
 }
-
 struct FinishDuringPayload {
-    inner: DropPhaseReplies,
+    inner: Arc<dyn InvocationTransport>,
     client: CellClient,
     transaction_id: [u8; 16],
-    seen: Arc<std::sync::atomic::AtomicU8>,
+    seen: Arc<AtomicU8>,
 }
-
-impl PeerRoundTrip for FinishDuringPayload {
-    fn send(
-        &self,
-        target: CellTarget,
-        request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        let verifier = self.inner.verifier.clone();
-        let dispatcher = self.inner.dispatcher.clone();
-        let client = self.client.clone();
-        let transaction_id = self.transaction_id;
-        let seen = self.seen.clone();
+impl InvocationTransport for FinishDuringPayload {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
         Box::pin(async move {
-            use cellule_runtime::{
-                peer::wire::{peer_request, read_request},
-                registry::Query,
-            };
-            let now_ms = identity(188).issued_at_ms;
-            let verified = verifier.verify(&request, now_ms)?;
-            let coordinator = coordinator_target("123456789012", &transaction_id).unwrap();
-            let chunk = target == coordinator
-                && matches!(verified.operation(),
-                Some(peer_request::Operation::Read(read)) if matches!(&read.operation,
-                    Some(read_request::Operation::CellQuery(query)) if query.query_id == ReadCoordinatorParticipant::ID));
-            // Deliver the first piece, then let another driver finish and compact
-            // before the paused driver's second piece reaches the owner.
-            if chunk && seen.fetch_add(1, Ordering::SeqCst) == 1 {
+            let coordinator = coordinator_target("123456789012", &self.transaction_id).unwrap();
+            let chunk = invocation.target == coordinator
+                && invocation.mutation.is_none()
+                && invocation.operation == ReadCoordinatorParticipant::ID;
+            if chunk && self.seen.fetch_add(1, Ordering::SeqCst) == 1 {
                 assert_eq!(
-                    CellStorage::new(client, "us-east-1")
+                    CellStorage::new(self.client.clone(), "local")
                         .resume_cross_cell_transaction(
                             "123456789012",
-                            &transaction_id,
-                            transaction_id
+                            &self.transaction_id,
+                            self.transaction_id
                         )
                         .await
                         .unwrap(),
                     CoordinatorDecision::Commit
                 );
             }
-            dispatcher.dispatch_bytes(&verified, now_ms).await
+            self.inner.call(invocation, request).await
         })
     }
 }

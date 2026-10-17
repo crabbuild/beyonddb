@@ -1,76 +1,66 @@
-use super::coordinator_checkpoints::owner;
-use crate::*;
-use beyonddb::{
-    BeginReadResultRelease, ReadAccountTransactionResult, ReadPartitionTransactionResult,
-    ReadTransactionResultInput, ReleaseAccountTransactionReads, TransactionReadResult,
+//! Acknowledged transactional read cleanup across fresh embedded SDK owners.
+use crate::{cellar_node, local_node, offline_sqlite, replica_snapshot, transaction_fixture};
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::{CellClient, InvocationError},
+    identity::CellTarget,
 };
+use beyonddb::*;
+use extenddb_core::{
+    expression::ExpressionMaps,
+    types::{AttributeValue, Item},
+};
+use extenddb_storage::{DataEngine, TransactGetOp};
+use std::sync::Arc;
 
 const ACCOUNT: &str = "123456789012";
-
 fn mutation() -> MutationIdentity {
-    let mut value = identity(251);
-    value.request_id = RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-    value
+    local_node::wall_mutation()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn acknowledged_read_cleanup_survives_restart_before_and_after_participant_delete() {
-    for delete_first in [false, true] {
-        cleanup_restart(delete_first).await;
-    }
+#[test]
+fn acknowledged_read_cleanup_survives_restart_before_and_after_participant_delete() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        for delete_first in [false, true] {
+            cleanup_restart(delete_first, host.handle(), core.handle()).await;
+        }
+    });
 }
 
-async fn cleanup_restart(delete_first: bool) {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "read-release".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+async fn cleanup_restart(
+    delete_first: bool,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+) {
+    let application = local_node::application().unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let account = account_target(ACCOUNT).unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("read-release"),
-        *account.application().as_bytes(),
-    );
-    let nodes = NodeDirectory::new(
-        layout.clone(),
-        Digest::from_bytes([201; 32]),
-        Digest::from_bytes([202; 32]),
-        application.registry().release_digest(),
-    );
-    let (host, provisioner, client, storage) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([251; 16]),
-        &directory.path().join("first"),
-    );
-    provisioner.admit_account(ACCOUNT).await.unwrap();
-    let routed =
-        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
-    let key = Item::from([("id".into(), AttributeValue::S("saved".into()))]);
-    let mut participants = Vec::new();
-    let mut infos = Vec::new();
-    for (index, backend) in [&storage, &routed].into_iter().enumerate() {
-        let name = format!("Images{index}");
-        let table = backend
-            .create_table(
-                ACCOUNT,
-                serde_json::from_value(serde_json::json!({
-                    "TableName": name, "KeySchema": [{"AttributeName":"id","KeyType":"HASH"}],
-                    "AttributeDefinitions":[{"AttributeName":"id","AttributeType":"S"}],
-                    "BillingMode":"PAY_PER_REQUEST"
-                }))
-                .unwrap(),
-            )
+    let first_dir = directory.path().join("read-release-a");
+    let bucket =
+        cellar::bucket::Bucket::open_dev(&directory.path().join("objects.sqlite")).unwrap();
+    let (node, client) =
+        cellar_node::start(application.clone(), &first_dir, host, core, bucket.clone())
             .await
             .unwrap();
-        let info = backend.table_key_info(ACCOUNT, &name).await.unwrap();
-        backend
+    let account = account_target(ACCOUNT).unwrap();
+    let (provisioner, infos) = transaction_fixture::mixed(&client).await;
+    let storage =
+        CellStorage::new(client.clone(), "local").with_transaction_coordinators(provisioner);
+    let key = Item::from([("id".into(), AttributeValue::S("saved".into()))]);
+    let mut participants = Vec::new();
+    for (index, info) in infos.iter().enumerate() {
+        storage
             .put_item(
-                &info,
+                info,
                 key.clone(),
                 false,
                 None,
@@ -79,22 +69,8 @@ async fn cleanup_restart(delete_first: bool) {
             )
             .await
             .unwrap();
-        let route = crate::single_leaf_route(&client, &account, &table.table_id).await;
-        let (target, participant) = match route {
-            None => (account.clone(), CoordinatorParticipantTarget::Account),
-            Some(route) => {
-                let spec = &route.partitions[0];
-                (
-                    data_target(ACCOUNT, &info.table_id, &spec.partition_id).unwrap(),
-                    CoordinatorParticipantTarget::Data {
-                        table_id: info.table_id.clone(),
-                        partition_id: spec.partition_id,
-                        epoch: spec.epoch,
-                    },
-                )
-            }
-        };
-        infos.push(info.clone());
+        let (target, participant) =
+            transaction_fixture::participant_for_key(&client, info, &key).await;
         participants.push((
             target,
             CoordinatorParticipant {
@@ -102,7 +78,7 @@ async fn cleanup_restart(delete_first: bool) {
                 operations: vec![IndexedTransactionOperation {
                     index: index as u8,
                     operation: TransactionOperation::Read(GetItemInput {
-                        table_name: name,
+                        table_name: info.table_name.clone(),
                         table_id: info.table_id.clone(),
                         key: key.clone(),
                     }),
@@ -122,37 +98,30 @@ async fn cleanup_restart(delete_first: bool) {
         storage.transact_get_items(&reads).await.unwrap(),
         vec![Some(key.clone()), Some(key.clone())]
     );
-    for (target, _) in &participants {
-        let cell_directory = directory.path().join("first").join(
-            blake3::Hash::from_bytes(*target.cell_id().as_bytes())
-                .to_hex()
-                .as_str(),
-        );
-        let files: Vec<_> = std::fs::read_dir(cell_directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "sqlite"))
-            .collect();
-        assert_eq!(files.len(), 1);
-        let database = rusqlite::Connection::open_with_flags(
-            &files[0],
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
+    let second_dir = directory.path().join("read-release-b");
+    let (successor, next) =
+        cellar_node::start(application.clone(), &second_dir, host, core, bucket.clone())
+            .await
+            .unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff)
+        .await
         .unwrap();
-        assert_eq!(
-            database
-                .query_row("SELECT COUNT(*) FROM ddb_transaction_reads", [], |row| row
-                    .get::<_, i64>(
-                    0
-                ))
-                .unwrap(),
-            0,
-            "a returned public transaction must release saved images"
-        );
-    }
-
+    // Handoff removes local replica files. Restore inspection copies through
+    // the SDK instead of opening an owner's live sparse cache.
+    let inspection = replica_snapshot::restore(&bucket, host).await;
+    offline_sqlite::assert_read_images_collected(inspection.path());
+    std::fs::remove_dir_all(first_dir).unwrap();
+    let node = successor;
+    let client = next;
+    let provisioner = Arc::new(
+        CellInitialPartitionProvisioner::new(client.clone(), application.clone())
+            .with_initial_partition_count(2)
+            .unwrap(),
+    );
+    let storage = CellStorage::new(client.clone(), "local")
+        .with_transaction_coordinators(provisioner.clone());
     let id = [251; 16];
-    provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();
+    provisioner.ensure(&client, ACCOUNT, &id).await.unwrap();
     let coordinator = coordinator_target(ACCOUNT, &id).unwrap();
     let read = ReadCrossCellTransactionInput {
         account_id: ACCOUNT.into(),
@@ -203,35 +172,50 @@ async fn cleanup_restart(delete_first: bool) {
             .await,
         Err(InvocationError::Rejected(_))
     ));
-    // A later shard forces recovery to release this settled coordinator in the
-    // four-slot fixture, regardless of the public read's random routing key.
+    // Visit every registered shard while the committed read has no cleanup
+    // acknowledgement. A later acknowledgement must become discoverable even
+    // after recovery has already observed this coordinator as settled.
     let later_key = (0_u32..100_000)
         .map(u32::to_be_bytes)
         .find(|key| coordinator_target(ACCOUNT, key).unwrap().partition() > coordinator.partition())
         .unwrap();
     provisioner
-        .admit_coordinator(ACCOUNT, &later_key)
+        .ensure(&client, ACCOUNT, &later_key)
         .await
         .unwrap();
-    // Record a settled root before acknowledgement: the later cleanup intent
-    // must invalidate that checkpoint and become visible to startup recovery.
-    provisioner
-        .recover_registered_coordinators(ACCOUNT, &client, &storage, &nodes)
-        .await
-        .unwrap();
-    let released = CellAuthority::new(layout.clone())
-        .load(coordinator.cell_id())
+    let mut recovery = TransactionRecovery::new(Arc::new(storage), ACCOUNT.into()).unwrap();
+    let shards = client
+        .query::<ListCoordinatorShards>(
+            &account,
+            None,
+            Json(ListCoordinatorShardsInput {
+                account_id: ACCOUNT.into(),
+                after: None,
+                limit: 100,
+            }),
+        )
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(
-        released.value().state,
-        cellule_runtime::control::ControlState::Idle
+        .output
+        .0;
+    for _ in 0..=shards.len() {
+        recovery.step().await.unwrap();
+    }
+    assert!(
+        client
+            .query::<ReadPendingTransactionBoundary>(&coordinator, None, Json(()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .is_none()
     );
-    assert!(released.value().owner.is_none());
-    // local_runtime never restores Idle roots; raw commands must arrange
-    // ownership, just as the serving resolver does before dispatch.
-    provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();
+    for (target, _) in &participants {
+        assert_eq!(
+            saved(&client, target, &coordinator, id).await,
+            TransactionReadResult::Item(Some(key.clone()))
+        );
+    }
     client
         .command::<BeginReadResultRelease>(&coordinator, mutation(), Json(read.clone()))
         .await
@@ -271,19 +255,58 @@ async fn cleanup_restart(delete_first: bool) {
         );
         // Deliberately omit the coordinator receipt, as if the response was lost.
     }
-    host.shutdown().await.unwrap();
-    let (host, provisioner, client, storage) = owner(
-        &application,
-        &layout,
-        SessionId::from_bytes([252; 16]),
-        &directory.path().join("restored"),
-    );
-    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
-    provisioner
-        .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
+    let (restored, restored_client) = cellar_node::start(
+        application.clone(),
+        &directory.path().join("read-release-c"),
+        host,
+        core,
+        bucket.clone(),
+    )
+    .await
+    .unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff)
         .await
         .unwrap();
-    provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();
+    std::fs::remove_dir_all(second_dir).unwrap();
+    let client = restored_client;
+    // Inspect the recovered record before a worker or public read can help it.
+    let recovered = client
+        .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
+        .await
+        .unwrap();
+    assert_eq!(recovered.output.0.unwrap().unreleased_read_results, 2);
+    for (target, _) in &participants {
+        assert_eq!(
+            saved(&client, target, &coordinator, id).await,
+            if delete_first && *target == account {
+                TransactionReadResult::Unavailable
+            } else {
+                TransactionReadResult::Item(Some(key.clone()))
+            }
+        );
+    }
+    let mut recovery = TransactionRecovery::new(
+        Arc::new(CellStorage::new(client.clone(), "local")),
+        ACCOUNT.into(),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            recovery.step().await.unwrap();
+            let status = client
+                .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap();
+            if status.unreleased_read_results == 0 {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
     let status = client
         .query::<ReadCrossCellTransaction>(&coordinator, None, Json(read.clone()))
         .await
@@ -378,7 +401,12 @@ async fn cleanup_restart(delete_first: bool) {
             .0
             .is_none()
     );
-    host.shutdown().await.unwrap();
+    cellar_node::stop(restored, cellar::sdk::ShutdownMode::Preserve)
+        .await
+        .unwrap();
+    let inspection = replica_snapshot::restore(&bucket, host).await;
+    offline_sqlite::assert_read_images_collected(inspection.path());
+    offline_sqlite::assert_coordinator_write_payloads_collected(inspection.path(), &[id]);
 }
 
 async fn saved(

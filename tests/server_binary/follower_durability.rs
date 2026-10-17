@@ -1,49 +1,65 @@
+//! Withhold both native bundle and LTX uploads, then recover follower rows.
+use crate::streams::streams_cli;
 use crate::*;
-
-use std::sync::{Arc, Mutex};
-
-use axum::{body::Body, extract::State, http::Request, response::Response};
-use beyonddb::{APPLICATION_ID, Beyonddb};
-use cellule_app::CellApplication;
-use cellule_peer_http::{LoadedPeerTls, PeerHttpRoundTrip};
-use cellule_runtime::{
-    Digest,
-    client::CellClient,
-    control::authority::CellAuthority,
-    ltx::CellStorageLayout,
-    node::NodeDirectory,
-    peer::{PeerPrincipal, PeerSigner},
-    registry::BuildDescriptor,
+use axum::{
+    body::Body,
+    extract::State,
+    http::{Request, StatusCode},
+    response::Response,
 };
-use cellule_store::Store;
-use tokio_util::sync::CancellationToken;
+use cellar::{
+    bucket::{Bucket, StorageBackend},
+    management::{FleetClient, NodeAction, PageRequest},
+    ownership_store::BucketOwnership,
+    sdk::{
+        ExecutionDomain, ReplicaStorage, ReplicaStorageOptions, Replication, ReplicationOptions,
+    },
+};
+use futures_util::TryStreamExt;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone)]
 struct PublicationBarrier {
     upstream: SocketAddr,
     client: reqwest::Client,
-    cell: Arc<Mutex<Option<String>>>,
-    blocked: CancellationToken,
-    release: CancellationToken,
+    gate: Arc<Mutex<UploadGate>>,
 }
-
+#[derive(Default)]
+struct UploadGate {
+    enabled: bool,
+    forwarding: usize,
+    rejected: usize,
+}
+struct Forwarding(Arc<Mutex<UploadGate>>);
+impl Drop for Forwarding {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().forwarding -= 1;
+    }
+}
 async fn proxy(State(barrier): State<PublicationBarrier>, request: Request<Body>) -> Response {
     let (parts, body) = request.into_parts();
     let path = parts.uri.path_and_query().unwrap().as_str();
-    let blocked = matches!(parts.method.as_str(), "PUT" | "POST")
-        && barrier
-            .cell
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|cell| path.contains(cell) && path.contains("/objects/"));
+    let payload = matches!(parts.method.as_str(), "PUT" | "POST")
+        && ((path.contains("/cells/") && path.contains("/ltx/"))
+            || (path.contains("/log/") && path.contains("/bundle/")));
+    let _forwarding = if payload {
+        let mut gate = barrier.gate.lock().unwrap();
+        if gate.enabled {
+            gate.rejected += 1;
+            // Never queue a body that could be forwarded after the crash.
+            let mut response = Response::new(Body::from("withheld bucket payload"));
+            *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            return response;
+        }
+        gate.forwarding += 1;
+        Some(Forwarding(barrier.gate.clone()))
+    } else {
+        None
+    };
     let body = axum::body::to_bytes(body, 64 << 20).await.unwrap();
-    if blocked {
-        barrier.blocked.cancel();
-        barrier.release.cancelled().await;
-    }
-    // Preserve the signed Host, URI, headers, and body while changing only the
-    // connection destination. RustFS still validates the original SigV4 request.
     let response = barrier
         .client
         .request(parts.method, format!("http://{}{path}", barrier.upstream))
@@ -61,136 +77,129 @@ async fn proxy(State(barrier): State<PublicationBarrier>, request: Request<Body>
     result
 }
 
-fn issue_certificate(root: &Path, name: &str) {
-    run(Command::new("openssl")
-        .args(["genpkey", "-algorithm", "ED25519", "-out"])
-        .arg(root.join(format!("{name}.key"))));
-    run(Command::new("openssl")
-        .args(["req", "-new", "-subj", "/CN=localhost", "-key"])
-        .arg(root.join(format!("{name}.key")))
-        .arg("-out")
-        .arg(root.join(format!("{name}.csr"))));
-    run(Command::new("openssl")
-        .args(["x509", "-req", "-days", "1", "-CAcreateserial", "-in"])
-        .arg(root.join(format!("{name}.csr")))
-        .arg("-CA")
-        .arg(root.join("ca.crt"))
-        .arg("-CAkey")
-        .arg(root.join("ca.key"))
-        .arg("-extfile")
-        .arg(root.join("peer.ext"))
-        .arg("-out")
-        .arg(root.join(format!("{name}.crt"))));
-}
-
-fn now_ms() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
+fn observation_bucket(s3: SocketAddr, prefix: &str) -> Bucket {
+    let store = Arc::new(
+        object_store::aws::AmazonS3Builder::new()
+            .with_bucket_name("beyonddb-test")
+            .with_region("us-east-1")
+            .with_endpoint(format!("http://{s3}"))
+            .with_allow_http(true)
+            .with_access_key_id("crab")
+            .with_secret_access_key("crab")
+            .build()
+            .unwrap(),
+    );
+    Bucket::from_clients(
+        store.clone(),
+        store.clone(),
+        store,
+        StorageBackend::S3,
+        "beyonddb-test".into(),
+        prefix.into(),
     )
     .unwrap()
+}
+async fn lease(bucket: &Bucket, node: &str) -> serde_json::Value {
+    // Read-only diagnostic observation. SDK code performs every ownership and
+    // folded-log transition; the fixture never writes their records.
+    let (bytes, _) = bucket
+        .get(&format!("nodes/{node}.json"))
+        .await
+        .unwrap()
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+async fn payload_objects(bucket: &Bucket) -> BTreeMap<String, (Option<String>, u64)> {
+    let prefix = object_store::path::Path::from(bucket.prefix.clone());
+    let mut listed = bucket.store.list(Some(&prefix));
+    let mut result = BTreeMap::new();
+    while let Some(object) = listed.try_next().await.unwrap() {
+        let key = object.location.as_ref();
+        if !key.contains("/ltx/") && !key.contains("/bundle/") {
+            continue;
+        }
+        assert!(
+            result.len() < 512,
+            "private fixture payload inventory exceeded bound"
+        );
+        result.insert(object.location.to_string(), (object.e_tag, object.size));
+    }
+    result
+}
+async fn published_source(bucket: &Bucket) -> Option<String> {
+    let files = tempfile::tempdir().unwrap();
+    let domain = ExecutionDomain::new(tokio::runtime::Handle::current());
+    let found = domain
+        .run(async {
+            let replication = Replication::start(
+                &files.path().join("inspection"),
+                ReplicaStorage::new(
+                    bucket.store.clone(),
+                    ReplicaStorageOptions {
+                        prefix: bucket.prefix.clone(),
+                        ..Default::default()
+                    },
+                )?,
+                ReplicationOptions {
+                    compaction: None,
+                    ..Default::default()
+                },
+            )?;
+            let prefixes = bucket.common_prefixes("cells/").await?;
+            anyhow::ensure!(
+                prefixes.len() < 128,
+                "private fixture scope inventory exceeded bound"
+            );
+            let mut found = None;
+            let mut data_cells = 0;
+            for prefix in prefixes {
+                let scope = prefix.strip_prefix("cells/").unwrap().trim_end_matches('/');
+                if !scope.starts_with("beyonddb-data:") {
+                    continue;
+                }
+                data_cells += 1;
+                if let Some(snapshot) = replication.restore_snapshot(scope).await? {
+                    // A non-owning complete SDK snapshot, never the live sparse file.
+                    let connection = rusqlite::Connection::open_with_flags(
+                        snapshot.path(),
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )?;
+                    let count: u64 = connection.query_row(
+                        "SELECT COUNT(*) FROM ddb_partition_items",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if count > 0 {
+                        anyhow::ensure!(
+                            count == 1 && found.is_none(),
+                            "warmup has unexpected data owners"
+                        );
+                        found = Some(scope.to_owned());
+                    }
+                }
+            }
+            anyhow::ensure!(
+                data_cells == 2,
+                "public table must have two installed data cells"
+            );
+            Ok::<_, anyhow::Error>(found)
+        })
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), domain.shutdown())
+        .await
+        .unwrap();
+    found.unwrap().unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
 async fn acknowledged_untiered_item_survives_owner_process_kill() {
-    let mut fixture = process_fixture(1).await;
-    stop(&mut fixture.child, &fixture.log);
-    let root = fixture.root.path();
-    let barrier = PublicationBarrier {
-        upstream: fixture.s3,
-        client: reqwest::Client::new(),
-        cell: Arc::new(Mutex::new(None)),
-        blocked: CancellationToken::new(),
-        release: CancellationToken::new(),
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_address = listener.local_addr().unwrap();
-    let router = axum::Router::new()
-        .fallback(proxy)
-        .with_state(barrier.clone());
-    let proxy_server = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
+    let mut fixture = process_fixture_with_cache(2, true).await;
     let mut config: serde_json::Value =
         serde_json::from_slice(&fs::read(&fixture.config).unwrap()).unwrap();
-    config["follower_store_bytes"] = json!(1_u64 << 30);
-    config["follower_durability_enabled"] = json!(true);
-    config["auth_cache_enabled"] = json!(true);
-    config["runtime_metrics_file"] = json!(root.join("owner-metrics.json"));
-    fs::write(&fixture.config, config.to_string()).unwrap();
-    let mut followers = Vec::new();
-    for name in ["follower-a", "follower-b"] {
-        issue_certificate(root, name);
-        let peer = free_addr();
-        let public = free_addr();
-        let mut next = config.clone();
-        next["node_id"] = json!(uuid::Uuid::now_v7());
-        next["data_dir"] = json!(root.join(name));
-        next["peer_bind"] = json!(peer);
-        next["peer_endpoint"] = json!(format!("https://{peer}"));
-        next["public_bind"] = json!(public);
-        next["public_endpoint"] = json!(format!("http://{public}"));
-        next["peer_certificate"] = json!(root.join(format!("{name}.crt")));
-        next["peer_private_key"] = json!(root.join(format!("{name}.key")));
-        next["owned_accounts"] = json!([]);
-        next["owned_access_keys"] = json!([]);
-        next["bootstrap"] = serde_json::Value::Null;
-        next["runtime_metrics_file"] = json!(root.join(format!("{name}-metrics.json")));
-        let path = root.join(format!("{name}.json"));
-        let log = root.join(format!("{name}.log"));
-        fs::write(&path, next.to_string()).unwrap();
-        let child = start(&path, &log, false, proxy_address);
-        followers.push((child, path, log, peer, public));
-    }
-    fixture.child = start(&fixture.config, &fixture.log, false, proxy_address);
-    wait_healthy(&mut fixture.child, fixture.public, &fixture.log);
-    for (child, _, log, _, public) in &mut followers {
-        wait_healthy(child, *public, log);
-    }
-    let tls = LoadedPeerTls::load(
-        &root.join("peer.crt"),
-        &root.join("peer.key"),
-        &root.join("ca.crt"),
-        "localhost",
-    )
-    .unwrap();
-    let application = Beyonddb::compile(BuildDescriptor {
-        source_revision: option_env!("BEYONDDB_SOURCE_REVISION")
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                blake3::hash(include_bytes!("../../src/bin/beyonddb.rs"))
-                    .to_hex()
-                    .to_string()
-            }),
-        cargo_lock_digest: Digest::from_bytes(
-            *blake3::hash(include_bytes!("../../Cargo.lock")).as_bytes(),
-        ),
-    })
-    .unwrap();
-    let store = object_store::aws::AmazonS3Builder::new()
-        .with_bucket_name("beyonddb-test")
-        .with_region("us-east-1")
-        .with_endpoint(format!("http://{}", fixture.s3))
-        .with_allow_http(true)
-        .with_access_key_id("crab")
-        .with_secret_access_key("crab")
-        .build()
-        .unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(store)),
-        object_store::path::Path::from("beyonddb"),
-        *APPLICATION_ID.as_bytes(),
-    );
-    let authority = CellAuthority::new(layout.clone());
-    let directory = NodeDirectory::new(
-        layout.clone(),
-        tls.fleet(),
-        application.descriptor_digest(),
-        application.registry().release_digest(),
-    );
+    let bucket = observation_bucket(fixture.s3, config["fleet"]["prefix"].as_str().unwrap());
+    // Establish an exact published warmup while the executable still requires
+    // bucket proof. Native bundles are not per-cell restore_snapshot inputs.
     let created = fixture
         .sdk
         .create_table()
@@ -213,132 +222,172 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         .stream_specification(
             aws_sdk_dynamodb::types::StreamSpecification::builder()
                 .stream_enabled(true)
-                .stream_view_type(aws_sdk_dynamodb::types::StreamViewType::KeysOnly)
+                .stream_view_type(aws_sdk_dynamodb::types::StreamViewType::NewAndOldImages)
                 .build()
                 .unwrap(),
         )
         .send()
         .await
         .unwrap();
-    let table = created.table_description().unwrap().table_id().unwrap();
     let arn = created
         .table_description()
         .unwrap()
         .latest_stream_arn()
         .unwrap();
-    let target = beyonddb::data_target("123456789012", table, &[0; 16]).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let owner = loop {
-        fixture
-            .sdk
-            .put_item()
-            .table_name("FollowerRecovery")
-            .item("id", AttributeValue::S("warmup".into()))
-            .send()
-            .await
-            .unwrap();
-        let current = authority.load(target.cell_id()).await.unwrap().unwrap();
-        let owner = current.value().owner.as_ref().unwrap().clone();
-        let node = directory
-            .load(owner.session, now_ms())
-            .await
-            .unwrap()
-            .unwrap();
-        // Enrollment is sufficient to submit the first cut. Normal warmup
-        // writes can all win object publication and leave the log inactive.
-        // The withheld write below must force fsync and authoritative activation.
-        if node.advertisement().log().is_some() {
-            break owner;
-        }
-        if Instant::now() >= deadline {
-            match directory.live(now_ms(), 16).await {
-                Ok(live) => {
-                    let capacity = live
-                        .iter()
-                        .map(|node| (node.node(), node.session(), node.capacity(), node.log()))
-                        .collect::<Vec<_>>();
-                    panic!("owner never enrolled a follower log; live node capacity: {capacity:?}");
-                }
-                Err(error) => {
-                    panic!("owner never enrolled a follower log; directory read failed: {error}");
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    // Obtain the owner's FIFO observation after the last warmup command, then
-    // wait for that exact committed sequence to reach object storage. An SDK
-    // acknowledgement may use follower durability while publication is pending.
-    let local = directory
-        .live(now_ms(), 16)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|node| node.endpoint() == format!("https://{}", fixture.peer))
-        .unwrap();
-    let session = local.session();
-    let hex = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    let client = CellClient::peer(
-        application.registry(),
-        Arc::new(PeerSigner::new(
-            session,
-            application.registry().release_digest(),
-            tls.signing_key().clone(),
-        )),
-        PeerPrincipal {
-            issuer: format!("beyonddb-peer:{}", hex(directory.fleet().as_bytes())),
-            subject: hex(session.as_bytes()),
-            actions: vec!["beyonddb.cell.invoke".into()],
-        },
-        Arc::new(PeerHttpRoundTrip::new(
-            Arc::new(beyonddb::BeyonddbPeerScope),
-            authority.clone(),
-            directory.clone(),
-            Arc::new(tls.client_identity()),
-            session,
-        )),
-    );
-    let warmup = client
-        .query::<beyonddb::ReadPartitionState>(&target, None, beyonddb::Json(()))
+    fixture
+        .sdk
+        .put_item()
+        .table_name("FollowerRecovery")
+        .item("id", AttributeValue::S("warmup".into()))
+        .send()
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
+    let source = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let published = authority.load(target.cell_id()).await.unwrap().unwrap();
-            if published
-                .value()
-                .root
-                .as_ref()
-                .is_some_and(|root| root.commit_sequence >= warmup.receipt.commit_sequence)
-            {
-                break;
+            if let Some(scope) = published_source(&bucket).await {
+                break scope;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("all warmup commits must publish before the object barrier is installed");
-    let before = authority.load(target.cell_id()).await.unwrap().unwrap();
-    let predecessor = before.value().root.as_ref().unwrap().commit_sequence;
-    let cell = target
-        .cell_id()
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    *barrier.cell.lock().unwrap() = Some(format!("/cells/{cell}/inc/"));
-    let mut item = HashMap::from([
-        ("id".into(), AttributeValue::S("acknowledged".into())),
-        (
-            "value".into(),
-            AttributeValue::S("survived-process-kill".into()),
-        ),
-    ]);
+    .unwrap();
+    stop(&mut fixture.child, &fixture.log);
+    let root = fixture.root.path();
+    let barrier = PublicationBarrier {
+        upstream: fixture.s3,
+        client: reqwest::Client::new(),
+        gate: Arc::default(),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_address = listener.local_addr().unwrap();
+    let router = axum::Router::new()
+        .fallback(proxy)
+        .with_state(barrier.clone());
+    let proxy_server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    config["fleet"]["endpoint"] = json!(format!("http://{proxy_address}"));
+    config["fleet"]["follower_durability"] = json!(true);
+    fs::write(&fixture.config, config.to_string()).unwrap();
+    let key = fs::read(root.join("peer.key")).unwrap();
+    bucket
+        .put(
+            "fleet/peer-auth.json",
+            serde_json::to_vec(&json!({"version":1,
+        "key":key.iter().map(|byte| format!("{byte:02x}")).collect::<String>()}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let fleet = FleetClient::new(bucket.clone(), false);
+    let observer = BucketOwnership::new(
+        bucket.clone(),
+        bucket.clone(),
+        "fixture-observer".into(),
+        String::new(),
+    );
+    let mut followers = Vec::new();
+    for name in ["follower-a", "follower-b"] {
+        let peer = free_addr();
+        let public = free_addr();
+        let mut next = config.clone();
+        next["node_name"] = json!(name);
+        next["data_dir"] = json!(root.join(name));
+        next["peer_bind"] = json!(peer);
+        next["peer_advertise"] = json!(peer.to_string());
+        next["public_bind"] = json!(public);
+        next["public_endpoint"] = json!(format!("http://{public}"));
+        next["accounts"] = json!([]);
+        next["bootstrap"] = serde_json::Value::Null;
+        let path = root.join(format!("{name}.json"));
+        let log = root.join(format!("{name}.log"));
+        fs::write(&path, next.to_string()).unwrap();
+        let mut child = start(&path, &log, false, proxy_address);
+        wait_healthy(&mut child, public, &log);
+        followers.push((name.to_owned(), child, path, log));
+    }
+    fixture.child = start(&fixture.config, &fixture.log, false, proxy_address);
+    wait_healthy(&mut fixture.child, fixture.public, &fixture.log);
+    // Select a stable crash target through native management, while keeping
+    // peer log recruitment and takeover/recovery enabled.
+    let nodes = fleet
+        .nodes(PageRequest {
+            limit: Some(10),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(nodes.items.len(), 3);
+    for node in nodes.items {
+        fleet
+            .node_action(&node.id, &node.generation, NodeAction::PauseBalancing)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let nodes = fleet
+                .nodes(PageRequest {
+                    limit: Some(10),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            if nodes.items.len() == 3
+                && nodes
+                    .items
+                    .iter()
+                    .all(|node| node.load["rebalance_paused"] == true)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        fixture
+            .sdk
+            .get_item()
+            .table_name("FollowerRecovery")
+            .key("id", AttributeValue::S("warmup".into()))
+            .consistent_read(true)
+            .send()
+            .await
+            .unwrap()
+            .item()
+            .is_some()
+    );
+    let owner = observer.read_owner(&source).await.unwrap().unwrap();
+    let failed = owner.node.clone().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let observed = lease(&bucket, &failed).await;
+            if observed["log"]["ensemble"]
+                .as_array()
+                .is_some_and(|members| members.len() == 2)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .unwrap();
+    barrier.gate.lock().unwrap().enabled = true;
+    // Close upload admission atomically, then join every payload already
+    // admitted by the proxy before recording the bucket cut.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while barrier.gate.lock().unwrap().forwarding != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = payload_objects(&bucket).await;
+    assert!(!before.is_empty());
     let sdk = aws_sdk_dynamodb::Client::from_conf(
         fixture
             .sdk
@@ -347,6 +396,13 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
             .retry_config(aws_sdk_dynamodb::config::retry::RetryConfig::disabled())
             .build(),
     );
+    let mut item = HashMap::from([
+        ("id".into(), AttributeValue::S("acknowledged".into())),
+        (
+            "value".into(),
+            AttributeValue::S("survived-process-kill".into()),
+        ),
+    ]);
     tokio::time::timeout(
         Duration::from_secs(5),
         sdk.put_item()
@@ -355,43 +411,11 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
             .send(),
     )
     .await
-    .expect("follower proof must acknowledge while object publication is withheld")
+    .expect("follower proof must acknowledge while bundle and LTX publication are withheld")
     .unwrap();
-    let active = directory
-        .load(owner.session, now_ms())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        active.advertisement().log().is_some_and(|log| log.active()),
-        "the first withheld write must activate the enrolled follower log before acknowledgement"
-    );
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let metrics = match followers
-            .iter()
-            .position(|(_, _, _, peer, _)| owner.endpoint == format!("https://{peer}"))
-        {
-            Some(index) => root.join(format!(
-                "follower-{}-metrics.json",
-                if index == 0 { "a" } else { "b" }
-            )),
-            None => root.join("owner-metrics.json"),
-        };
-        loop {
-            if let Ok(bytes) = fs::read(&metrics)
-                && let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                && snapshot["command_responses"]["fleet"]["count"]
-                    .as_u64()
-                    .is_some_and(|count| count > 0)
-            {
-                assert_eq!(snapshot["version"], 1);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("serving binary must write follower response metrics");
+    let log = lease(&bucket, &failed).await;
+    assert_eq!(log["log"]["may_have_fleet_acks"], true);
+    assert_eq!(log["log"]["state"], "open");
     let updated = sdk
         .update_item()
         .table_name("FollowerRecovery")
@@ -430,7 +454,7 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         .send()
         .await
         .unwrap();
-    let transaction = ["tx-a", "tx-b"]
+    let transaction: Vec<_> = ["tx-a", "tx-b"]
         .map(|id| {
             TransactWriteItem::builder()
                 .put(
@@ -443,78 +467,82 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
                 )
                 .build()
         })
-        .to_vec();
+        .into();
     sdk.transact_write_items()
         .client_request_token("follower-process-replay")
         .set_transact_items(Some(transaction.clone()))
         .send()
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), barrier.blocked.cancelled())
-        .await
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while barrier.gate.lock().unwrap().rejected == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(
-        authority
-            .load(target.cell_id())
-            .await
-            .unwrap()
-            .unwrap()
-            .value()
-            .root
-            .as_ref()
-            .unwrap()
-            .commit_sequence,
-        predecessor
+        payload_objects(&bucket).await,
+        before,
+        "withheld data must not reach the bucket"
     );
-    let failed = followers
-        .iter()
-        .position(|(_, _, _, peer, _)| owner.endpoint == format!("https://{peer}"));
-    let (child, path, log, public) = match failed {
-        Some(index) => {
-            let (child, path, log, _, public) = &mut followers[index];
-            (child, path.as_path(), log.as_path(), *public)
-        }
-        None => {
-            assert_eq!(owner.endpoint, format!("https://{}", fixture.peer));
-            (
-                &mut fixture.child,
-                fixture.config.as_path(),
-                fixture.log.as_path(),
-                fixture.public,
-            )
-        }
+    assert_eq!(observer.read_owner(&source).await.unwrap().unwrap(), owner);
+    let failed_dir = if failed == config["node_name"].as_str().unwrap() {
+        fixture.child.kill().unwrap();
+        fixture.child.wait().unwrap();
+        PathBuf::from(config["data_dir"].as_str().unwrap())
+    } else {
+        let (_, child, path, _) = followers
+            .iter_mut()
+            .find(|(name, _, _, _)| name == &failed)
+            .unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        PathBuf::from(settings["data_dir"].as_str().unwrap())
     };
-    child.kill().unwrap();
-    child.wait().unwrap();
+    std::fs::remove_dir_all(failed_dir).unwrap();
     assert_eq!(
-        authority
-            .load(target.cell_id())
+        payload_objects(&bucket).await,
+        before,
+        "owner kill must not publish lost rows"
+    );
+    barrier.gate.lock().unwrap().enabled = false;
+    // A dead process is still an authoritative owner until its native lease
+    // expires. Start the replacement after that fence, as a real takeover must.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while observer
+            .read_node_lease(&failed)
             .await
             .unwrap()
-            .unwrap()
-            .value()
-            .root
-            .as_ref()
-            .unwrap()
-            .commit_sequence,
-        predecessor
-    );
-    barrier.release.cancel();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while directory.is_live(owner.session, now_ms()).await.unwrap() {
+            .is_some_and(|record| record.expires_ms > cellar::ownership_store::now_ms())
+        {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
     .unwrap();
-    // Recover all Cells acknowledged by the failed boot, even if placement
-    // originally chose a follower node as this table's owner.
-    let mut successor: serde_json::Value =
-        serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    successor["owned_accounts"] = config["owned_accounts"].clone();
-    fs::write(path, successor.to_string()).unwrap();
-    *child = start(path, log, false, proxy_address);
-    wait_healthy(child, public, log);
+    let public = free_addr();
+    let peer = free_addr();
+    let mut successor = config.clone();
+    successor["node_name"] = json!("follower-successor");
+    successor["data_dir"] = json!(root.join("successor-empty"));
+    successor["public_bind"] = json!(public);
+    successor["public_endpoint"] = json!(format!("http://{public}"));
+    successor["peer_bind"] = json!(peer);
+    successor["peer_advertise"] = json!(peer.to_string());
+    successor["bootstrap"] = serde_json::Value::Null;
+    let path = root.join("successor.json");
+    let log = root.join("successor.log");
+    fs::write(&path, successor.to_string()).unwrap();
+    let mut recovered = start(&path, &log, false, proxy_address);
+    wait_healthy(&mut recovered, public, &log);
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk.config()
+            .to_builder()
+            .endpoint_url(format!("http://{public}"))
+            .build(),
+    );
     let read = sdk
         .get_item()
         .table_name("FollowerRecovery")
@@ -524,13 +552,10 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         .await
         .unwrap();
     assert_eq!(read.item(), Some(&item));
-    let restored = authority.load(target.cell_id()).await.unwrap().unwrap();
-    assert_ne!(
-        restored.value().owner.as_ref().unwrap().session,
-        owner.session
-    );
-    // Replaying the saved transaction outcome must not re-evaluate its insert
-    // conditions or emit another stream record.
+    let restored = observer.read_owner(&source).await.unwrap().unwrap();
+    assert_ne!(restored.node.as_ref(), Some(&failed));
+    assert!(restored.epoch > owner.epoch);
+    assert_eq!(lease(&bucket, &failed).await["log"]["state"], "sealed");
     sdk.transact_write_items()
         .client_request_token("follower-process-replay")
         .set_transact_items(Some(transaction))
@@ -563,11 +588,11 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
             Some(&AttributeValue::S(id.into()))
         );
     }
-    let described = streams_cli(fixture.public, &["describe-stream", "--stream-arn", arn]);
+    let described = streams_cli(public, &["describe-stream", "--stream-arn", arn]);
     let mut records = Vec::new();
     for shard in described["StreamDescription"]["Shards"].as_array().unwrap() {
         let iterator = streams_cli(
-            fixture.public,
+            public,
             &[
                 "get-shard-iterator",
                 "--stream-arn",
@@ -580,7 +605,7 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
         );
         records.extend(
             streams_cli(
-                fixture.public,
+                public,
                 &[
                     "get-records",
                     "--shard-iterator",
@@ -611,9 +636,15 @@ async fn acknowledged_untiered_item_survives_owner_process_kill() {
             "missing or duplicate {event} for {id}"
         );
     }
-    for (child, _, log, _, _) in &mut followers {
-        stop(child, log);
+    stop(&mut recovered, &log);
+    for (name, child, _, log) in &mut followers {
+        if name != &failed {
+            stop(child, log);
+        }
     }
-    stop(&mut fixture.child, &fixture.log);
+    if failed != config["node_name"].as_str().unwrap() {
+        stop(&mut fixture.child, &fixture.log);
+    }
     proxy_server.abort();
+    let _ = proxy_server.await;
 }

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError};
 use extenddb_core::types::{AttributeValue, Item};
 
 type Result<T> = std::result::Result<T, CodecError>;

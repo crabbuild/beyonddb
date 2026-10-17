@@ -1,6 +1,6 @@
 # Use BeyondDB with the AWS CLI
 
-Use these commands to connect, create a table, change an item, and inspect time to live (TTL) and Streams behavior. First [deploy a node](deployment.md) and bootstrap an access key. BeyondDB accepts signed DynamoDB JSON requests at `public_endpoint`; pass that address with `--endpoint-url`. The examples use a string partition key named `pk`.
+Use these commands to connect, create a table, change an item, and inspect time to live (TTL) and Streams behavior. First [configure a Cellar node](cellar-server.md) and bootstrap an access key. BeyondDB accepts signed DynamoDB JSON requests at `public_endpoint`; pass that address with `--endpoint-url`. The examples use a string partition key named `pk`.
 
 ```text
 AWS CLI -- SigV4 --> public endpoint -- route --> owning Cell
@@ -33,7 +33,7 @@ Create `Notes`, then wait for its route to become active before writing. This ex
 ```sh
 aws dynamodb create-table \
   --table-name Notes \
-  --tags Key=beyonddb:cell-model,Value=single \
+  --tags Key=beyonddb:cell-model,Value=partitioned \
   --attribute-definitions AttributeName=pk,AttributeType=S \
   --key-schema AttributeName=pk,KeyType=HASH \
   --billing-mode PAY_PER_REQUEST \
@@ -48,18 +48,24 @@ aws dynamodb describe-table \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-This example keeps the table in one base data Cell. Choose a model at creation:
+Every table starts with multiple ordered data ranges:
 
 | `beyonddb:cell-model` value | Behavior |
 | --- | --- |
-| `single` | One base data Cell; no base splits |
-| `auto` | Start with one base data Cell; allow splits |
-| `partitioned` | Start with at least two base data Cells, using the configured count |
-| Omitted | Use the server's existing `initial_partitions` default |
+| `single` | Rejected by the Cellar server |
+| `auto` | Start with the configured multiple data cells; allow splits |
+| `partitioned` | Start with the configured multiple data cells; allow splits |
+| Omitted | Use `initial_partitions`, four by default and at least two |
 
-The selector is a BeyondDB extension. Changing tags after creation does not change placement. GSIs remain separate and can grow independently; LSIs share base storage. Live model conversion is unfinished. Read [Cell model selection and limits](scaling.md#choose-a-tables-cell-model) before choosing a fixed single Cell.
+The selector is a BeyondDB extension. Changing tags after creation does not change placement. GSIs remain separate and can grow independently; LSIs share base storage. Read [ordered cell partitioning](ordered-cell-partitioning.md) for range boundaries and the LSI restriction on splitting one PK collection.
 
-Without the selector, the serving binary provisions `initial_partitions` data Cells for a new routed table. `DescribeTable` can report `CREATING` until range publication finishes. Changing `initial_partitions` later affects new table generations only. The node's `max_active_cells` budget must include those data Cells plus account, coordinator, and management Cells; if the budget is too small, provisioning remains pending until capacity is available. `sql_workers` is an optional override for the SQL worker count (maximum sixteen); the default follows host parallelism. Use it for multi-partition workloads after measuring CPU and memory headroom. It improves independent Cell scheduling, while a single hot Cell remains serialized for ordering and durable publication.
+The serving binary provisions `initial_partitions` data Cells for every new
+table. `DescribeTable` can report `CREATING` until range publication finishes.
+Changing `initial_partitions` later affects new table generations only. The
+node's `max_active_cells` budget includes data cells plus account, coordinator
+and management cells. Logical ranges can share a host or be placed on different
+fleet nodes by Cellar. More ranges alone do not provide independent failure
+domains or additional physical capacity.
 
 ## Write and read an item
 

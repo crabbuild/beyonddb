@@ -1,7 +1,8 @@
 //! Bounded traversal from a generation root to its current metadata leaf.
 
 use super::*;
-use cellule_runtime::client::{CellClient, InvocationError, ReadPolicy};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_keyspace::RangeKey;
 use extenddb_storage::error::StorageError;
 
 /// One current leaf page and the immutable interval whose membership it samples.
@@ -19,9 +20,18 @@ pub async fn read_directory_leaf(
     client: &CellClient,
     tenant: TenantId,
     table_id: &str,
-    hash: [u8; 16],
+    hash: RangeKey,
 ) -> std::result::Result<DirectoryLeafPage, StorageError> {
-    let client = client.clone().with_read_policy(ReadPolicy::CurrentOwner);
+    read_directory_leaf_direction(client, tenant, table_id, hash, true).await
+}
+pub async fn read_directory_leaf_direction(
+    client: &CellClient,
+    tenant: TenantId,
+    table_id: &str,
+    hash: RangeKey,
+    forward: bool,
+) -> std::result::Result<DirectoryLeafPage, StorageError> {
+    let client = client.clone();
     let mut spec = DirectorySpec::root(table_id.into());
     let mut publication = None;
     for _ in 0..128 {
@@ -32,7 +42,8 @@ pub async fn read_directory_leaf(
                 &target,
                 None,
                 Json(DirectoryPageInput {
-                    hash,
+                    reverse: !forward,
+                    hash: hash.clone(),
                     expected_version: None,
                 }),
             )
@@ -59,7 +70,8 @@ pub async fn read_directory_leaf(
                     &target,
                     None,
                     Json(DirectoryPageInput {
-                        hash,
+                        reverse: !forward,
+                        hash: hash.clone(),
                         expected_version: None,
                     }),
                 )
@@ -80,7 +92,14 @@ pub async fn read_directory_leaf(
                 let child = split
                     .children
                     .iter()
-                    .find(|child| child.contains(hash))
+                    .find(|child| {
+                        if forward {
+                            child.contains(hash.clone())
+                        } else {
+                            hash > child.lower
+                                && child.upper.as_ref().is_none_or(|upper| &hash <= upper)
+                        }
+                    })
                     .cloned()
                     .ok_or_else(|| {
                         StorageError::Internal("directory redirect misses logical position".into())
@@ -90,7 +109,7 @@ pub async fn read_directory_leaf(
                     || child.lower < spec.lower
                     || spec
                         .upper
-                        .is_some_and(|upper| child.upper.is_none_or(|end| end > upper))
+                        .is_some_and(|upper| child.upper.clone().is_none_or(|end| end > upper))
                 {
                     return Err(StorageError::Internal(
                         "directory redirect escaped its parent".into(),

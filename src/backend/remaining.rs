@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::InvocationError;
+use bdb_cellar_runtime::identity::CellTarget;
 use extenddb_core::expression::{CompareOp, Expr, ExpressionMaps, PathElement};
 use extenddb_core::types::{
     AttributeValue, BackupDescription, BackupDetails, BackupSummary, ContinuousBackupsDescription,
@@ -134,8 +134,8 @@ impl CellStorage {
             account,
             RoutePageInput {
                 table_id: state.table_id.clone(),
-                start_hash: None,
-                after_lower: state.after_lower,
+                start_key: None,
+                after_lower: state.after_lower.clone(),
                 expected_epoch: None,
             },
         )
@@ -248,7 +248,8 @@ impl CellStorage {
                 partitions
                     .last()
                     .ok_or_else(|| StorageError::Internal("empty TTL route page".into()))?
-                    .lower,
+                    .lower
+                    .clone(),
             )
         } else {
             None
@@ -293,7 +294,7 @@ impl CellStorage {
                 &account,
                 RoutePageInput {
                     table_id: table.id.clone(),
-                    start_hash: None,
+                    start_key: None,
                     after_lower,
                     expected_epoch,
                 },
@@ -312,7 +313,7 @@ impl CellStorage {
                     return Err(StorageError::Transient("TTL route changed".into()));
                 }
             };
-            after_lower = partitions.last().map(|partition| partition.lower);
+            after_lower = partitions.last().map(|partition| partition.lower.clone());
             for partition in partitions {
                 let owner = data_target(account_id, &table.id, &partition.partition_id)
                     .map_err(|error| StorageError::Internal(error.to_string()))?;
@@ -649,7 +650,7 @@ impl MetadataEngine for CellStorage {
                 &account,
                 RoutePageInput {
                     table_id: table.id.clone(),
-                    start_hash: None,
+                    start_key: None,
                     after_lower: None,
                     expected_epoch: None,
                 },

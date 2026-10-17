@@ -1,8 +1,23 @@
-use crate::*;
-use beyonddb::{
-    PartitionQuery, PartitionQueryInput, PartitionQueryOutcome, SortComparison, SortPredicate,
+use crate::{local_node, signed_http::SignedHttp, transaction_fixture};
+use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::{CellClient, InvocationError},
+    identity::CellTarget,
 };
-use extenddb_core::types::TableKeyInfo;
+use beyonddb::*;
+use extenddb_core::{
+    expression::{Expr, ExpressionMaps, KeyCondition, PathElement},
+    types::{AttributeValue, Item, TableKeyInfo},
+};
+use extenddb_storage::{DataEngine, TableEngine, TransactGetOp, error::StorageError};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicI64},
+};
+fn identity(_: u8) -> MutationIdentity {
+    local_node::wall_mutation()
+}
 
 pub(crate) async fn assert_range_read_barriers(
     storage: &CellStorage,
@@ -12,49 +27,62 @@ pub(crate) async fn assert_range_read_barriers(
     key_info: &TableKeyInfo,
 ) {
     let key = |pk: &str, sk: &str| {
-        Item::from([
-            ("pk".into(), AttributeValue::S(pk.into())),
-            ("sk".into(), AttributeValue::N(sk.into())),
-        ])
+        // Typed cell envelopes require canonical AttributeValues. Use the
+        // same numeric normalization as the DynamoDB frontend deserializer.
+        serde_json::from_value::<Item>(serde_json::json!({"pk":{"S":pk},"sk":{"N":sk}})).unwrap()
     };
     let created = key("same", "9");
     let deleted = key("same", "2");
     let untouched = key("same", "1.5");
     let transaction_id = [201; 16];
-    let coordinator_cell = *account_target(&key_info.account_id)
-        .unwrap()
-        .cell_id()
-        .as_bytes();
-    transaction_command!(
+    let coordinator = prepare_blocker(
         client,
-        PreparePartitionTransaction,
         target,
-        identity(201),
-        Json(PreparePartitionTransactionInput {
-            table_id: key_info.table_id.clone(),
-            epoch,
-            transaction_id,
-            coordinator_cell,
-            coordinator_key: transaction_id.to_vec(),
-            operations: vec![
-                TransactionOperation::Put(PutItemInput {
-                    table_name: key_info.table_name.clone(),
-                    table_id: key_info.table_id.clone(),
-                    item: created.clone(),
-                    condition: None,
-                }),
-                TransactionOperation::Delete(DeleteItemInput {
-                    return_old: false,
-                    table_name: key_info.table_name.clone(),
-                    table_id: key_info.table_id.clone(),
-                    key: deleted.clone(),
-                    condition: None,
-                }),
-            ],
-        }),
+        key_info,
+        epoch,
+        transaction_id,
+        vec![
+            TransactionOperation::Put(PutItemInput {
+                table_name: key_info.table_name.clone(),
+                table_id: key_info.table_id.clone(),
+                item: created.clone(),
+                condition: None,
+            }),
+            TransactionOperation::Delete(DeleteItemInput {
+                return_old: false,
+                table_name: key_info.table_name.clone(),
+                table_id: key_info.table_id.clone(),
+                key: deleted.clone(),
+                condition: None,
+            }),
+        ],
     )
-    .await
-    .unwrap();
+    .await;
+    let coordinator_cell = *coordinator.cell_id().as_bytes();
+    let source = client
+        .query::<ReadPartitionState>(target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap()
+        .spec;
+    let seal = PartitionSeal {
+        table_id: key_info.table_id.clone(),
+        source_partition_id: source.partition_id,
+        epoch,
+        next_epoch: epoch.checked_add(1).unwrap(),
+        source_lower: source.lower,
+        source_upper: source.upper,
+        boundary: ordered_data_key(&key_info.table_id, &created, &key_info.base_key_schema)
+            .unwrap(),
+        left_partition_id: *uuid::Uuid::now_v7().as_bytes(),
+        right_partition_id: *uuid::Uuid::now_v7().as_bytes(),
+    };
+    assert!(
+        matches!(client.command::<SealPartition>(target, identity(205), Json(seal)).await,
+        Err(InvocationError::Rejected(result)) if result.output.0 == SealPartitionOutcome::InFlightTransaction)
+    );
 
     // Neither an absent create nor an existing delete may escape the barrier.
     for locked in [&created, &deleted] {
@@ -105,6 +133,47 @@ pub(crate) async fn assert_range_read_barriers(
             .await
             .is_ok()
     );
+
+    // Scan's cursor compares complete ordered components, including absent
+    // creates and numerically equivalent sort-key spellings.
+    for (cursor, conflicts) in [
+        (key("same", "1.5"), true),
+        (key("same", "2.0"), true),
+        (key("same", "8"), true),
+        (key("same", "9"), false),
+        (key("same", "9.0"), false),
+        (key("same", "10"), false),
+        (key("zz", "0"), false),
+        (key("aa", "0"), true),
+    ] {
+        let result = client
+            .query::<PartitionScan>(
+                target,
+                None,
+                Json(PartitionScanInput {
+                    table_id: key_info.table_id.clone(),
+                    index_name: None,
+                    epoch,
+                    limit: Some(1),
+                    exclusive_start_key: Some(cursor.clone()),
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("scan cursor {cursor:?}: {error:?}"))
+            .output
+            .0;
+        if conflicts {
+            assert!(
+                matches!(result, PartitionScanOutcome::Conflict(conflict) if conflict.transaction.transaction_id == transaction_id),
+                "cursor {cursor:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, PartitionScanOutcome::Page { .. }),
+                "cursor {cursor:?}: {result:?}"
+            );
+        }
+    }
 
     let base = PartitionQueryInput {
         index_name: None,
@@ -237,18 +306,7 @@ pub(crate) async fn assert_range_read_barriers(
             .await,
         Err(StorageError::Transient(_))
     ));
-    client
-        .command::<ResolvePartitionTransaction>(
-            target,
-            identity(202),
-            Json(ResolveTransactionInput {
-                transaction_id,
-                coordinator_cell,
-                commit: false,
-            }),
-        )
-        .await
-        .unwrap();
+    abort_blocker(client, &key_info.account_id, transaction_id).await;
     assert_eq!(
         storage
             .transact_get_items(&[
@@ -287,33 +345,72 @@ pub(crate) async fn assert_sdk_read_barrier(
 ) {
     let target = data_target(account_id, &partition.table.id, &partition.partition_id).unwrap();
     let transaction_id = [203; 16];
-    let coordinator_cell = *account_target(account_id).unwrap().cell_id().as_bytes();
     let key = Item::from([
         ("pk".into(), AttributeValue::S("same".into())),
         ("sk".into(), AttributeValue::N("8".into())),
     ]);
-    transaction_command!(
+    let info = TableKeyInfo {
+        account_id: account_id.into(),
+        table_name: partition.table.table_name.clone(),
+        table_id: partition.table.id.clone(),
+        base_key_schema: partition.table.key_schema.clone(),
+        key_schema: partition.table.key_schema.clone(),
+        attribute_definitions: partition.table.attribute_definitions.clone(),
+        ..Default::default()
+    };
+    prepare_blocker(
         client,
-        PreparePartitionTransaction,
         &target,
-        identity(203),
-        Json(PreparePartitionTransactionInput {
+        &info,
+        partition.epoch,
+        transaction_id,
+        vec![TransactionOperation::Delete(DeleteItemInput {
+            return_old: false,
+            table_name: partition.table.table_name.clone(),
             table_id: partition.table.id.clone(),
-            epoch: partition.epoch,
-            transaction_id,
-            coordinator_cell,
-            coordinator_key: transaction_id.to_vec(),
-            operations: vec![TransactionOperation::Delete(DeleteItemInput {
-                return_old: false,
-                table_name: partition.table.table_name.clone(),
-                table_id: partition.table.id.clone(),
-                key,
-                condition: None,
-            })],
-        }),
+            key,
+            condition: None,
+        })],
     )
-    .await
-    .unwrap();
+    .await;
+    // Exercise unnormalized numeric spellings at the public protocol boundary.
+    // Both operations exclude the locked key itself and must reach SK 10.
+    let scan = sdk
+        .scan()
+        .table_name(&partition.table.table_name)
+        .set_exclusive_start_key(Some(HashMap::from([
+            ("pk".into(), AwsAttributeValue::S("same".into())),
+            ("sk".into(), AwsAttributeValue::N("8.0".into())),
+        ])))
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        scan.items()
+            .iter()
+            .map(|item| item["sk"].as_n().unwrap().as_str())
+            .collect::<Vec<_>>(),
+        ["10"]
+    );
+    let query = sdk
+        .query()
+        .table_name(&partition.table.table_name)
+        .key_condition_expression("pk = :p AND sk > :s")
+        .expression_attribute_values(":p", AwsAttributeValue::S("same".into()))
+        .expression_attribute_values(":s", AwsAttributeValue::N("8.0".into()))
+        .consistent_read(true)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        query
+            .items()
+            .iter()
+            .map(|item| item["sk"].as_n().unwrap().as_str())
+            .collect::<Vec<_>>(),
+        ["10"]
+    );
     let request = || {
         sdk.transact_get_items().set_transact_items(Some(
             ["1.5", "8"]
@@ -380,18 +477,7 @@ pub(crate) async fn assert_sdk_read_barrier(
             .collect::<Vec<_>>(),
         vec![Some("None"), Some("TransactionConflict")]
     );
-    client
-        .command::<ResolvePartitionTransaction>(
-            &target,
-            identity(204),
-            Json(ResolveTransactionInput {
-                transaction_id,
-                coordinator_cell,
-                commit: false,
-            }),
-        )
-        .await
-        .unwrap();
+    abort_blocker(client, account_id, transaction_id).await;
     let response = request().send().await.unwrap();
     assert!(
         response
@@ -410,4 +496,178 @@ pub(crate) async fn assert_sdk_read_barrier(
             AwsAttributeValue::N("8".into())
         ]
     );
+}
+
+async fn prepare_blocker(
+    client: &CellClient,
+    target: &CellTarget,
+    info: &TableKeyInfo,
+    epoch: u64,
+    id: [u8; 16],
+    operations: Vec<TransactionOperation>,
+) -> CellTarget {
+    let provisioner =
+        CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap());
+    provisioner
+        .ensure(client, &info.account_id, &id)
+        .await
+        .unwrap();
+    let coordinator = coordinator_target(&info.account_id, &id).unwrap();
+    let state = client
+        .query::<ReadPartitionState>(target, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(state.spec.epoch, epoch);
+    assert_eq!(state.spec.table.id, info.table_id);
+    transaction_command!(
+        client,
+        BeginCrossCellTransaction,
+        &coordinator,
+        identity(201),
+        Json(BeginCrossCellTransactionInput {
+            account_id: info.account_id.clone(),
+            transaction_id: id,
+            token: None,
+            participants: vec![CoordinatorParticipant {
+                target: CoordinatorParticipantTarget::Data {
+                    table_id: info.table_id.clone(),
+                    partition_id: state.spec.partition_id,
+                    epoch
+                },
+                operations: operations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, operation)| IndexedTransactionOperation {
+                        index: u8::try_from(index).unwrap(),
+                        operation: operation.clone()
+                    })
+                    .collect(),
+            }],
+        })
+    )
+    .await
+    .unwrap();
+    let prepared = transaction_command!(
+        client,
+        PreparePartitionTransaction,
+        target,
+        identity(202),
+        Json(PreparePartitionTransactionInput {
+            table_id: info.table_id.clone(),
+            epoch,
+            transaction_id: id,
+            coordinator_cell: *coordinator.cell_id().as_bytes(),
+            coordinator_key: id.to_vec(),
+            operations,
+        })
+    )
+    .await
+    .unwrap();
+    assert_eq!(prepared.output.0, PrepareTransactionOutcome::Prepared);
+    coordinator
+}
+async fn abort_blocker(client: &CellClient, account: &str, id: [u8; 16]) {
+    let coordinator = coordinator_target(account, &id).unwrap();
+    client
+        .command::<DecideCrossCellTransaction>(
+            &coordinator,
+            identity(204),
+            Json(DecideCrossCellTransactionInput {
+                account_id: account.into(),
+                transaction_id: id,
+                routing_key: id.to_vec(),
+                decision: CoordinatorDecision::Abort {
+                    index: None,
+                    reason: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    CellStorage::new(client.clone(), "local")
+        .finish_decided_cross_cell_transaction(account, &id, id)
+        .await
+        .unwrap();
+    let status = client
+        .query::<ReadCrossCellTransaction>(
+            &coordinator,
+            None,
+            Json(ReadCrossCellTransactionInput {
+                account_id: account.into(),
+                transaction_id: id,
+                routing_key: id.to_vec(),
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap();
+    assert_eq!(
+        status.decision,
+        CoordinatorDecision::Abort {
+            index: None,
+            reason: None
+        }
+    );
+    assert_eq!(status.resolved_count, 1);
+}
+fn key(sk: &str) -> Item {
+    Item::from([
+        ("pk".into(), AttributeValue::S("same".into())),
+        ("sk".into(), AttributeValue::N(sk.into())),
+    ])
+}
+#[test]
+fn range_read_barriers_cover_signed_sdk_requests_after_same_pk_split_and_restart() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(identity(1).issued_at_ms));
+        let (node, client) = local_node::start(directory.path(), clock.clone(), host.handle(), core.handle()).await.unwrap();
+        let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap()).with_initial_partition_count(2).unwrap());
+        let storage = CellStorage::new(client.clone(), "local").with_initial_partitions(provisioner.clone()).with_transaction_coordinators(provisioner.clone());
+        let account = "123456789012";
+        storage.create_table(account, serde_json::from_value(serde_json::json!({
+            "TableName":"Visibility", "KeySchema":[{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"sk","KeyType":"RANGE"}],
+            "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"},{"AttributeName":"sk","AttributeType":"N"}], "BillingMode":"PAY_PER_REQUEST"
+        })).unwrap()).await.unwrap();
+        let info = storage.table_key_info(account, "Visibility").await.unwrap();
+        for sk in ["1.5", "2", "3", "4", "8", "10"] { storage.put_item(&info, key(sk), false, None, &ExpressionMaps::default(), None).await.unwrap(); }
+        let (source, _) = transaction_fixture::participant_for_key(&client, &info, &key("2")).await;
+        assert_eq!(transaction_fixture::participant_for_key(&client, &info, &key("8")).await.0, source);
+        let spec = client.query::<ReadPartitionState>(&source, None, Json(())).await.unwrap().output.0.unwrap().spec;
+        assert_range_read_barriers(&storage, &client, &source, spec.epoch, &info).await;
+        let plan = provisioner.split_partition(account, client.clone(), &info.table_id, spec.partition_id, spec.lower.unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await.unwrap();
+        assert_eq!(plan.children.len(), 2);
+        let (left, _) = transaction_fixture::participant_for_key(&client, &info, &key("1.5")).await;
+        let (right, _) = transaction_fixture::participant_for_key(&client, &info, &key("8")).await;
+        assert_ne!(left, right, "one PK must now span actual independently owned cells");
+        let partition = client.query::<ReadPartitionState>(&right, None, Json(())).await.unwrap().output.0.unwrap().spec;
+        let http = SignedHttp::start(&client, provisioner, true).await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), assert_sdk_read_barrier(&http.sdk, &client, &partition, account)).await.unwrap();
+        http.stop().await;
+        local_node::stop(node).await.unwrap();
+        let (node, client) = local_node::start(directory.path(), clock, host.handle(), core.handle()).await.unwrap();
+        let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap()).with_initial_partition_count(2).unwrap());
+        let http = SignedHttp::start(&client, provisioner, false).await;
+        let response = http.sdk.query().table_name("Visibility").key_condition_expression("pk = :p").expression_attribute_values(":p", AwsAttributeValue::S("same".into())).consistent_read(true).send().await.unwrap();
+        assert_eq!(response.items().iter().map(|item| item["sk"].as_n().unwrap().as_str()).collect::<Vec<_>>(), ["1.5", "2", "3", "4", "8", "10"]);
+        assert!(response.last_evaluated_key().is_none());
+        assert!(response.items().iter().all(|item| !item.contains_key("uncommitted")));
+        http.stop().await;
+        local_node::stop(node).await.unwrap();
+    });
 }

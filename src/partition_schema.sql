@@ -17,6 +17,7 @@ CREATE TABLE ddb_partition_index_backfills (
 
 CREATE TABLE ddb_partition_items (
     item_key BLOB PRIMARY KEY,
+    ordered_key BLOB NOT NULL UNIQUE,
     partition_key BLOB NOT NULL,
     sort_key BLOB NOT NULL,
     item BLOB NOT NULL,
@@ -45,16 +46,16 @@ BEGIN
     UPDATE ddb_partition_usage SET item_count = item_count + 1,
         logical_bytes = logical_bytes + NEW.logical_bytes,
         item_bytes = item_bytes + length(NEW.item) + length(NEW.item_key)
-            + length(NEW.partition_key) + length(NEW.sort_key)
+            + length(NEW.partition_key) + length(NEW.sort_key) + length(NEW.ordered_key)
         WHERE singleton = 1;
 END;
 CREATE TRIGGER ddb_partition_usage_update
-AFTER UPDATE OF item, item_key, partition_key, sort_key, logical_bytes ON ddb_partition_items
+AFTER UPDATE OF item, item_key, ordered_key, partition_key, sort_key, logical_bytes ON ddb_partition_items
 BEGIN
     UPDATE ddb_partition_usage SET logical_bytes = logical_bytes + NEW.logical_bytes - OLD.logical_bytes,
         item_bytes = item_bytes
-        + length(NEW.item) + length(NEW.item_key) + length(NEW.partition_key) + length(NEW.sort_key)
-        - length(OLD.item) - length(OLD.item_key) - length(OLD.partition_key) - length(OLD.sort_key)
+        + length(NEW.item) + length(NEW.item_key) + length(NEW.partition_key) + length(NEW.sort_key) + length(NEW.ordered_key)
+        - length(OLD.item) - length(OLD.item_key) - length(OLD.partition_key) - length(OLD.sort_key) - length(OLD.ordered_key)
         WHERE singleton = 1;
 END;
 CREATE TRIGGER ddb_partition_usage_delete AFTER DELETE ON ddb_partition_items
@@ -62,7 +63,7 @@ BEGIN
     UPDATE ddb_partition_usage SET item_count = item_count - 1,
         logical_bytes = logical_bytes - OLD.logical_bytes,
         item_bytes = item_bytes - length(OLD.item) - length(OLD.item_key)
-            - length(OLD.partition_key) - length(OLD.sort_key)
+            - length(OLD.partition_key) - length(OLD.sort_key) - length(OLD.ordered_key)
         WHERE singleton = 1;
 END;
 

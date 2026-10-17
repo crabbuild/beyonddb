@@ -1,6 +1,6 @@
 //! Item changes retained in the Cell that committed them.
 
-use cellule_runtime::registry::{CommandContext, Query, QueryContext};
+use bdb_cellar_runtime::registry::{CommandContext, Query, QueryContext};
 use extenddb_core::types::{
     Item, KeySchemaElement, StreamEventName, StreamRecord, StreamRecordData, StreamViewType,
     UserIdentity, extract_key, item_size_bytes,

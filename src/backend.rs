@@ -1,5 +1,6 @@
 //! ExtendDB table operations routed to account Cells.
 
+use bdb_keyspace::RangeKey;
 mod admission;
 mod batch;
 mod data;
@@ -29,9 +30,9 @@ use super::{
     PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
     TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
-use cellule_runtime::client::{CellClient, InvocationError, ReadPolicy};
-use cellule_runtime::identity::{CellTarget, RequestId, TenantId};
-use cellule_runtime::{MutationIdentity, partition_for_shard};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_cellar_runtime::identity::{CellTarget, RequestId, TenantId};
+use bdb_cellar_runtime::{MutationIdentity, partition_for_shard};
 use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     BillingMode, BillingModeSummary, CreateTableInput, DeleteTableInput, DescribeTableInput,
@@ -129,7 +130,6 @@ impl CellStorage {
     /// its requests through this backend. All reads use the current owner so
     /// transaction decisions and prepared intents cannot come from stale snapshots.
     pub fn new(client: CellClient, region: impl Into<String>) -> Self {
-        let client = client.with_read_policy(ReadPolicy::CurrentOwner);
         Self {
             no_return_batcher: Arc::new(NoReturnBatcher::new(client.clone())),
             update_batcher: Arc::new(UpdateBatcher::new(client.clone())),
@@ -204,7 +204,7 @@ impl CellStorage {
     pub(super) fn cached_route(
         &self,
         key: &(String, String),
-        hash: [u8; 16],
+        hash: RangeKey,
     ) -> Option<([u8; 16], u64)> {
         let lookup = |cache: &RouteCacheState| {
             cache.routes.get(key).and_then(|pages| {
@@ -213,7 +213,7 @@ impl CellStorage {
                         .iter()
                         .find(|partition| {
                             hash >= partition.lower
-                                && partition.upper.is_none_or(|upper| hash < upper)
+                                && partition.upper.clone().is_none_or(|upper| hash < upper)
                         })
                         .map(|partition| (partition.partition_id, partition.epoch))
                 })
@@ -265,13 +265,15 @@ fn cache_route_pages(
         pages.push(CachedRoute { partitions });
         return;
     }
-    let Some(first_lower) = partitions.first().map(|partition| partition.lower) else {
+    let Some(first_lower) = partitions.first().map(|partition| partition.lower.clone()) else {
         return;
     };
-    if let Some(page) = pages
-        .iter_mut()
-        .find(|page| page.partitions.first().map(|partition| partition.lower) == Some(first_lower))
-    {
+    if let Some(page) = pages.iter_mut().find(|page| {
+        page.partitions
+            .first()
+            .map(|partition| partition.lower.clone())
+            == Some(first_lower.clone())
+    }) {
         page.partitions = partitions;
         return;
     }
@@ -809,7 +811,7 @@ impl CellStorage {
             &account,
             RoutePageInput {
                 table_id: table_id.to_owned(),
-                start_hash: None,
+                start_key: None,
                 after_lower: None,
                 expected_epoch: None,
             },
@@ -1008,12 +1010,13 @@ pub(crate) fn mutation_identity() -> Result<MutationIdentity, StorageError> {
 
 pub(crate) fn cell_error<T>(error: InvocationError<T>) -> StorageError {
     match error {
-        InvocationError::Pending(_) | InvocationError::NotStarted(_) => {
+        InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(reason)) => {
+            StorageError::LimitExceeded(reason.to_owned())
+        }
+        InvocationError::Ambiguous { .. } | InvocationError::NotStarted(_) => {
             StorageError::Transient(error.to_string())
         }
-        InvocationError::InvalidPublishedResult { .. } | InvocationError::Rejected(_) => {
-            StorageError::Internal(error.to_string())
-        }
+        InvocationError::Rejected(_) => StorageError::Internal(error.to_string()),
     }
 }
 
