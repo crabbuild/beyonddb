@@ -27,11 +27,18 @@ recorded separately; those earlier results remain evidence for that Git build.
 All 72 focused tests pass on crates.io `0.1.0`: nine adapter units, two embedded
 fixtures, nine keyspace cases, 17 root units, one account fixture, nine directory
 cases, two domain cases, one signed local SDK case and 22 transaction cases.
-Every rebuilt executable copy was checked for SHA-256 equality before running
-from the internal SSD, with unchanged parallelism, assertions and deadlines.
+The ten rebuilt focused test executables were checked for SHA-256 equality
+before running from the internal SSD, with unchanged parallelism, assertions
+and deadlines.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. The separate nine-case RustFS process run is
-pending for this registry build.
+integration/process targets. All nine explicitly executed RustFS process cases
+also pass on this registry build in 520 seconds, with zero failures or ignored
+cases. They cover the broad signed SDK/restart scenario, measured capacity and
+peer identity, 70 coordinator shards beyond residency, native follower recovery
+with bundle and LTX publication withheld, GSI recovery, large transactional
+reads, metadata caching, LSI pagination and retained Streams after hard restart.
+The process test executable was also copied and checked for SHA-256 equality;
+it ran serially with the same flags used by qualification CI.
 
 All-target Clippy still exits 101 in the retained legacy roots: 65 errors in
 `elastic_cells`, 12 in `node_log_authority` and 180 in `peer_network`. These
@@ -450,9 +457,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells`, `node_log_authority` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest rerun reported 12 errors in `node_log_authority` and 180 in
-`peer_network`. It did not emit an `elastic_cells` diagnostic before stopping;
-that source still imports Cellule and remains unqualified (its preceding run
-had 66 errors).
+The registry-release rerun reported 65 errors in `elastic_cells`, 12 in
+`node_log_authority` and 180 in `peer_network`.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.
