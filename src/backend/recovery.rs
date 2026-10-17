@@ -48,6 +48,45 @@ impl CellStorage {
                 .output
                 .0;
             if !aborted {
+                // Observe every original participant before recovery acquires
+                // additional locks. A known admission failure on an already
+                // prepared participant must not expand an unfinished BEGIN.
+                // These reads use SDK routing; they confer no owner authority
+                // and do not replace the prepare/commit protocol's fences.
+                let participants = self
+                    .client
+                    .query::<ReadUnresolvedCoordinatorParticipants>(
+                        coordinator,
+                        None,
+                        Json(ReadCrossCellTransactionInput {
+                            account_id: entry.account_id.clone(),
+                            transaction_id: entry.transaction_id,
+                            routing_key: entry.routing_key.clone(),
+                        }),
+                    )
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0;
+                for participant in participants {
+                    let target = match participant.target {
+                        CoordinatorParticipantTarget::Account => account_target(&entry.account_id),
+                        CoordinatorParticipantTarget::Data {
+                            table_id,
+                            partition_id,
+                            ..
+                        } => data_target(&entry.account_id, &table_id, &partition_id),
+                    }
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    self.participant_state(
+                        &target,
+                        ReadTransactionInput {
+                            transaction_id: entry.transaction_id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                        },
+                    )
+                    .await?;
+                }
                 self.resume_cross_cell_transaction(
                     &entry.account_id,
                     &entry.routing_key,

@@ -28,6 +28,77 @@ impl TransactionRecovery {
     pub async fn step(&mut self) -> Result<(), StorageError> {
         step(&self.storage, &self.account_id, &mut self.cursor).await
     }
+
+    /// Visit registered shards before public serving begins. Each shard uses
+    /// an observed pending boundary, so concurrent writes cannot extend this
+    /// pass indefinitely. Failures do not strand later records or shards, but
+    /// any failed observation or resolution keeps startup from succeeding.
+    ///
+    /// This is live recovery: SDK startup does not prove that every coordinator
+    /// belongs to a departed owner. Fresh BEGINs retain normal resume semantics.
+    pub async fn initial_pass(&mut self) -> Result<(), StorageError> {
+        self.cursor = Cursor::default();
+        let account = account_target(&self.account_id)
+            .map_err(|error| StorageError::Internal(error.to_string()))?;
+        let mut after_shard = None;
+        let mut failure = None;
+        loop {
+            let page = self
+                .storage
+                .client()
+                .query::<ListCoordinatorShards>(
+                    &account,
+                    None,
+                    Json(ListCoordinatorShardsInput {
+                        account_id: self.account_id.clone(),
+                        after: after_shard,
+                        limit: 100,
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if page.is_empty() {
+                return failure.map_or(Ok(()), Err);
+            }
+            for shard in page {
+                after_shard = Some(shard.shard);
+                let coordinator = CellTarget::new(
+                    account.tenant(),
+                    crate::APPLICATION,
+                    crate::transaction_coordinator::NAMESPACE,
+                    &partition_for_shard(shard.shard),
+                )
+                .map_err(|error| StorageError::Internal(error.to_string()))?;
+                let mut after = None;
+                let mut through = None;
+                loop {
+                    let entry = self
+                        .storage
+                        .pending_coordinator_transaction(&coordinator, after, through)
+                        .await;
+                    let (entry, boundary) = match entry {
+                        Ok(Some(entry)) => entry,
+                        Ok(None) => break,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            break;
+                        }
+                    };
+                    after = Some(entry.cursor.clone());
+                    through = Some(boundary);
+                    if let Err(error) = self
+                        .storage
+                        .recover_live_coordinator_entry(&coordinator, entry)
+                        .await
+                    {
+                        failure.get_or_insert(error);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]

@@ -1,242 +1,244 @@
-use crate::*;
-use cellule_store::test_support::CountingObjectStore;
-
+//! Native recovery refuses startup while healthy terminal work progresses.
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::{CellClient, Invocation, InvocationAdmission, InvocationTransport},
+    identity::CellTarget,
+    registry::Command,
+};
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use extenddb_core::types::AttributeValue;
+use extenddb_storage::error::StorageError;
+use http_body_util::Full;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 const ACCOUNT: &str = "123456789012";
-
-fn mutation() -> MutationIdentity {
-    MutationIdentity {
-        request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
-        ..identity(249)
-    }
+struct ParticipantAdmission {
+    target: CellTarget,
+    refuse: Arc<AtomicBool>,
+    attempts: Arc<AtomicUsize>,
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_resolves_healthy_participants_but_keeps_readiness_failed() {
-    for decision in decisions() {
-        recovery_case(true, decision).await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn serving_resolves_decisions_but_does_not_prepare_past_failed_admission() {
-    for decision in decisions() {
-        recovery_case(false, decision).await;
-    }
-}
-
-fn decisions() -> [CoordinatorDecision; 3] {
-    [
-        CoordinatorDecision::Begin,
-        CoordinatorDecision::Commit,
-        CoordinatorDecision::Abort {
-            index: None,
-            reason: None,
-        },
-    ]
-}
-
-async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "recovery-admission".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
+impl InvocationAdmission for ParticipantAdmission {
+    fn check<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            if invocation.target == self.target && self.refuse.load(Ordering::SeqCst) {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                return Err(bdb_cellar_runtime::Error::Capacity(
+                    "participant admission withheld",
+                ));
+            }
+            Ok(())
         })
-        .unwrap(),
-    );
-    let account = account_target(ACCOUNT).unwrap();
-    let directory = tempfile::TempDir::new().unwrap();
-    let objects = Arc::new(CountingObjectStore::new(Arc::new(InMemory::new())));
-    let layout = CellStorageLayout::new(
-        Store::new(objects.clone()),
-        object_store::path::Path::from("recovery-admission"),
-        *account.application().as_bytes(),
-    );
-    let session = SessionId::from_bytes([249; 16]);
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let registry = application.registry();
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application,
-            layout.clone(),
-            session,
-            "https://admission.internal".into(),
-            directory.path().into(),
-        )
-        .unwrap(),
-    );
-    let _account_handle = provisioner.admit_account(ACCOUNT).await.unwrap();
-    let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let storage =
-        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
-    let mut participants = Vec::new();
-    for name in ["FirstTable", "SecondTable"] {
-        let table = storage
-            .create_table(
-                ACCOUNT,
-                serde_json::from_value(serde_json::json!({
-                    "TableName": name, "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
-                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
-                    "BillingMode": "PAY_PER_REQUEST"
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let route = crate::single_leaf_route(&client, &account, &table.table_id)
-            .await
-            .unwrap();
-        let spec = &route.partitions[0];
-        let target = data_target(ACCOUNT, &spec.table.id, &spec.partition_id).unwrap();
-        participants.push((
-            target,
-            CoordinatorParticipant {
-                target: CoordinatorParticipantTarget::Data {
-                    table_id: spec.table.id.clone(),
-                    partition_id: spec.partition_id,
-                    epoch: spec.epoch,
-                },
-                operations: vec![IndexedTransactionOperation {
-                    index: 0,
-                    operation: TransactionOperation::Put(PutItemInput {
-                        table_name: name.into(),
-                        table_id: spec.table.id.clone(),
-                        item: Item::from([("id".into(), AttributeValue::S("first".into()))]),
-                        condition: None,
-                    }),
-                }],
-            },
-        ));
     }
-    participants.sort_by_key(|(target, _)| *target.cell_id().as_bytes());
+}
+struct ParticipantTransport {
+    inner: Arc<dyn InvocationTransport>,
+    target: CellTarget,
+    calls: Arc<AtomicUsize>,
+}
+impl InvocationTransport for ParticipantTransport {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
+        Box::pin(async move {
+            if invocation.target == self.target {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.call(invocation, request).await
+        })
+    }
+}
+#[test]
+fn startup_resolves_healthy_participants_but_keeps_readiness_failed() {
+    run(true);
+}
+#[test]
+fn serving_resolves_decisions_but_does_not_prepare_past_failed_admission() {
+    run(false);
+}
+fn run(startup: bool) {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        for decision in [
+            CoordinatorDecision::Begin,
+            CoordinatorDecision::Commit,
+            CoordinatorDecision::Abort {
+                index: None,
+                reason: None,
+            },
+        ] {
+            recovery_case(startup, decision, host.handle(), core.handle()).await;
+        }
+    });
+}
+async fn recovery_case(
+    startup: bool,
+    decision: CoordinatorDecision,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+) {
+    let files = tempfile::tempdir().unwrap();
+    let clock = Arc::new(AtomicI64::new(mutation().issued_at_ms));
+    let (node, client) = local_node::start(files.path(), clock.clone(), host, core)
+        .await
+        .unwrap();
+    let fixture = transaction_fixture::table(&client, "Admission").await;
+    let mut participants = fixture.participants;
     for (index, (_, participant)) in participants.iter_mut().enumerate() {
         participant.operations[0].index = index as u8;
+        let TransactionOperation::Put(input) = &mut participant.operations[0].operation else {
+            unreachable!()
+        };
+        input
+            .item
+            .insert("value".into(), AttributeValue::N("2".into()));
     }
+    let provisioner =
+        CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap());
     let id = [249; 16];
-    provisioner.admit_coordinator(ACCOUNT, &id).await.unwrap();
     let coordinator = coordinator_target(ACCOUNT, &id).unwrap();
-    let prepare_count = if !startup && decision == CoordinatorDecision::Begin {
-        1
-    } else {
-        2
-    };
+    provisioner.ensure(&client, ACCOUNT, &id).await.unwrap();
     prepare(
         &client,
         &coordinator,
         id,
         &participants,
         &decision,
-        prepare_count,
+        if decision == CoordinatorDecision::Begin {
+            1
+        } else {
+            2
+        },
     )
     .await;
-    // A second record in the same shard proves that startup's bounded pass
-    // continues after a resolution error, as serving's cursor already does.
+    // Later records in the same shard and in a later shard must progress. The
+    // extra keys preserve the healthy participant's original ordered interval.
     let later_id = (1_u128..100_000)
         .map(u128::to_be_bytes)
         .find(|id| coordinator_target(ACCOUNT, id).unwrap() == coordinator)
         .unwrap();
-    let mut later = participants[1].clone();
-    later.1.operations[0].index = 0;
-    let TransactionOperation::Put(input) = &mut later.1.operations[0].operation else {
-        unreachable!()
-    };
-    input
-        .item
-        .insert("id".into(), AttributeValue::S("later".into()));
-    prepare(&client, &coordinator, later_id, &[later], &decision, 1).await;
-
-    // A fixed local handle lets assertions inspect the inaccessible owner's
-    // durable state without removing the control-store fault or helping reads.
-    let authority = CellAuthority::new(layout.clone());
-    let control = authority
-        .load(participants[0].0.cell_id())
-        .await
-        .unwrap()
+    let other_id = (100_000_u128..200_000)
+        .map(u128::to_be_bytes)
+        .find(|id| coordinator_target(ACCOUNT, id).unwrap().partition() > coordinator.partition())
         .unwrap();
-    let proof = CellCatalog::new(layout.clone(), account.tenant())
-        .lookup(participants[0].0.cell_id())
+    let other = coordinator_target(ACCOUNT, &other_id).unwrap();
+    provisioner
+        .ensure(&client, ACCOUNT, &other_id)
         .await
-        .unwrap()
         .unwrap();
-    let handle = host
-        .runtime()
-        .local_handle(proof, &control)
-        .await
-        .unwrap()
-        .unwrap();
-    let first_client = CellClient::local(registry.clone(), handle);
-    let nodes = NodeDirectory::new(
-        layout.clone(),
-        Digest::from_bytes([201; 32]),
-        Digest::from_bytes([202; 32]),
-        registry.release_digest(),
-    );
-    let blocked = layout.control_path(participants[0].0.cell_id().as_bytes());
-    objects.reset();
-    objects.block_body_reads_for(&blocked);
-    // Recovery must encounter the admission fault with cold routing state.
-    // A client warmed by prepare can reuse a verified local route and reach
-    // the live actor without reading the control object blocked above.
-    // Keep the fixed-handle observer so assertions can still inspect that actor.
-    let client = CellClient::local_runtime(registry, host.runtime(), layout.clone());
-    let storage =
-        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
-    if startup {
-        assert!(
-            provisioner
-                .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
-                .await
-                .is_err(),
-            "startup cannot report ready after failed participant admission"
-        );
-    } else {
-        let tasks = host
-            .install_task_group(CancellationToken::new(), CancellationToken::new())
-            .unwrap();
-        provisioner
-            .install_transaction_recovery_loop(
-                &tasks,
-                CellStorage::new(client.clone(), "us-east-1"),
-                nodes.clone(),
-                vec![],
-            )
-            .unwrap();
-        wait_resolved(&client, later_id, 1).await;
+    for (id, target, suffix) in [
+        (later_id, &coordinator, "-later"),
+        (other_id, &other, "-other"),
+    ] {
+        let mut later = participants[1].clone();
+        later.1.operations[0].index = 0;
+        let TransactionOperation::Put(input) = &mut later.1.operations[0].operation else {
+            unreachable!()
+        };
+        let AttributeValue::S(key) = input.item.get_mut("id").unwrap() else {
+            unreachable!()
+        };
+        key.push_str(suffix);
+        prepare(&client, target, id, &[later], &decision, 1).await;
     }
-    assert!(
-        objects
-            .requests()
-            .iter()
-            .any(|read| read.location == blocked.as_ref()),
-        "the admission fault must be exercised"
-    );
-    let pending = status(&client, id).await;
-    let expected = if startup && decision == CoordinatorDecision::Begin {
-        CoordinatorDecision::Abort {
-            index: None,
-            reason: None,
-        }
+    let (node, client) = if startup {
+        local_node::stop(node).await.unwrap();
+        local_node::start(files.path(), clock, host, core)
+            .await
+            .unwrap()
     } else {
-        decision.clone()
+        (node, client)
     };
-    let terminal = expected != CoordinatorDecision::Begin;
+    let refuse = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let controlled = client
+        .map_transport(|inner| {
+            Arc::new(ParticipantTransport {
+                inner,
+                target: participants[0].0.clone(),
+                calls: calls.clone(),
+            })
+        })
+        .with_admission(Arc::new(ParticipantAdmission {
+            target: participants[0].0.clone(),
+            refuse: refuse.clone(),
+            attempts: attempts.clone(),
+        }));
+    let mut recovery = TransactionRecovery::new(
+        Arc::new(CellStorage::new(controlled, "local")),
+        ACCOUNT.into(),
+    )
+    .unwrap();
+    let cancellation = CancellationToken::new();
+    let worker = if startup {
+        assert!(
+            matches!(
+                recovery.initial_pass().await,
+                Err(StorageError::LimitExceeded(_))
+            ),
+            "startup must report known participant admission failure"
+        );
+        None
+    } else {
+        let stop = cancellation.clone();
+        Some(tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    _ = ticks.tick() => {
+                        tokio::select! { () = stop.cancelled() => return, _ = recovery.step() => {} }
+                    }
+                }
+            }
+        }))
+    };
+    wait_resolved(&client, later_id, 1).await;
+    wait_resolved(&client, other_id, 1).await;
+    assert!(attempts.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "refusal precedes SDK ingress"
+    );
+    assert!(
+        node.is_ready().await.unwrap(),
+        "SDK authority is still ready"
+    );
+    let terminal = decision != CoordinatorDecision::Begin;
+    let pending = status(&client, id).await;
     assert_eq!(
         (pending.decision, pending.resolved_count),
-        (expected.clone(), u8::from(terminal)),
+        (decision.clone(), u8::from(terminal)),
         "startup={startup}, decision={decision:?}"
     );
     for (position, (target, _)) in participants.iter().enumerate() {
-        let observer = if position == 0 {
-            &first_client
-        } else {
-            &client
-        };
-        let state = observer
+        let state = client
             .query::<ReadPartitionTransaction>(
                 target,
                 None,
@@ -249,27 +251,20 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
             .unwrap()
             .output
             .0;
-        let expected_state = if position == 0 {
+        let expected = if position == 0 {
             ParticipantTransactionState::Prepared
         } else if !terminal {
             ParticipantTransactionState::Missing
-        } else if expected == CoordinatorDecision::Commit {
+        } else if decision == CoordinatorDecision::Commit {
             ParticipantTransactionState::Committed
         } else {
             ParticipantTransactionState::Aborted
         };
         assert_eq!(
-            state, expected_state,
-            "healthy participant must progress independently"
+            state, expected,
+            "healthy terminal work must progress independently"
         );
     }
-    let later_status = status(&client, later_id).await;
-    assert_eq!(
-        later_status.resolved_count, 1,
-        "later records must not remain blocked"
-    );
-    // Write after healthy resolution; completing the old transaction later
-    // must preserve this newer value instead of applying its staged image twice.
     let (healthy_target, healthy) = &participants[1];
     let TransactionOperation::Put(input) = &healthy.operations[0].operation else {
         unreachable!()
@@ -278,27 +273,32 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
         unreachable!()
     };
     let mut newer = input.item.clone();
-    newer.insert("value".into(), AttributeValue::S("newer".into()));
+    newer.insert("value".into(), AttributeValue::N("3".into()));
     if terminal {
-        let image = client
-            .query::<PartitionGet>(
-                healthy_target,
-                None,
-                Json(PartitionGetInput {
-                    table_id: input.table_id.clone(),
-                    epoch,
-                    key: input.item.clone(),
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .0;
+        let mut expected = input.item.clone();
+        if decision != CoordinatorDecision::Commit {
+            expected.insert("value".into(), AttributeValue::N("1".into()));
+        }
         assert_eq!(
-            image,
-            PartitionGetOutcome::Found(
-                (expected == CoordinatorDecision::Commit).then(|| input.item.clone())
-            )
+            client
+                .query::<PartitionGet>(
+                    healthy_target,
+                    None,
+                    Json(PartitionGetInput {
+                        table_id: input.table_id.clone(),
+                        epoch,
+                        key: extenddb_core::types::extract_key(
+                            &input.item,
+                            &fixture.table.key_schema,
+                        ),
+                    }),
+                )
+                .await
+                .unwrap()
+                .output
+                .0,
+            PartitionGetOutcome::Found(Some(expected)),
+            "healthy resolution must apply only the published decision"
         );
         client
             .command::<PartitionPut>(
@@ -314,24 +314,27 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
             .await
             .unwrap();
     }
-    objects.unblock_body_reads_for(&blocked);
+    refuse.store(false, Ordering::SeqCst);
     if startup {
-        provisioner
-            .recover_registered_account(ACCOUNT, &client, &storage, &nodes)
-            .await
-            .unwrap();
-    } else {
-        wait_resolved(&client, id, 2).await;
+        TransactionRecovery::new(
+            Arc::new(CellStorage::new(client.clone(), "local")),
+            ACCOUNT.into(),
+        )
+        .unwrap()
+        .initial_pass()
+        .await
+        .unwrap();
     }
+    wait_resolved(&client, id, 2).await;
     let completed = status(&client, id).await;
-    let final_decision = if expected == CoordinatorDecision::Begin {
-        CoordinatorDecision::Commit
+    let expected = if terminal {
+        decision
     } else {
-        expected
+        CoordinatorDecision::Commit
     };
     assert_eq!(
         (completed.decision, completed.resolved_count),
-        (final_decision.clone(), 2)
+        (expected, 2)
     );
     if terminal {
         assert_eq!(
@@ -342,17 +345,174 @@ async fn recovery_case(startup: bool, decision: CoordinatorDecision) {
                     Json(PartitionGetInput {
                         table_id: input.table_id.clone(),
                         epoch,
-                        key: input.item.clone(),
+                        key: extenddb_core::types::extract_key(
+                            &input.item,
+                            &fixture.table.key_schema
+                        )
                     })
                 )
                 .await
                 .unwrap()
                 .output
                 .0,
-            PartitionGetOutcome::Found(Some(newer))
+            PartitionGetOutcome::Found(Some(newer)),
+            "recovery must preserve later healthy writes"
         );
     }
-    host.shutdown().await.unwrap();
+    cancellation.cancel();
+    if let Some(worker) = worker {
+        worker.await.unwrap();
+    }
+    local_node::stop(node).await.unwrap();
+}
+fn mutation() -> MutationIdentity {
+    local_node::wall_mutation()
+}
+
+struct AdmitLater {
+    inner: Arc<dyn InvocationTransport>,
+    client: CellClient,
+    coordinator: CellTarget,
+    id: [u8; 16],
+    participants: Vec<(CellTarget, CoordinatorParticipant)>,
+    clock: Arc<AtomicI64>,
+    admitted: Arc<AtomicBool>,
+}
+impl InvocationTransport for AdmitLater {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
+        Box::pin(async move {
+            if invocation.target == self.coordinator
+                && invocation.operation == AbortExpiredTransaction::ID
+                && !self.admitted.swap(true, Ordering::SeqCst)
+            {
+                // The pass has already captured this shard's pending boundary.
+                self.clock.fetch_add(1, Ordering::SeqCst);
+                prepare(
+                    &self.client,
+                    &self.coordinator,
+                    self.id,
+                    &self.participants,
+                    &CoordinatorDecision::Begin,
+                    0,
+                )
+                .await;
+            }
+            self.inner.call(invocation, request).await
+        })
+    }
+}
+
+#[test]
+fn initial_pass_stops_at_observed_boundary_and_later_work_remains_discoverable() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+        let files = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(mutation().issued_at_ms));
+        let (node, client) =
+            local_node::start(files.path(), clock.clone(), host.handle(), core.handle())
+                .await
+                .unwrap();
+        let fixture = transaction_fixture::table(&client, "Boundary").await;
+        let id = [249; 16];
+        let coordinator = coordinator_target(ACCOUNT, &id).unwrap();
+        CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap())
+            .ensure(&client, ACCOUNT, &id)
+            .await
+            .unwrap();
+        prepare(
+            &client,
+            &coordinator,
+            id,
+            &fixture.participants,
+            &CoordinatorDecision::Begin,
+            0,
+        )
+        .await;
+        let later_id = (1_u128..100_000)
+            .map(u128::to_be_bytes)
+            .find(|id| coordinator_target(ACCOUNT, id).unwrap() == coordinator)
+            .unwrap();
+        let admitted = Arc::new(AtomicBool::new(false));
+        let observed = client.map_transport(|inner| {
+            Arc::new(AdmitLater {
+                inner,
+                client: client.clone(),
+                coordinator: coordinator.clone(),
+                id: later_id,
+                participants: fixture.participants.clone(),
+                clock,
+                admitted: admitted.clone(),
+            })
+        });
+        let mut recovery = TransactionRecovery::new(
+            Arc::new(CellStorage::new(observed, "local")),
+            ACCOUNT.into(),
+        )
+        .unwrap();
+        recovery.initial_pass().await.unwrap();
+        assert!(admitted.load(Ordering::SeqCst));
+        assert_eq!(status(&client, id).await.resolved_count, 2);
+        assert_eq!(
+            status(&client, later_id).await.decision,
+            CoordinatorDecision::Begin
+        );
+        for (target, _) in &fixture.participants {
+            assert_eq!(
+                client
+                    .query::<ReadPartitionTransaction>(
+                        target,
+                        None,
+                        Json(ReadTransactionInput {
+                            transaction_id: later_id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                        })
+                    )
+                    .await
+                    .unwrap()
+                    .output
+                    .0,
+                ParticipantTransactionState::Missing
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while status(&client, later_id).await.resolved_count != 2 {
+                recovery.step().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            status(&client, later_id).await.decision,
+            CoordinatorDecision::Commit
+        );
+        local_node::stop(node).await.unwrap();
+    });
+}
+
+async fn wait_resolved(client: &CellClient, id: [u8; 16], count: u8) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if status(client, id).await.resolved_count == count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn prepare(
@@ -456,17 +616,4 @@ async fn status(client: &CellClient, id: [u8; 16]) -> beyonddb::CrossCellTransac
         .output
         .0
         .unwrap()
-}
-
-async fn wait_resolved(client: &CellClient, id: [u8; 16], count: u8) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if status(client, id).await.resolved_count == count {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .unwrap();
 }

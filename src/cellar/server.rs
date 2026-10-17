@@ -21,6 +21,10 @@ use std::{
 use tokio_util::sync::CancellationToken;
 pub use transactions::TransactionRecovery;
 
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
+
 #[derive(Default)]
 pub struct TaskGroup {
     cancellation: CancellationToken,
@@ -107,6 +111,20 @@ impl CellarServer {
         accounts: Vec<String>,
         split_bytes: u64,
     ) -> anyhow::Result<()> {
+        let storage = Arc::new(CellStorage::new(self.client.clone(), self.region.clone()));
+        let mut transactions: Vec<_> = accounts
+            .iter()
+            .map(|account| TransactionRecovery::new(storage.clone(), account.clone()))
+            .collect::<Result<_, _>>()?;
+        let mut failure = None;
+        for recovery in &mut transactions {
+            if let Err(error) = recovery.initial_pass().await {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error.into());
+        }
         for account in &accounts {
             self.provisioner.admit_account(account).await?;
             self.provisioner.install_account_capacity_loop(
@@ -121,14 +139,12 @@ impl CellarServer {
             .install_global_index_loop(&self.tasks, accounts.clone())?;
         CellStorage::new(self.client.clone(), self.region.clone())
             .install_statistics_loop(&self.tasks, accounts.clone())?;
-        let storage = Arc::new(CellStorage::new(self.client.clone(), self.region.clone()));
         let client = self.client.clone();
         let cancellation = self.tasks.cancellation_token();
         self.tasks.spawn(async move {
             // One inventory page per account per tick, including cells whose
             // tables were deleted or whose split source is no longer routed.
             let mut cursors = vec![(0_u32, None::<[u8; 32]>); accounts.len()];
-            let mut transactions: Vec<_> = accounts.iter().map(|account| TransactionRecovery::new(storage.clone(), account.clone())).collect::<Result<_, _>>()?;
             let mut ticks = tokio::time::interval(Duration::from_secs(1));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {

@@ -89,7 +89,11 @@ must be an operator-authored IAM policy file. Later starts omit `--bootstrap`.
 The bootstrap account must be listed in `accounts`.
 
 The public server starts after Cellar reports ready, bootstrap completes and
-initial maintenance is admitted. Initial fleet observation can take longer than
+an initial transaction recovery pass succeeds for every configured account.
+The pass uses each shard's observed pending boundary, continues healthy work
+after a failure, and reports any unresolved admission or resolution failure
+before maintenance starts. Fresh BEGINs resume normally; startup alone does
+not authorize their abort. Initial fleet observation can take longer than
 local startup; the listener is not published while that readiness gate is closed.
 ExtendDB handles SIGINT/SIGTERM and drains its public listener. The application
 then cancels/joins maintenance and requests the Cellar stop protocol. A node
@@ -129,7 +133,7 @@ authenticated peer identity, the broad SDK restart scenario and native follower
 recovery with bundle/LTX publication withheld. The broad SDK scenario
 keeps batch/transaction/index/large-value checks across ordered ranges through
 hard and graceful restarts, then deletes and recreates a table. The
-account-domain fixture also passes SDK handoff to a second node. Nineteen cases in
+account-domain fixture also passes SDK handoff to a second node. Twenty-two cases in
 `tests/cellar_transactions.rs` qualify token retention, cross-cell write skew,
 bounded resume, delayed resolution, shared read snapshots, lost transaction
 phases, caller admission refusal, competing drivers, fair background discovery,
@@ -140,8 +144,12 @@ The native coordinator cases also retain history across 24 shards under a
 BEGIN after settled passes, and admit four table ranges after 32 coordinator
 shards have exceeded residency. A caller-injected child-install refusal retains
 the same pending split until capacity returns. Proven pre-submission Capacity
-maps to LimitExceeded; native HTTP failure remains ambiguous. Startup readiness
-gating after failed participant admission still needs its own port.
+maps to LimitExceeded; native HTTP failure remains ambiguous. The native recovery
+admission cases cover BEGIN/COMMIT/ABORT at startup and while serving, progress
+past failed records and shards, retry without overwriting newer values, and
+deferred discovery beyond the initial pending boundary. A server regression
+checks failure before maintenance starts and successful retry. These use an
+explicit caller policy before SDK submission, not physical network faults.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

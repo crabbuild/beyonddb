@@ -62,3 +62,6 @@ mod transaction_visibility;
 mod coordinator_checkpoints;
 #[path = "elastic_cells/coordinator_residency.rs"]
 mod coordinator_residency;
+
+#[path = "elastic_cells/recovery_admission.rs"]
+mod recovery_admission;
