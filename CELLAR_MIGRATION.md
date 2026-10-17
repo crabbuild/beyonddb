@@ -4,21 +4,38 @@ This worktree migrates BeyondDB from Cellule to the embedded Cellar SDK while
 retaining the existing ExtendDB frontend and BeyondDB table algorithms.
 
 The branch starts from BeyondDB `c05cae8` (current `origin/main` when the worktree
-was created). Cellar is pinned to
-`fa62847f496eefe393ce66e4bee6c477b712a832`; ExtendDB remains at its existing
-reviewed fork revision. Old Cellule storage roots must not be opened as Cellar
-state; the initial deployment uses a new storage prefix.
+was created). Cellar is pinned to the crates.io release
+`cellar = { package = "cellar-main", version = "=0.1.0" }`; ExtendDB remains at
+its existing reviewed fork revision. Old Cellule storage roots must not be
+opened as Cellar state; the initial deployment uses a new storage prefix.
 
-## Registry release switch pending
+## Registry release
 
-The requested registry dependency is `cellar = { package = "cellar-main",
-version = "=0.1.0" }`. On 2026-10-17, `cargo info cellar-main@0.1.0`, the
-crates.io version API and the sparse index could not find that package. The
-manifest and lockfile therefore still use the reviewed Git revision above;
-the crates.io switch is not complete. Once the release is available, resolve
-its actual dependency graph, review the lockfile, adapt any SDK API changes,
-and rerun qualification against the registry build. The evidence below applies
-to the Git dependency and must not be presented as registry-release evidence.
+The unified lockfile resolves `cellar-main`, `cellar-logic`, `cellar-native` and
+`cellar-ltx` to crates.io `0.1.0` with registry checksums. Metadata inspection
+verifies that no Cellar Git dependency or Cellule package remains, and resolving
+the release changed only those four dependency packages. The release declares
+Rust 1.94.1, within BeyondDB's existing Rust 1.97 requirement. Its package source
+records publication commit `f97a8aa4fd7ddc5e81807ddcbe1cc72dcdd9eb19`.
+
+Earlier qualification below used Git revision
+`fa62847f496eefe393ce66e4bee6c477b712a832`. Registry-release qualification is
+recorded separately; those earlier results remain evidence for that Git build.
+
+### Registry qualification
+
+All 72 focused tests pass on crates.io `0.1.0`: nine adapter units, two embedded
+fixtures, nine keyspace cases, 17 root units, one account fixture, nine directory
+cases, two domain cases, one signed local SDK case and 22 transaction cases.
+Every rebuilt executable copy was checked for SHA-256 equality before running
+from the internal SSD, with unchanged parallelism, assertions and deadlines.
+Strict Clippy passes for workspace libraries/binaries and all selected migrated
+integration/process targets. The separate nine-case RustFS process run is
+pending for this registry build.
+
+All-target Clippy still exits 101 in the retained legacy roots: 65 errors in
+`elastic_cells`, 12 in `node_log_authority` and 180 in `peer_network`. These
+fixtures still depend on Cellule APIs; no gates were disabled.
 
 ## Current state
 
@@ -160,7 +177,7 @@ The `server_binary` root now uses the same native process fixture and compiles
 under strict Clippy. CI explicitly runs `cellar_process` and the focused
 tests; legacy all-target and qualification commands remain enabled.
 
-`tests/cellar_transactions.rs` now runs nineteen cases over real SDK ingress:
+`tests/cellar_transactions.rs` now runs twenty-two cases over real SDK ingress:
 
 | Ported behavior | Evidence |
 | --- | --- |
@@ -272,9 +289,34 @@ had five passes and reproduced that one classification failure. After the fix,
 all nineteen transaction cases passed together in the rebuilt 68-case focused
 runtime run.
 
-Legacy admission fixtures still depend on Cellule authority APIs. Startup gating
-through a failed participant admission remains open. The read-cleanup fixture
-qualifies durable discovery and collection; it does not supply that startup gate.
+Startup now visits registered coordinator shards and their observed pending
+boundaries before starting maintenance or public HTTP. It retains a failure
+while continuing healthy records, later shards and later configured accounts.
+Fresh BEGINs use live recovery; only the atomic expiry command may abort them
+because of their age. Before acquiring more locks, recovery observes the original
+participant targets through SDK queries. Terminal decisions still resolve
+healthy participants independently of a failed peer.
+
+The native admission port covers BEGIN, COMMIT and ABORT both after local SDK
+restart and during serving recovery. A caller policy refuses the first
+participant before submission; counters prove zero transport calls for that
+target. Later records and shards settle, a partial BEGIN gains no extra locks,
+and a successful retry preserves newer healthy writes. Another case admits a
+record after the observed boundary, verifies that the initial pass leaves it
+untouched, then discovers and commits it through the serving cursor. The server
+initialization regression verifies that a failed pass starts no maintenance,
+still inspects a later account, and can be retried successfully. These four new
+checks pass. They exercise caller admission and real SDK state, not a physical
+network partition or a native resource-pressure policy.
+
+After this startup change, all 17 root-library tests and all 22 transaction
+tests passed with zero ignored cases on the Git dependency. Strict Clippy passed for workspace libraries,
+binaries and the transaction target. The rebuilt test executables were copied
+to the internal SSD, checked for SHA-256 equality, then run with their normal
+parallelism and unchanged assertions/deadlines. The nine RustFS process cases
+also passed after the startup change in 483 seconds, including the 70-shard
+replacement and native follower fault. Registry-release results are recorded
+separately from these Git-build results.
 
 The token fixture now builds its states with actual coordinator commands. Those
 commands collect resolved write payloads, which the old raw SQL seed left
@@ -327,8 +369,8 @@ replica-read-policy override.
    installation, including retired sources.
 4. Done: removed Cellule dependencies from the production manifest, joined the
    adapter/keyspace crates to the workspace and regenerated the root lockfile.
-   Obsolete nested lockfiles have been removed; dependency review remains before
-   commit. Cellar is pinned once in workspace dependencies.
+   Obsolete nested lockfiles have been removed. Cellar is pinned once in
+   workspace dependencies as the exact crates.io release described above.
 5. Port the existing behavior fixtures to the new host. Verify CRUD, queries,
    scans, batches, transactions, indexes, streams and TTL through ExtendDB and
    signed AWS SDK requests. Runtime-specific legacy fixtures require a Cellar
@@ -364,7 +406,7 @@ cargo test --manifest-path crates/bdb-cellar-runtime/Cargo.toml --locked
 cargo clippy --manifest-path crates/bdb-cellar-runtime/Cargo.toml --all-targets --locked -- -D warnings
 ```
 
-Across the focused checks, 68 tests pass: nine adapter units, two embedded
+The preceding complete focused run passed 68 tests: nine adapter units, two embedded
 fixtures, nine keyspace cases, sixteen root units, the signed local process
 test, the ported account SDK handoff fixture, nineteen transaction/transport
 fixtures, two domain schema/cache cases and nine directory/creation/lifecycle cases. The
@@ -375,7 +417,7 @@ above. Run them with:
 cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test embedded --test ranges --locked
 ```
 
-The latest 68-case runtime verification executed all ten built test programs
+That 68-case runtime verification executed all ten built test programs
 from the internal SSD, after checking every copy's SHA-256 against its mounted
 build artifact. Test parallelism, assertions and deadlines were unchanged; the
 result was 68 passed, zero failed and zero ignored; all nine directory cases
@@ -387,7 +429,10 @@ volume. Their timing cause is not established; these reruns do not claim a
 startup fix. The embedded fixture now labels startup/shutdown deadline errors.
 
 The selected strict-Clippy rerun passed after the coordinator fixture ports
-and pre-submission capacity-classification fix. Run the selected library, binary and integration checks:
+and pre-submission capacity-classification fix. The startup recovery change
+subsequently passed all 17 root units and 22 transaction fixtures, plus strict
+Clippy for workspace libraries/binaries and the transaction target. Those are
+the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
 cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
@@ -405,8 +450,9 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells`, `node_log_authority` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest rerun reported 66 errors in `elastic_cells` and 180 in `peer_network`.
-It did not emit a `node_log_authority` diagnostic before stopping; that source
-still imports Cellule and remains unqualified (its previous run had 12 errors).
+The latest rerun reported 12 errors in `node_log_authority` and 180 in
+`peer_network`. It did not emit an `elastic_cells` diagnostic before stopping;
+that source still imports Cellule and remains unqualified (its preceding run
+had 66 errors).
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

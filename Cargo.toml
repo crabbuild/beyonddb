@@ -9,7 +9,7 @@ repository = "https://github.com/crabbuild/beyonddb"
 rust-version = "1.97"
 
 [workspace.dependencies]
-cellar = { git = "https://github.com/crabbuild/cellar.git", rev = "fa62847f496eefe393ce66e4bee6c477b712a832" }
+cellar = { package = "cellar-main", version = "=0.1.0" }
 async-trait = "0.1"
 blake3 = "1.8"
 futures-util = "0.3"

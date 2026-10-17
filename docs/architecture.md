@@ -1,6 +1,6 @@
 # Understand BeyondDB's architecture and durability
 
-For `codex/bdb-cellar`, the current runtime is described in
+For `beyonddb-cellar`, the current runtime is described in
 [the embedded server guide](cellar-server.md), and table ownership follows
 [ordered cell partitioning](ordered-cell-partitioning.md). The Cellule runtime
 details and HASH placement described below record the earlier implementation.

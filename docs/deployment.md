@@ -1,6 +1,6 @@
 # Deploy a BeyondDB node
 
-For `codex/bdb-cellar`, use [the embedded Cellar server guide](cellar-server.md).
+For `beyonddb-cellar`, use [the embedded Cellar server guide](cellar-server.md).
 It describes the current executable, configuration and fresh ordered storage
 roots. The Cellule configuration and runtime qualification recorded below are
 historical and still require migration.

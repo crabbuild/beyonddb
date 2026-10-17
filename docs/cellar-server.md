@@ -1,7 +1,7 @@
 # Embedded Cellar server
 
 Status: implemented with a passing local signed SDK/process-restart fixture on
-`codex/bdb-cellar`. Root and adapter unit suites also pass. Historical Cellule
+`beyonddb-cellar`. Root and adapter unit suites also pass. Historical Cellule
 results are not Cellar qualification. Ordered routing is implemented with local
 serving/split checks. Nine bucket-backed process fixtures pass, including owner
 replacement with no previous local state. Legacy fixture migration and the

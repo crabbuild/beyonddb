@@ -4,8 +4,10 @@ BeyondDB is an **in-progress, self-hosted DynamoDB-compatible service**. It
 uses [ExtendDB](https://github.com/ExtendDB/extenddb) for the DynamoDB HTTP
 protocol, SigV4, IAM evaluation, validation, and expressions. It uses
 [Cellar](https://github.com/crabbuild/cellar) for fenced Cell ownership,
-SQLite execution, LTX publication, and object-store durability. The reviewed
-dependency revisions are pinned in [Cargo.toml](Cargo.toml).
+SQLite execution, LTX publication, and object-store durability. The
+[`cellar-main` crates.io release](https://crates.io/crates/cellar-main/0.1.0) is
+pinned to `=0.1.0`, and ExtendDB's reviewed Git revision is pinned in
+[Cargo.toml](Cargo.toml).
 
 An AWS SDK can send signed requests to BeyondDB's public endpoint. Core table
 and item operations, transactions, TTL, selected secondary indexes, and a

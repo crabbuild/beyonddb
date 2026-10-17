@@ -1,5 +1,11 @@
 # Review BeyondDB's implementation evidence
 
+> **Historical Cellule baseline:** this page records the earlier host and its
+> qualification. The current server embeds Cellar, pinned to the crates.io
+> `cellar-main =0.1.0` release. Read [Cellar migration status](../CELLAR_MIGRATION.md)
+> for current evidence and open gates, and [the server guide](cellar-server.md)
+> for current startup and deployment behavior.
+
 This is the detailed engineering and qualification record for BeyondDB. It explains what each path does, which tests exercise it, and which claims remain open. Start with the [API coverage table](api.md) for a workload decision, the [architecture guide](architecture.md) for Cell ownership, the [user guide](user-guide.md) for requests, or the [deployment guide](deployment.md) for a local node. Run commands on this page from the repository root. Some historical results used earlier dependency pins; check [Cargo.toml](../Cargo.toml) for the current revisions.
 
 BeyondDB connects ExtendDB's DynamoDB protocol, validation, expression, authentication, and operation layers to Cellule's Cell runtime, peer transport, SQLite execution, and LTX publication. Both dependencies are pinned to reviewed Git revisions.

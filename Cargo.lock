@@ -728,7 +728,7 @@ dependencies = [
  "bdb-keyspace",
  "blake3",
  "bytes",
- "cellar",
+ "cellar-main",
  "getrandom 0.3.4",
  "http 1.5.0",
  "http-body-util",
@@ -768,7 +768,7 @@ dependencies = [
  "bigdecimal",
  "blake3",
  "bytes",
- "cellar",
+ "cellar-main",
  "ed25519-dalek",
  "extenddb-auth",
  "extenddb-core",
@@ -920,9 +920,39 @@ dependencies = [
 ]
 
 [[package]]
-name = "cellar"
-version = "0.6.2"
-source = "git+https://github.com/crabbuild/cellar.git?rev=fa62847f496eefe393ce66e4bee6c477b712a832#fa62847f496eefe393ce66e4bee6c477b712a832"
+name = "cellar-logic"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee3c27b9f092c103415d46ef789dd5a49c9bbaa4fddc2361e1a34704054b185e"
+
+[[package]]
+name = "cellar-ltx"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7737e468fcc6cf094b6f28d2c6fa60cd017f30c433c3517b5660f2101e1b7f19"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "crc-fast",
+ "futures-util",
+ "http 1.5.0",
+ "lz4_flex",
+ "object_store",
+ "percent-encoding",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "cellar-main"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f431166bf88935a14e0bb07355a1b27f702f75a362fc22fe9f43ec94356c69"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -982,36 +1012,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cellar-logic"
-version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellar.git?rev=fa62847f496eefe393ce66e4bee6c477b712a832#fa62847f496eefe393ce66e4bee6c477b712a832"
-
-[[package]]
-name = "cellar-ltx"
-version = "0.0.0"
-source = "git+https://github.com/crabbuild/cellar.git?rev=fa62847f496eefe393ce66e4bee6c477b712a832#fa62847f496eefe393ce66e4bee6c477b712a832"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "crc-fast",
- "futures-util",
- "http 1.5.0",
- "lz4_flex",
- "object_store",
- "percent-encoding",
- "rusqlite",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "ureq",
-]
-
-[[package]]
 name = "cellar-native"
 version = "0.1.0"
-source = "git+https://github.com/crabbuild/cellar.git?rev=fa62847f496eefe393ce66e4bee6c477b712a832#fa62847f496eefe393ce66e4bee6c477b712a832"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36c39c3324591226c94601c5b8a68d6398d133f3b88f748c93fbbaf93bb2fcba"
 dependencies = [
  "aes",
  "aes-gcm",
