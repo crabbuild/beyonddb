@@ -9,6 +9,17 @@ was created). Cellar is pinned to
 reviewed fork revision. Old Cellule storage roots must not be opened as Cellar
 state; the initial deployment uses a new storage prefix.
 
+## Registry release switch pending
+
+The requested registry dependency is `cellar = { package = "cellar-main",
+version = "=0.1.0" }`. On 2026-10-17, `cargo info cellar-main@0.1.0`, the
+crates.io version API and the sparse index could not find that package. The
+manifest and lockfile therefore still use the reviewed Git revision above;
+the crates.io switch is not complete. Once the release is available, resolve
+its actual dependency graph, review the lockfile, adapt any SDK API changes,
+and rerun qualification against the registry build. The evidence below applies
+to the Git dependency and must not be presented as registry-release evidence.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
