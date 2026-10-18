@@ -11,3 +11,8 @@ mod local_indexes;
 mod native_peer;
 #[path = "support/signed_http.rs"]
 mod signed_http;
+
+#[path = "elastic_cells/global_index_splits.rs"]
+mod global_index_splits;
+#[path = "elastic_cells/index_backfill.rs"]
+mod index_backfill;

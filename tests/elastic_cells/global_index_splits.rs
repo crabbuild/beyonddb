@@ -1,13 +1,19 @@
-use super::global_indexes::{ACCOUNT, mutation, owner};
-use crate::*;
-use beyonddb::{
-    ActivateGlobalIndexImport, ApplyGlobalIndexMutation, BeginDirectoryTransfer,
-    DirectoryPartitionInput, ExportGlobalIndexEntries, GlobalIndexApplyOutcome, GlobalIndexEntry,
-    GlobalIndexExport, GlobalIndexFingerprint, GlobalIndexImport, GlobalIndexImportComplete,
-    GlobalIndexMutation, GlobalIndexQuery, GlobalIndexScan, GlobalIndexSplitPlan, GlobalIndexState,
-    ImportGlobalIndexEntry, OpenGlobalIndexImport, PrepareGlobalIndexSplit, ProjectionVersion,
-    PublishDirectoryTransfer, ReadDirectoryTransfer, ReadGlobalIndexPartition,
-    ReadGlobalIndexState, global_index_target, initialize_global_index,
+use super::global_indexes::{ACCOUNT, mutation, observed_index_recovery, owner, runtimes};
+use crate::{
+    native_peer::{self, Inspection, Observations, Peer, SOURCE},
+    signed_http::SignedHttp,
+};
+use bdb_cellar_runtime::{
+    app::CompiledApplication,
+    client::{CellClient, InvocationError},
+    identity::CellTarget,
+};
+use beyonddb::*;
+use extenddb_core::types::{AttributeValue, Item};
+use extenddb_storage::TableEngine;
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
 };
 
 async fn fenced(
@@ -64,81 +70,46 @@ async fn fenced(
 }
 
 async fn restored(
-    application: &Arc<cellule_app::CompiledApplication>,
-    layout: &CellStorageLayout,
-    directory: &std::path::Path,
-    session: SessionId,
-    targets: &[CellTarget],
-) -> (
-    cellule_host::CellNode,
-    Arc<CellInitialPartitionProvisioner>,
-    CellClient,
-) {
-    let (host, provisioner, client, _) = owner(application, layout, session, directory);
-    for (i, target) in targets.iter().enumerate() {
-        let cell_type = application
-            .cell_types()
-            .iter()
-            .find(|cell_type| cell_type.namespace() == target.namespace())
-            .unwrap();
-        let proof = CellCatalog::new(layout.clone(), target.tenant())
-            .lookup(target.cell_id())
-            .await
-            .unwrap()
-            .unwrap();
-        let authority = CellAuthority::new(layout.clone());
-        let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
-        host.runtime()
-            .acquire_idle_restored(
-                proof,
-                CellReplica::new(
-                    layout.clone(),
-                    *target.cell_id().as_bytes(),
-                    *idle.value().incarnation.as_bytes(),
-                    Limits {
-                        max_database_bytes: cell_type.database_limit_bytes(),
-                        max_capture_bytes: cell_type.capture_limit_bytes(),
-                        ..Limits::default()
-                    },
-                )
-                .unwrap(),
-                authority,
-                idle,
-                directory.join(format!("restored-{i}.sqlite")),
-                Owner {
-                    session,
-                    endpoint: "http://index-transfer.internal".into(),
-                },
-            )
-            .await
-            .unwrap();
-    }
-    (host, provisioner, client)
+    application: Arc<CompiledApplication>,
+    bucket: cellar::bucket::Bucket,
+    directory: &Path,
+    observed: Observations,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+) -> (Peer, Arc<CellInitialPartitionProvisioner>, CellClient) {
+    let (node, provisioner, client, _) =
+        owner(application, bucket, directory, observed, host, core).await;
+    (node, provisioner, client)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_restart() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "index-transfer".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+async fn snapshot_owners(
+    inspection: &Inspection,
+    observed: &Observations,
+    name: &str,
+    targets: &[CellTarget],
+) -> Vec<(CellTarget, cellar::sdk::CellIdentity, native_peer::Owner)> {
+    let mut result = Vec::new();
+    for target in targets {
+        let actual = native_peer::identity(observed, name, target).unwrap();
+        let owner = inspection.owner(&actual.scope).await;
+        assert_eq!(owner.node.as_deref(), Some(name));
+        result.push((target.clone(), actual, owner));
+    }
+    result
+}
+
+#[test]
+fn index_transfer_retains_versions_tombstones_and_fences_replay_after_restart() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+    let application = native_peer::application();
     let account = account_target(ACCOUNT).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("index-transfer"),
-        *account.application().as_bytes(),
-    );
-    let session = SessionId::from_bytes([95; 16]);
-    let (mut host, provisioner, mut client, storage) = owner(
-        &application,
-        &layout,
-        session,
-        &directory.path().join("first"),
-    );
+    let bucket = cellar::bucket::Bucket::open_dev(&directory.path().join("objects.sqlite")).unwrap();
+    let observed = Arc::new(Mutex::new(Default::default()));
+    let mut owner_dir = directory.path().join(SOURCE);
+    let (mut node, provisioner, mut client, storage) = owner(application.clone(), bucket.clone(), &owner_dir, observed.clone(), host.handle(), core.handle()).await;
+    let inspection = Inspection::new(bucket.clone(), host.handle());
     provisioner.admit_account(ACCOUNT).await.unwrap();
     storage.create_table(ACCOUNT, serde_json::from_value(serde_json::json!({
         "TableName":"SplitIndexes", "BillingMode":"PAY_PER_REQUEST",
@@ -164,7 +135,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         &beyonddb::account_target("123456789012").unwrap(),
         RoutePageInput {
             table_id: index.id.clone(),
-            start_hash: None,
+            start_key: None,
             after_lower: None,
             expected_epoch: None,
         },
@@ -182,13 +153,24 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         .output
         .0
         .unwrap();
-    let boundary = (u128::from_be_bytes(spec.upper.unwrap()) / 2).to_be_bytes();
+    assert_eq!(partitions.len(), 2);
+    assert_eq!(spec.epoch, epoch);
+    let groups = [0, 1].map(|n| AttributeValue::S(format!("{}g{n}", "\u{2}".repeat(1800))));
+    // Split inside an equal (GSI PK, SK) set using the full base-key suffix.
+    // Both physical children must participate in a query for groups[1].
+    let boundary_item = Item::from([
+        ("id".into(), AttributeValue::S(format!("{}item-035", "\u{1}".repeat(1800)))),
+        ("group".into(), groups[1].clone()), ("score".into(), AttributeValue::N("2".into())),
+    ]);
+    let boundary = ordered_index_key(&boundary_item, &index.specification.key_schema, &table.key_schema).unwrap();
+    assert!(spec.lower.as_ref().is_none_or(|low| &boundary > low));
+    assert!(spec.upper.as_ref().is_none_or(|high| &boundary < high));
     let mut children = [spec.clone(), spec.clone()];
     children[0].partition_id = [96; 16];
-    children[0].upper = Some(boundary);
+    children[0].upper = Some(boundary.clone());
     children[0].epoch = epoch + 1;
     children[1].partition_id = [97; 16];
-    children[1].lower = Some(boundary);
+    children[1].lower = Some(boundary.clone());
     children[1].epoch = epoch + 1;
     let plan = GlobalIndexSplitPlan {
         source: spec,
@@ -211,40 +193,9 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         .children
         .each_ref()
         .map(|child| global_index_target(ACCOUNT, &index.id, &child.partition_id).unwrap());
-    for (i, target) in targets.iter().enumerate() {
-        Bootstrap {
-            runtime: host.runtime(),
-            registry: &application.registry(),
-            layout: &layout,
-            session,
-        }
-        .cell(
-            target,
-            "beyonddb-global-index",
-            96 + i as u8,
-            &directory.path().join(format!("child-{i}.sqlite")),
-            initialize_global_index,
-        )
-        .await;
-    }
-    // The same index key is legal for many distinct base keys. Include both
-    // split halves, normalized numeric keys, wide escaped keys, large images,
-    // and deletion records; a batch of 65 full keys would exceed SQL limits.
-    let mut groups = [None, None];
-    for n in 0..1000 {
-        let key = Item::from([(
-            "group".into(),
-            AttributeValue::S(format!("{}g{n}", "\u{2}".repeat(1800))),
-        )]);
-        let hash = data_key_hash(&index.id, &key, &index.specification.key_schema).unwrap();
-        if hash < plan.source.upper.unwrap() {
-            groups[usize::from(hash >= boundary)].get_or_insert(key["group"].clone());
-        }
-        if groups.iter().all(Option::is_some) {
-            break;
-        }
-    }
-    let groups = groups.map(Option::unwrap);
+    // SDK command ingress creates each child's registered schema on demand.
+    // Include normalized numeric ties, wide escaped keys, large images and
+    // tombstones; 65 complete keys would exceed the old SQL argument budget.
     let mut entries = Vec::new();
     for n in 0..70 {
         let key = Item::from([
@@ -369,8 +320,8 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         GlobalIndexFingerprint::default(),
     ];
     for (position, entry) in copied.iter().enumerate() {
-        let hash = data_key_hash(&index.id, &entry.key, &index.specification.key_schema).unwrap();
-        let child = usize::from(hash >= boundary);
+        let encoded = ordered_index_key(&entry.key, &index.specification.key_schema, &table.key_schema).unwrap();
+        let child = usize::from(encoded >= boundary);
         summaries[child]
             .include(entry, &plan.children[child])
             .unwrap();
@@ -396,21 +347,13 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             );
         }
         if position == 12 {
-            host.shutdown().await.unwrap();
-            (host, _, client) = restored(
-                &application,
-                &layout,
-                &directory.path().join("partial"),
-                SessionId::from_bytes([98; 16]),
-                &[
-                    targets[0].clone(),
-                    targets[1].clone(),
-                    source.clone(),
-                    account.clone(),
-                    index_directory.clone(),
-                ],
-            )
-            .await;
+            let physical_targets = [source.clone(), targets[0].clone(), targets[1].clone()];
+            let previous = snapshot_owners(&inspection, &observed, SOURCE, &physical_targets).await;
+            node.stop().await;
+            std::fs::remove_dir_all(&owner_dir).unwrap();
+            owner_dir = directory.path().join("transfer-partial");
+            (node, _, client) = restored(application.clone(), bucket.clone(), &owner_dir, observed.clone(), host.handle(), core.handle()).await;
+            inspection.departed_node(SOURCE, "transfer-partial").await;
             for (i, target) in targets.iter().enumerate() {
                 assert_eq!(
                     client
@@ -434,12 +377,13 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
                 );
             }
             fenced(&client, &source, &plan, epoch, &entries[1].key).await;
+            observed_index_recovery(&inspection, &observed, "transfer-partial", &previous).await;
         }
     }
     let mut conflict = copied[0].clone();
     conflict.version.sequence += 1000;
     let child = usize::from(
-        data_key_hash(&index.id, &conflict.key, &index.specification.key_schema).unwrap()
+        ordered_index_key(&conflict.key, &index.specification.key_schema, &table.key_schema).unwrap()
             >= boundary,
     );
     assert!(
@@ -504,21 +448,13 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             Some(plan.clone().into())
         );
     }
-    host.shutdown().await.unwrap();
-    let (host, _, client) = restored(
-        &application,
-        &layout,
-        &directory.path().join("activated"),
-        SessionId::from_bytes([99; 16]),
-        &[
-            targets[0].clone(),
-            targets[1].clone(),
-            source.clone(),
-            account.clone(),
-            index_directory.clone(),
-        ],
-    )
-    .await;
+    let physical_targets = [source.clone(), targets[0].clone(), targets[1].clone()];
+    let previous = snapshot_owners(&inspection, &observed, "transfer-partial", &physical_targets).await;
+    node.stop().await;
+    std::fs::remove_dir_all(&owner_dir).unwrap();
+    owner_dir = directory.path().join("transfer-activated");
+    let (mut node, provisioner, client) = restored(application.clone(), bucket, &owner_dir, observed.clone(), host.handle(), core.handle()).await;
+    inspection.departed_node("transfer-partial", "transfer-activated").await;
     fenced(&client, &source, &plan, epoch, &entries[1].key).await;
     for (i, target) in targets.iter().enumerate() {
         assert_eq!(
@@ -534,6 +470,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             })
         );
     }
+    observed_index_recovery(&inspection, &observed, "transfer-activated", &previous).await;
     // Resume after directory publication but before either child opens. The
     // retained account plan and sealed source drive recovery without old owners.
     provisioner
@@ -560,7 +497,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
     }
     for entry in &copied {
         let child = usize::from(
-            data_key_hash(&index.id, &entry.key, &index.specification.key_schema).unwrap()
+            ordered_index_key(&entry.key, &index.specification.key_schema, &table.key_schema).unwrap()
                 >= boundary,
         );
         let old = GlobalIndexMutation {
@@ -587,7 +524,8 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
         );
     }
     let mut actual = Vec::new();
-    for target in &targets {
+    let mut ties_per_child = [0_usize; 2];
+    for (position, target) in targets.iter().enumerate() {
         let mut after = None;
         loop {
             let PartitionScanOutcome::Page {
@@ -612,6 +550,7 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             else {
                 panic!("child not serving");
             };
+            ties_per_child[position] += items.iter().filter(|item| item["group"] == groups[1] && item["score"] == AttributeValue::N("2".into())).count();
             actual.extend(items);
             let Some(next) = last_evaluated_key else {
                 break;
@@ -619,12 +558,106 @@ async fn index_transfer_retains_versions_tombstones_and_fences_replay_after_rest
             after = Some(next);
         }
     }
+    assert!(ties_per_child.iter().all(|count| *count > 0), "equal GSI PK/SK entries must actually span both child cells: {ties_per_child:?}");
     actual.sort_by_key(|item| format!("{:?}", item["id"]));
-    let mut expected: Vec<_> = entries.into_iter().filter_map(|entry| entry.item).collect();
+    let mut expected: Vec<_> = entries.iter().filter_map(|entry| entry.item.clone()).collect();
     expected.sort_by_key(|item| format!("{:?}", item["id"]));
     assert_eq!(
         actual, expected,
         "no tombstones resurrected or duplicate index keys overwritten"
     );
-    host.shutdown().await.unwrap();
+    let http = SignedHttp::start(&client, provisioner, true).await;
+    assert_sdk_ties(&http.sdk, &groups, &expected).await;
+    http.stop().await;
+    node.stop().await;
+    inspection.close().await;
+    });
+}
+
+async fn assert_sdk_ties(
+    sdk: &aws_sdk_dynamodb::Client,
+    groups: &[AttributeValue; 2],
+    expected: &[Item],
+) {
+    use aws_sdk_dynamodb::types::AttributeValue as A;
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk.config()
+            .to_builder()
+            .retry_config(aws_sdk_dynamodb::config::retry::RetryConfig::disabled())
+            .build(),
+    );
+    for group in groups {
+        let AttributeValue::S(group_name) = group else {
+            unreachable!()
+        };
+        let mut group_items: Vec<_> = expected
+            .iter()
+            .filter(|item| &item["group"] == group)
+            .collect();
+        group_items.sort_by_key(|item| match &item["id"] {
+            AttributeValue::S(id) => id.clone(),
+            other => panic!("unexpected base key: {other:?}"),
+        });
+        let group_items: Vec<std::collections::HashMap<_, _>> = group_items
+            .into_iter()
+            .map(|item| {
+                item.iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            match value {
+                                AttributeValue::S(value) => A::S(value.clone()),
+                                AttributeValue::N(value) => A::N(value.clone()),
+                                AttributeValue::B(value) => {
+                                    A::B(aws_sdk_dynamodb::primitives::Blob::new(value.clone()))
+                                }
+                                other => panic!("unexpected transfer fixture value: {other:?}"),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        for forward in [true, false] {
+            let mut cursor = None;
+            let mut found = Vec::new();
+            for page in 0..100 {
+                let result = sdk
+                    .query()
+                    .table_name("SplitIndexes")
+                    .index_name("ByGroup")
+                    .key_condition_expression("#group = :g AND score = :s")
+                    .expression_attribute_names("#group", "group")
+                    .expression_attribute_values(":g", A::S(group_name.clone()))
+                    .expression_attribute_values(":s", A::N("2".into()))
+                    .scan_index_forward(forward)
+                    .limit(3)
+                    .set_exclusive_start_key(cursor)
+                    .send()
+                    .await
+                    .unwrap();
+                found.extend(result.items().iter().cloned());
+                cursor = result.last_evaluated_key;
+                if let Some(key) = &cursor {
+                    assert_eq!(
+                        key.len(),
+                        3,
+                        "GSI continuation must retain the full base key"
+                    );
+                }
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(page < 99, "SDK query did not finish across split GSI ties");
+            }
+            let mut ordered = group_items.clone();
+            if !forward {
+                ordered.reverse();
+            }
+            assert_eq!(
+                found, ordered,
+                "split GSI query lost, reordered or resurrected equal sort keys"
+            );
+        }
+    }
 }

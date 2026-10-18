@@ -172,13 +172,19 @@ closed ingress after fencing. An expired unavailable follower cannot prove a
 new write while both bundle and LTX publication are withheld; that same signed
 request completes when publication resumes. The fixtures never edit authority
 records or require epoch rotation from TTL expiry alone.
-Three `tests/cellar_indexes.rs` cases retain local/global index mutation,
+Six `tests/cellar_indexes.rs` cases retain local/global index mutation,
 transaction, split, replay and restart contracts. LSI splits keep PK collections
 together and retain logical query cursors. GSI replay preserves large chunked
 images, versions and tombstones. Maintenance visits every published GSI range
 through native ingress even when its base outbox is empty, so idle and empty
 ranges recover on a new owner. Fixtures observe actual SDK factories and owner
 epochs before issuing user index reads, after deleting the former directories.
+Backfill cases preserve the historical delivery barrier, prepare reservations
+and unfinished scan policy across owner replacement and range splits. The GSI
+transfer case retains 70 wide-key records, binary images and tombstones across
+partial-import and post-publication replacements. Equal index PK/SK entries
+span both children via the complete base-key suffix; signed forward/reverse
+queries retain all rows and full continuation keys after recovery.
 Embedding callers can own a `TaskGroup` and call its bounded `shutdown` before
 stopping the SDK node; the executable follows that same shutdown order.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and

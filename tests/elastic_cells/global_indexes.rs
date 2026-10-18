@@ -393,7 +393,7 @@ fn journal_recovers_partial_projection_and_fences_delayed_images() {
     });
 }
 
-async fn observed_index_recovery(
+pub(super) async fn observed_index_recovery(
     inspection: &Inspection,
     observed: &Observations,
     node: &str,

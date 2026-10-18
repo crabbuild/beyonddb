@@ -24,18 +24,20 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 88 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+All 91 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
-nine directory cases, two domain cases, three index cases, two native peer
+nine directory cases, two domain cases, six index cases, two native peer
 cases, one signed local SDK case, 22 transaction cases and eight native
 lease/log cases. The thirteen rebuilt focused test executables were checked
 for SHA-256 equality before running from the internal SSD, with unchanged
-parallelism, assertions and deadlines. The index target passed all three cases
-in 28.88 seconds during this complete rerun.
+parallelism, assertions and deadlines. The index target passed all six cases
+in 38.94 seconds during this complete rerun.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. The current registry build, including the frontend
+integration/process targets. Production build `11432e7`, including the frontend
 read policy and idle-index worker fix, passed all nine explicitly executed
 RustFS process cases in 464.15 seconds, with zero failures or ignored cases.
+The subsequent backfill/transfer port changes only tests and documentation;
+its server executable still matches that process build's SHA-256.
 They cover the broad signed
 SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards
 beyond residency, native follower recovery
@@ -82,7 +84,7 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in two retained legacy roots: 62 errors in
+All-target Clippy still exits 101 in two retained legacy roots: 61 errors in
 `elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
@@ -117,8 +119,8 @@ idle-index worker fix and its qualification are described below.
 
 ### Native index contracts and idle range recovery
 
-`tests/cellar_indexes.rs` ports the local-index and two global-index behavior
-cases onto real SDK ingress and shared bucket storage. The private account
+`tests/cellar_indexes.rs` ports six local/global-index behavior cases onto real
+SDK ingress and shared bucket storage. The private account
 fixture remains an explicit internal generation; the public table starts with
 two ordered data cells and never uses the single-cell public creation path.
 
@@ -145,6 +147,29 @@ recovery and automatic journal replay. A second directory loss has no new
 base mutation or outbox entry. Before any user index read, the fixture
 requires actual SDK factories for every published range, including empty
 ranges, and checks the unchanged scopes and increased native owner epochs.
+
+The two typed backfill cases retain 24 historical items, configuration refusal
+while a prepare owns reservations, immutable key-type validation, invalid
+historical-key skipping, deferred ordinary journal work and the historical
+delivery barrier. A partially scanned policy/cursor survives a fresh SDK owner
+after removal of the old directory. Splitting before scanning copies the
+unfinished obligation and mutable policy to both children; delivery covers
+every original row, and removing the policy changes future write validation
+without changing the immutable installation. These are internal policy/phase
+contracts, not qualification of a public online-index update API.
+
+The transfer case retains 70 entries with 1,800-character escaped keys,
+normalized numeric ties, 350 KiB binary images and deletion tombstones. It
+checks bounded export pages, replay-safe imports, version/fingerprint conflicts,
+pre-publication traffic fences and retained directory plans. SDK replacement
+after entry 13 preserves both partial fingerprints; another replacement after
+publication preserves Activated children before opening. Both replacements
+remove the former directories and observe native lease/sample expiry, stable
+scopes and higher actual owner epochs. After resumption, stale images remain
+superseded and tombstones stay absent. An equal GSI PK/SK set is stored in both
+children through its complete ordered base-key suffix, and signed AWS queries
+with retries disabled verify forward/reverse pagination and complete logical
+continuation keys across that split.
 
 This regression failed in both the combined suite and alone: the worker
 listed index ranges but its idle-index branch did no SDK work. Journal replay
@@ -499,9 +524,9 @@ replica-read-policy override.
 7. Update contributor guidance, startup configuration, CI and operational docs
    to describe the actual Cellar server and its qualified capability boundary.
 
-The remaining `elastic_cells` setup still covers online GSI backfill/transfer,
-SQLite-full and reservation behavior, multipart upload replacement, native
-session shutdown, and its large root fixture. Its previously ported modules
+The remaining `elastic_cells` setup still covers SQLite-full and reservation
+behavior, multipart upload replacement, native session shutdown, and its large
+root fixture. GSI backfill/transfer now run in the selected native index target. Its previously ported modules
 also remain included there until that root is migrated. `peer_network` retains
 its separate physical and residency fixtures. Passing the selected native
 targets does not complete either aggregate suite.
@@ -576,7 +601,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 62 errors in `elastic_cells` and
+The latest registry-release rerun reported 61 errors in `elastic_cells` and
 60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.
