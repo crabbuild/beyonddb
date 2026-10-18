@@ -31,7 +31,7 @@ multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
 five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. Five native reclamation cases and four cold-admission cases are also qualified
+cases in 26.37 seconds. Five native reclamation cases and five coordinator-admission cases are also qualified
 below.
 These are separate focused runs; the complete 133-case run remains the latest
 combined evidence. Production code
@@ -42,7 +42,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (134 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (133 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -871,9 +871,9 @@ Production code, dependency pins and shared runtime fixtures are unchanged;
 earlier complete native, focused ports and nine-process runs remain separate
 evidence.
 
-### Native cold coordinator publication, claims and replay
+### Native coordinator admission, publication, claims and replay
 
-`tests/cellar_admission.rs` ports four cold-coordinator contracts with the
+`tests/cellar_admission.rs` ports five coordinator-admission contracts with the
 original two/four caller threads, eight/sixteen-cell resident budgets, disabled
 AWS retries and scoped Residency IAM. Public tables still have two ordered
 ranges. Payload gates pause LTX PUTs; claim gates delay and forward the SDK's
@@ -904,10 +904,13 @@ original conditional creation PUT is released. It does not issue another owner
 GET before that CAS. Empty coordinator state, registration and the original scope
 survive local-file deletion and recovery at a higher SDK epoch.
 
-The competing-owner case holds the actual SDK Create-mode owner PUT after
-absence has been observed while SOURCE is the only node. A real second SDK node
-then creates the same coordinator through ordinary routing and commits a signed
-transaction. The delayed PUT reaches the original conditional provider unchanged
+The competing-owner case seeds the original two-range workload on an SDK
+owner, then starts both contenders and observes the seeding owner's lease/sample
+departure before the timed claim. Only account metadata is activated on SOURCE;
+FRONT has no application activations. Both nodes have free capacity under the
+original eight-cell ceilings. SOURCE's actual SDK Create-mode owner PUT is then
+held after observing absence. FRONT creates the same coordinator through ordinary
+routing and commits a signed transaction. The delayed PUT reaches the original conditional provider unchanged
 and receives a clean AlreadyExists/Precondition rejection. That explicit provider
 result establishes failure of the claim; no HTTP result is treated as rollback
 proof. The winner's SDK owner record and coordinator sequence stay unchanged,
@@ -916,14 +919,40 @@ A later value 10 survives replay of the older transaction writing 9. Both former
 local directories are removed before another SDK owner restores the exact seed
 items, registration-backed token replay and a higher coordinator epoch.
 
-All four cases pass together in 16.56 seconds, zero failed/ignored,
+The registered-admission case keeps the original two caller threads, eight-cell
+ceiling and four sequential admissions. Each admission executes a canonical SDK
+registration query, with zero account mutations, zero coordinator provider GETs
+and zero GETs for managed cell objects during the hot window. SDK membership I/O
+is outside that managed-cell counter. A fresh application provisioner must also
+issue the canonical query; it cannot substitute a cached application receipt.
+The account command sequence remains unchanged.
+
+After local-file deletion and native owner replacement, the account scope has a
+higher SDK epoch. Admission still performs the canonical read and no account
+mutation or coordinator activation. The first real coordinator operation then
+fetches its cold SDK state from the provider. The restored coordinator output
+and command sequence match the original, and its same scope has a higher owner
+epoch. Registration sequence and signed seed values remain intact. This replaces
+Cellule's application-owned cache/drain policy with an explicit SDK query and
+activation boundary; a new application provisioner need not force provider I/O
+when the SDK already has a valid resident account snapshot.
+
+The first five-case run exposed a fixture ordering failure in the competing-owner
+case: the expected FRONT factory was absent after a request completed. Membership
+startup had been inside the first claim's operation window. Preparing both empty
+contenders before the claim, then restoring only SOURCE metadata, removes that
+assumption. Factory-count preconditions establish free capacity; neither ownership
+records, resident limits nor the two-/ten-second claim bounds are changed.
+
+All five cases pass together in 21.70 seconds, zero failed/ignored,
 with default parallelism and a SHA-256-verified executable copy. Strict target
-Clippy, formatting and diff checks pass. CI already includes the target. All four
-covered legacy bodies are retired; three other coordinator admission/cache/overlap
-cases remain registered. Required all-target Clippy still fails in `elastic_cells`
-(27 errors) and `peer_network` (134); both gates remain enabled. Production code,
-exact dependency pins and shared runtime helpers are unchanged. Earlier complete
-native, focused ports and nine-process results remain separate evidence.
+Clippy, formatting and diff checks pass. CI already includes the target. All five
+covered legacy bodies are retired; the pending-slot cancellation and cold catalog
+publication/authority-overlap cases remain registered. Required all-target Clippy
+still fails in `elastic_cells` (27 errors) and `peer_network` (133); both gates
+remain enabled. Production code, exact dependency pins and shared runtime helpers
+are unchanged. Earlier complete native, focused ports and nine-process results
+remain separate evidence.
 
 ## Current state
 

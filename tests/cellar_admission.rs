@@ -18,3 +18,8 @@ mod ownership;
 
 #[path = "cellar_admission/absence.rs"]
 mod absence;
+
+#[path = "cellar_admission/hot.rs"]
+mod hot;
+#[path = "cellar_admission/reads.rs"]
+mod reads;

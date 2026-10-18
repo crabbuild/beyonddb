@@ -60,25 +60,37 @@ fn sdk_delayed_absent_claim_cannot_overwrite_a_peer_coordinator() {
         let control = Arc::new(claim::Control::default());
         let mut local_bucket = bucket.clone();
         local_bucket.cas_store = Arc::new(claim::Store { inner: bucket.cas_store.clone(), control: control.clone() });
-        let mut source = Peer::start(app.clone(), &files.path().join(SOURCE), local_bucket, observed.clone(),
+        // Seed the original workload on a separate owner. Both contenders are
+        // started before the timed claim, with free residency on each node.
+        let seed_path = files.path().join("claim-seed");
+        let mut seed = Peer::start(app.clone(), &seed_path, bucket.clone(), observed.clone(),
             PeerPolicy { max_resident: 8, ..true.into() }, host.handle(), core.handle()).await;
-        native_peer::put_credential(&source.client, ACCESS, ACCOUNT).await;
-        CellAuthorizationStore::new(source.client.clone()).put_user_policy(ACCOUNT, "network-user", "tables", &serde_json::json!({
+        native_peer::put_credential(&seed.client, ACCESS, ACCOUNT).await;
+        CellAuthorizationStore::new(seed.client.clone()).put_user_policy(ACCOUNT, "network-user", "tables", &serde_json::json!({
             "Version":"2012-10-17", "Statement":[{"Effect":"Allow","Action":"dynamodb:*","Resource":"arn:aws:dynamodb:us-east-1:123456789012:table/Residency*"}]
         }).to_string()).await.unwrap();
-        let (_, data) = native_peer::table(&source.client, ACCOUNT, "Residency", false).await;
+        let (_, data) = native_peer::table(&seed.client, ACCOUNT, "Residency", false).await;
         assert_eq!(data.len(), 2); assert_ne!(data[0].0, data[1].0);
+        native_peer::provisioner(&seed.client).ensure(&seed.client, ACCOUNT, TOKEN.as_bytes()).await.unwrap();
+        let mut source = Peer::start(app.clone(), &files.path().join(SOURCE), local_bucket, observed.clone(),
+            PeerPolicy { max_resident: 8, ..true.into() }, host.handle(), core.handle()).await;
+        let mut front = Peer::start(app.clone(), &files.path().join(FRONT), bucket.clone(), observed.clone(),
+            PeerPolicy { max_resident: 8, ..true.into() }, host.handle(), core.handle()).await;
+        seed.stop().await;
+        std::fs::remove_dir_all(seed_path).unwrap();
+        let inspection = Inspection::new(bucket.clone(), host.handle());
+        inspection.ready_peers().await;
+        inspection.departed_node("claim-seed", SOURCE).await;
+        // Ensure now restores only account metadata on SOURCE. No coordinator
+        // operation has run, and FRONT has no application cell activations.
         native_peer::provisioner(&source.client).ensure(&source.client, ACCOUNT, TOKEN.as_bytes()).await.unwrap();
+        assert!(native_peer::identity(&observed, SOURCE, &account_target(ACCOUNT).unwrap()).is_some());
+        assert_eq!(observed.lock().unwrap().keys().filter(|(node, _)| node == SOURCE).count(), 1);
+        assert_eq!(observed.lock().unwrap().keys().filter(|(node, _)| node == FRONT).count(), 0);
         let held = control.hold(module);
         let local = { let client = source.client.clone(); let target = coordinator.clone(); tokio::spawn(async move { client.query::<ReadPendingCrossCellTransactions>(&target, None, pending()).await }) };
         tokio::time::timeout(Duration::from_secs(2), held.entered()).await.unwrap();
         assert!(native_peer::identity(&observed, SOURCE, &coordinator).is_none());
-        // Only now add real capacity: the first SDK CAS selected SOURCE while
-        // it was the only node. FRONT competes through ordinary SDK routing.
-        let mut front = Peer::start(app.clone(), &files.path().join(FRONT), bucket.clone(), observed.clone(),
-            PeerPolicy { max_resident: 8, ..true.into() }, host.handle(), core.handle()).await;
-        let inspection = Inspection::new(bucket.clone(), host.handle());
-        inspection.ready_peers().await;
         front.client.query::<ReadPendingCrossCellTransactions>(&coordinator, None, pending()).await.unwrap();
         let foreign = native_peer::identity(&observed, FRONT, &coordinator).unwrap();
         assert_eq!(foreign.scope, held.scope());
