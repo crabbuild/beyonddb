@@ -187,6 +187,15 @@ span both children via the complete base-key suffix; signed forward/reverse
 queries retain all rows and full continuation keys after recovery.
 Embedding callers can own a `TaskGroup` and call its bounded `shutdown` before
 stopping the SDK node; the executable follows that same shutdown order.
+Two multipart cases preserve escaped inputs larger than one command,
+immutable/independent upload identities, exact receipt replay and durable
+payload recovery. Complete SDK snapshots verify expired staging cleanup and
+consumed-input collection. A fresh owner restores partial chunks after removal
+of the former directory. Another replacement occurs after ABORT but before
+the remaining account/data pieces arrive: delayed prepares remain rejected,
+normal writes succeed and signed reads contain no aborted payload. The
+controlled fixture clock governs application deadlines; SDK lease time stays
+independent.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

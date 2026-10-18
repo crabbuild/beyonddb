@@ -65,3 +65,9 @@ mod coordinator_residency;
 
 #[path = "elastic_cells/recovery_admission.rs"]
 mod recovery_admission;
+
+#[allow(dead_code)] // Shared fixture also exposes network, table and credential helpers.
+#[path = "support/native_peer.rs"]
+mod native_peer;
+#[path = "elastic_cells/transaction_transport.rs"]
+mod transaction_transport;

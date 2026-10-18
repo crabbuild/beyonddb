@@ -497,7 +497,17 @@ fn serving_worker_recovers_expired_ranges_and_keeps_healthy_indexes_progressing(
         let tasks = TaskGroup::default();
         CellStorage::new(client.clone(), "us-east-1").install_global_index_loop(&tasks, vec![ACCOUNT.into()]).unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
-            while journal(&client, &source, &base.table_id).await.is_some() {
+            // The serving worker can retire a journal entry between its
+            // header and chunk reads. Poll only the pending header here; the
+            // complete-payload helper is for fixtures without a live consumer.
+            while client
+                .query::<ReadPartitionIndexChange>(&source, None, Json(base.table_id.clone()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .is_some()
+            {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }).await.expect("serving worker did not finish the retained journal");

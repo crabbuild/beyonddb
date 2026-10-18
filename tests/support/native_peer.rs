@@ -155,6 +155,7 @@ pub struct PeerPolicy {
     pub lease_ttl_ms: u64,
     pub lease_bucket: Option<Bucket>,
     pub log: LogOptions,
+    pub application_clock: bdb_cellar_runtime::application::Clock,
 }
 impl From<bool> for PeerPolicy {
     fn from(route_cache: bool) -> Self {
@@ -164,6 +165,7 @@ impl From<bool> for PeerPolicy {
             lease_ttl_ms: 10_000,
             lease_bucket: None,
             log: LogOptions::default(),
+            application_clock: Arc::new(now_ms),
         }
     }
 }
@@ -269,10 +271,11 @@ impl Peer {
         };
         let registry = app.registry();
         let factory = registry.clone();
+        let application_clock = policy.application_clock;
         let applications = CompiledApplications::default()
             .register("beyonddb", "v1", move || {
                 Ok(Arc::new(ObservedApplication {
-                    inner: factory.application(Arc::new(now_ms))?,
+                    inner: factory.application(application_clock.clone())?,
                     node: name.clone(),
                     observed: observed.clone(),
                 }) as Arc<dyn Application>)
