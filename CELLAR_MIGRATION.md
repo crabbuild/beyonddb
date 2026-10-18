@@ -22,9 +22,23 @@ Earlier qualification below used Git revision
 `fa62847f496eefe393ce66e4bee6c477b712a832`. Registry-release qualification is
 recorded separately; those earlier results remain evidence for that Git build.
 
-### Registry qualification
+### Current registry qualification
 
-All 109 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+The gateway dispatch/registration build passes all **127 focused native tests**
+across nineteen SHA-256-verified executable copies, with zero failed/ignored
+cases and normal test parallelism (380.96 seconds summed execution time).
+The same rebuilt server passes all nine explicitly executed RustFS process
+cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
+`a155fc7641550013b2fbba695bfa2d05713211f13c83721c22d382adf0e8c79b` throughout that run.
+The process executable copy also matched SHA-256 and ran serially with CI's
+`--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
+formatting and diff checks pass. The required all-target gate remains red in
+retained legacy `elastic_cells` (27 errors) and `peer_network` (53 errors).
+Qualification remains incomplete; both gates stay enabled.
+
+### Earlier registry baseline
+
+The preceding 109-case baseline passed on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
 nine directory cases, two domain cases, six index cases, two native peer
 cases, one signed local SDK case, 24 transaction cases, twelve native
@@ -523,6 +537,55 @@ three batch cases and nine-process qualification remain separate evidence.
 The required all-target Clippy run still reports 27 errors in `elastic_cells`
 and 55 in `peer_network`; the remaining fixture gates stay enabled.
 
+### Native coalescing and gateway dispatch
+
+`tests/cellar_coalescing.rs` ports five signed coalescing/acknowledged-phase
+contracts and adds four registration regressions. It preserves 64 simultaneous
+returned updates, eight same-key increments, 32 simultaneous two-item token
+transactions, one lost prepare-batch reply, exact coordinator-query counts
+(3 for fresh reads; 1/3/7 for fresh write/replay/large BEGIN), forty wide read
+keys and the 6,000-NUL BEGIN payload. Wide reads explicitly reach two ordered
+ranges. Both 32-transaction cases used 35 durable data commands, below the
+64-command unbatched bound. Recovery removes all previous local directories,
+observes native lease/sample departure and proves higher SDK owner epochs.
+
+These workloads exposed two application admission problems. Coordinator
+admission now reads the append-only account registration through the SDK;
+missing shards use bounded registration batches, grouped only for identical
+transport/admission/registry contexts. Every caller waits for its own gated
+publication. Cancellation retains discovery without granting BEGIN; a lost
+publication reply requires fresh durable discovery. No mutation is retried
+from an HTTP status code.
+
+The HTTP composition also bounds one gateway to 128 submitted/queued calls
+and eight calls per target, retaining permits through response EOF or drop.
+This prevents a burst of independent resolutions from exceeding the native
+16-call cell limit. It retains headroom for other callers; SDK admission and
+ownership remain authoritative across gateways. Three unit regressions check
+body-held permits, independent target progress, canceled waiters, global bounds
+and single-attempt mutation errors.
+
+Unoptimized LTX page merging exhausted the unchanged durability deadline while
+processing physical prepare reservations. A native stack sample identified LTX
+merge/checksum/compression work; observed object PUTs completed in milliseconds.
+The development/test profiles now optimize `cellar-ltx`, `crc-fast` and
+`lz4_flex` at level 2. SDK sources, deadlines, reservation sizes and release
+profile behavior are unchanged. The cold-registration regression uses the same reusable
+`http_dispatch_client` policy as production. Direct SDK callers retain native
+admission/refusal behavior. All nine new cases pass in 42.64 seconds with
+default parallelism and zero failed/ignored cases; the three image cases pass
+again in 29.21 seconds. The shared forwarding fixture now serves both targets. CI includes coalescing; only the five covered legacy
+bodies and their telemetry helper are retired. Public Single placement cases
+and the physical FULL fixture remain separate migration gates.
+
+The rebuilt combined native run passes all 127 tests across nineteen
+SHA-256-verified executable copies, zero failed and zero ignored, with normal
+test parallelism and 380.96 seconds summed execution time. This includes all
+new dispatch/registration tests and the prior native capacity, directory,
+index, metadata, lease/log and transaction targets. Selected strict Clippy,
+formatting and diff checks pass. The required all-target gate remains red in
+`elastic_cells` (27 errors) and `peer_network` (53); both gates stay enabled.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -910,7 +973,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -931,7 +994,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -947,6 +1010,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-55 in `peer_network`; the ported `node_log_authority` target is clean.
+53 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

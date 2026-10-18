@@ -81,3 +81,12 @@ ed25519-dalek.workspace = true
 extenddb-engine = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }
+
+# Physical prepare reservations feed the LTX codec even in local SDK tests.
+# Keep its checksums/compression optimized under the development/test profiles.
+[profile.dev.package.cellar-ltx]
+opt-level = 2
+[profile.dev.package.crc-fast]
+opt-level = 2
+[profile.dev.package.lz4_flex]
+opt-level = 2

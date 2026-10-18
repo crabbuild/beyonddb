@@ -4,6 +4,8 @@
 use bdb_keyspace::RangeKey;
 #[path = "../provision/capacity.rs"]
 mod capacity;
+#[path = "provision/coordinator_registration.rs"]
+mod coordinator_registration;
 #[path = "../provision/directory.rs"]
 mod directory;
 #[path = "../provision/global_indexes.rs"]
@@ -35,6 +37,7 @@ pub struct CellInitialPartitionProvisioner {
     client: CellClient,
     application: Arc<CompiledApplication>,
     initial_partition_count: u16,
+    coordinator_registrations: coordinator_registration::CoordinatorRegistrations,
 }
 impl CellInitialPartitionProvisioner {
     pub fn new(client: CellClient, application: Arc<CompiledApplication>) -> Self {
@@ -42,6 +45,7 @@ impl CellInitialPartitionProvisioner {
             client,
             application,
             initial_partition_count: 4,
+            coordinator_registrations: Default::default(),
         }
     }
     pub fn with_initial_partition_count(mut self, count: u16) -> Result<Self, StorageError> {
@@ -133,19 +137,29 @@ impl CoordinatorProvisioner for CellInitialPartitionProvisioner {
                 .partition()
                 .try_into()
                 .map_err(|_| StorageError::Internal("invalid coordinator shard".into()))?;
-            // Persist discoverability before admission writes its BEGIN record.
-            client
-                .command::<crate::RegisterCoordinatorShard>(
+            let shard = u32::from_be_bytes(shard);
+            // Registrations are append-only. A current SDK read proves prior
+            // durable publication without another mutation on the hot account.
+            let registered = client
+                .query::<crate::ReadCoordinatorRegistration>(
                     &account,
-                    mutation_identity()?,
+                    None,
                     Json(crate::RegisterCoordinatorShardInput {
                         account_id: account_id.into(),
-                        shard: u32::from_be_bytes(shard),
+                        shard,
                     }),
                 )
                 .await
-                .map_err(cell_error)?;
-            Ok(())
+                .map_err(cell_error)?
+                .output
+                .0;
+            if registered {
+                return Ok(());
+            }
+            // Persist discoverability before admission writes its BEGIN record.
+            self.coordinator_registrations
+                .register(client, &account, account_id, shard)
+                .await
         })
     }
 }

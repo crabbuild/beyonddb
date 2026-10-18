@@ -105,6 +105,19 @@ pub struct CellClient {
 }
 
 impl CellClient {
+    /// Whether calls share the same transport, admission policy and registry.
+    /// Application batching may combine calls only within this exact context.
+    /// This comparison performs no I/O and grants no execution authority.
+    pub fn shares_dispatch_context(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.transport, &other.transport)
+            && Arc::ptr_eq(&self.registry, &other.registry)
+            && match (&self.admission, &other.admission) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            }
+    }
+
     pub fn new(ingress: IngressHandle, registry: Arc<Registry>) -> Self {
         Self {
             transport: Arc::new(ingress),

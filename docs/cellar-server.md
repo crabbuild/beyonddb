@@ -273,6 +273,19 @@ Retired directory fences and old base items survive a fresh-owner handoff.
 Creating new cells after handoff waits for the departed node's observed native
 lease to expire and the native placement sample to observe departure; the
 fixture does not assert immediate fresh-cell placement.
+Signed coalescing qualification also retains 64 returned updates, eight
+same-key increments and 32 concurrent two-item transactions, including a lost
+prepare-batch reply and fresh-owner recovery. Registration batches preserve
+caller transport/admission isolation, durable discovery and cancellation
+semantics. One HTTP gateway bounds dispatch to 128 queued/submitted calls and
+eight per target through response completion. This is local backpressure;
+Cellar still owns cross-gateway admission, execution and durability. Mutations
+retain one transport attempt. Development/test builds optimize LTX checksum
+and compression dependencies so physical reservation traffic can meet the
+same durability deadlines; no reservation or workload bounds were reduced.
+The rebuilt gateway passes 127 focused native tests and all nine explicitly
+executed RustFS process cases, zero failed/ignored. See the current fingerprint
+and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. These are application transport faults; they do not qualify fleet
 fencing or follower-log recovery; the separate process fixture supplies the

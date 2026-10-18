@@ -1,4 +1,6 @@
 //! Embedded Cellar hosting and ExtendDB HTTP composition.
+#[path = "dispatch.rs"]
+mod dispatch;
 #[path = "transactions.rs"]
 mod transactions;
 use crate::{
@@ -344,6 +346,16 @@ impl CellarServer {
     }
 }
 
+/// Apply the HTTP gateway's bounded per-target dispatch and read pacing.
+/// Clones share limits. SDK admission remains authoritative, and mutations
+/// retain a single transport attempt. Direct SDK callers may use this same
+/// policy when composing an embedded frontend.
+pub fn http_dispatch_client(client: CellClient) -> CellClient {
+    client
+        .map_transport(|inner| Arc::new(dispatch::Dispatch::new(inner)))
+        .with_read_backpressure(Duration::from_secs(30))
+}
+
 pub fn build_http_state(
     client: CellClient,
     provisioner: Arc<CellInitialPartitionProvisioner>,
@@ -368,7 +380,7 @@ pub fn build_http_state_with_cache(
     server_addr: String,
     cache_enabled: bool,
 ) -> Result<AppState, StorageError> {
-    let client = client.with_read_backpressure(Duration::from_secs(30));
+    let client = http_dispatch_client(client);
     let storage: Arc<dyn StorageEngine> = Arc::new(
         CellStorage::new(client.clone(), region)
             .with_transaction_coordinators(provisioner.clone())

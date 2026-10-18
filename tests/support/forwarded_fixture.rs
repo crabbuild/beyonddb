@@ -23,6 +23,7 @@ pub struct Fixture {
     front: Peer,
     name: String,
     generation: usize,
+    resident: usize,
     http: Option<Http>,
     inspection: Inspection,
     host: tokio::runtime::Handle,
@@ -38,6 +39,27 @@ impl Fixture {
         core: &tokio::runtime::Handle,
         rows: usize,
     ) -> Self {
+        Self::with_limits(host, core, rows, 16, 8).await
+    }
+
+    pub async fn with_limits(
+        host: &tokio::runtime::Handle,
+        core: &tokio::runtime::Handle,
+        rows: usize,
+        source_resident: usize,
+        front_resident: usize,
+    ) -> Self {
+        Self::with_coordinators(host, core, rows, source_resident, front_resident, &[]).await
+    }
+
+    pub async fn with_coordinators(
+        host: &tokio::runtime::Handle,
+        core: &tokio::runtime::Handle,
+        rows: usize,
+        source_resident: usize,
+        front_resident: usize,
+        tokens: &[String],
+    ) -> Self {
         assert!((1..=2).contains(&rows));
         let files = tempfile::tempdir().unwrap();
         let application = native_peer::application();
@@ -49,7 +71,7 @@ impl Fixture {
             bucket.clone(),
             observed.clone(),
             PeerPolicy {
-                max_resident: 16,
+                max_resident: source_resident,
                 ..true.into()
             },
             host,
@@ -97,13 +119,37 @@ impl Fixture {
             .await
             .unwrap();
         assert_eq!(route.partitions.len(), 2);
+        // Activate warm coordinators through the SDK while this is the only
+        // node. The source's resident budget, rather than a client peer's smaller
+        // budget, matches the original coalescing workload. No owner is edited.
+        let admission = crate::native_peer::provisioner(&source.client);
+        for token in tokens {
+            admission
+                .ensure(&source.client, ACCOUNT, token.as_bytes())
+                .await
+                .unwrap();
+            let coordinator = coordinator_target(ACCOUNT, token.as_bytes()).unwrap();
+            source
+                .client
+                .query::<ReadPendingCrossCellTransactions>(
+                    &coordinator,
+                    None,
+                    Json(ReadPendingCrossCellTransactionsInput {
+                        after: None,
+                        limit: 1,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(native_peer::identity(&observed, SOURCE, &coordinator).is_some());
+        }
         let front = Peer::start(
             application.clone(),
             &files.path().join(FRONT),
             bucket.clone(),
             observed.clone(),
             PeerPolicy {
-                max_resident: 8,
+                max_resident: front_resident,
                 ..true.into()
             },
             host,
@@ -160,6 +206,7 @@ impl Fixture {
             front,
             name: FRONT.into(),
             generation: 0,
+            resident: front_resident,
             http: Some(http),
             inspection,
             host: host.clone(),
@@ -202,7 +249,7 @@ impl Fixture {
             self.bucket.clone(),
             self.observed.clone(),
             PeerPolicy {
-                max_resident: 8,
+                max_resident: self.resident,
                 ..true.into()
             },
             &self.host,
@@ -230,6 +277,17 @@ impl Fixture {
             assert_eq!(owner.node.as_deref(), Some(self.name.as_str()));
             assert_eq!(owner.epoch, actual.epoch);
         }
+        let http = Http::start(&self.client, ACCESS).await;
+        self.sdk = http.sdk.clone();
+        self.http = Some(http);
+    }
+
+    // Gateway instrumentation is used by the coalescing target; images use
+    // the undecorated client and the same native host/ownership fixture.
+    #[allow(dead_code)]
+    pub async fn use_client(&mut self, client: CellClient) {
+        self.http.take().unwrap().stop().await;
+        self.client = client;
         let http = Http::start(&self.client, ACCESS).await;
         self.sdk = http.sdk.clone();
         self.http = Some(http);

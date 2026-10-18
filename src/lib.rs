@@ -50,7 +50,7 @@ pub use provision::*;
 pub use routing::*;
 pub use server::{
     CellarServer, CellarServerConfig, TaskGroup, TransactionRecovery, build_http_state,
-    build_http_state_with_cache,
+    build_http_state_with_cache, http_dispatch_client,
 };
 pub use split::*;
 pub use stream_journal::{
