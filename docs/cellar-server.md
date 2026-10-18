@@ -243,6 +243,14 @@ intents and their shared receipt after the original owner loses its lease.
 Another owner retains independent COMMIT/ABORT states. Each handoff removes
 the former local directory and verifies the same data scope at a higher epoch;
 signed reads and ordinary writes prove final visibility and released locks.
+Three `tests/cellar_images.rs` cases retain immutable saved images, bounded
+wide-read fallback and exact large conditional-failure images. Original
+380/384 KiB binary and NUL payloads remain intact. Signed cross-cell reads
+preserve response order and absent positions. Canceled-token retry and terminal
+replay preserve later writes. Separate SDK peers serve initial requests;
+fresh owners recover the same data scopes at higher epochs after deletion of
+all former local directories and observed lease/sample departure. Cellule
+mailbox measurements remain a separate migration gate.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

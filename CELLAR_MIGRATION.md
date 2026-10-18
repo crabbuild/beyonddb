@@ -487,6 +487,42 @@ against the mounted build artifact by SHA-256. Formatting and selected strict
 Clippy pass. The required all-target Clippy gate still reports the unported
 `elastic_cells` physical FULL root (27 errors) and `peer_network` (55 errors).
 
+### Native saved images and wide prepare failures
+
+`tests/cellar_images.rs` ports three more domain contracts from the legacy
+residency fixtures. A sixteen-cell source and separate eight-cell SDK frontend
+serve signed AWS calls with retries disabled and the scoped Residency policy.
+Public tables have two installed ordered ranges. The frontend observes actual
+peer sockets and creates no local data factory during initial forwarding.
+
+The immutable-image case retains a small value, a 380 KiB binary image, a
+380 KiB NUL image and an absent key. Prepared images remain unavailable until
+COMMIT. Later live writes cannot change saved values. Both bounded and wide
+read paths retain exact values across owner replacement; only the large images
+request the wide fallback. Wrong coordinator identity and out-of-range positions
+remain unavailable. Explicit release removes saved images while preserving the
+committed participant tombstone.
+
+The signed cross-cell case preserves reverse result order, absent positions
+and both full wide images before and after handoff. The failure case retains a
+384 KiB NUL old image in the exact cancellation position, rollback of the
+staged sibling, successful identical-token retry after removing the conflicting
+item, and terminal token replay that preserves a newer write. Both recovery
+checkpoints remain. Replacement deletes every former node's local directory,
+waits for observed native lease/sample departure, and proves each seeded data
+scope recovers at a higher SDK epoch before checking values or saved images.
+No fixture constructs authority or owner records.
+
+All three cases pass together in 32.35 seconds, zero failed and zero ignored,
+with default test parallelism and a SHA-256-verified executable copy. Selected
+strict Clippy and formatting pass. CI runs the new target. The two saved-image
+mailbox measurements and the held-prepare admission test remain in the legacy
+root; only the three covered domain bodies are retired. The production code
+and existing shared helpers are unchanged, so the preceding 109-case suite,
+three batch cases and nine-process qualification remain separate evidence.
+The required all-target Clippy run still reports 27 errors in `elastic_cells`
+and 55 in `peer_network`; the remaining fixture gates stay enabled.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -874,7 +910,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -895,7 +931,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
