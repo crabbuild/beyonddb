@@ -8,21 +8,9 @@ fn mutation() -> MutationIdentity {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn small_item_commit_uses_reserved_capacity_after_other_writers_fill_cell() {
-    capacity_case(&[380 * 1024, 8 * 1024, 0], 50, 0, 144).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn large_item_commit_uses_reserved_capacity_after_other_writers_fill_cell() {
-    capacity_case(&[380 * 1024, 8 * 1024, 0], 4, 380 * 1024, 32).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prepare_refuses_without_resolution_headroom_and_leaves_no_locks() {
-    capacity_case(&[], 4, 0, 2).await;
-}
-
+// Reservation success/refusal contracts moved to cellar_capacity's native
+// owners. Keep this distinct physical SQLite FULL case until it has an SDK
+// equivalent; an application-budget refusal is not the same storage fault.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_full_during_upload_aborts_and_resolves_all_participants() {
     capacity_case(&[], 4, 380 * 1024, 1).await;

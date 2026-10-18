@@ -49,7 +49,7 @@ jobs:
           cargo test --locked --test cellar_process \
             -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-process.log" || result=$?
-          cargo test --locked --test cellar_peer --test node_log_authority --test cellar_indexes \
+          cargo test --locked --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity \
             -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-peer.log" || result=$?
           RUST_MIN_STACK=16777216 cargo test --locked --test elastic_cells \

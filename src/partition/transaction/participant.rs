@@ -119,7 +119,7 @@ pub(super) fn prepare_partition(
         epoch: input.epoch,
         images: staged,
     };
-    crate::participant::record_prepare(
+    let recorded = crate::participant::record_prepare(
         context,
         input.transaction_id,
         input.coordinator_cell,
@@ -144,7 +144,21 @@ pub(super) fn prepare_partition(
             .iter()
             .filter(|image| image.effect == StagedEffect::Read)
             .map(|image| image.image.as_ref()),
-    )?;
+    );
+    if let Err(error) = recorded {
+        return match error {
+            // A typed application reservation refusal can publish a rejected
+            // receipt. The runtime rolls back all prepare effects before that
+            // receipt; unknown SQL/transport failures retain their ambiguity.
+            Error::Capacity(_) => Ok(CommandResult::Rejected(Json(
+                PrepareTransactionOutcome::Rejected {
+                    index: 0,
+                    reason: TransactionFailure::Throttled,
+                },
+            ))),
+            error => Err(error),
+        };
+    }
     for image in prepared.images {
         context.sql(&statement(
             "INSERT OR IGNORE INTO ddb_partition_transaction_locks \

@@ -5,6 +5,7 @@ use bdb_cellar_runtime::{
     client::CellClient,
     descriptors::BuildDescriptor,
     identity::{CellTarget, Digest},
+    registry::Registry,
 };
 use beyonddb::*;
 use cellar::{
@@ -187,6 +188,17 @@ impl Peer {
         host: &tokio::runtime::Handle,
         core: &tokio::runtime::Handle,
     ) -> Self {
+        Self::start_registry(app.registry(), path, bucket, observed, policy, host, core).await
+    }
+    pub async fn start_registry(
+        registry: Arc<Registry>,
+        path: &Path,
+        bucket: Bucket,
+        observed: Observations,
+        policy: impl Into<PeerPolicy>,
+        host: &tokio::runtime::Handle,
+        core: &tokio::runtime::Handle,
+    ) -> Self {
         let policy = policy.into();
         let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -272,7 +284,6 @@ impl Peer {
             containers: None,
             metrics: None,
         };
-        let registry = app.registry();
         let factory = registry.clone();
         let application_clock = policy.application_clock;
         let applications = CompiledApplications::default()

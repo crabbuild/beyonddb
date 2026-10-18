@@ -24,24 +24,24 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-The complete focused run at `7a7b5d5` passed 93 tests on crates.io `0.1.0`: twelve adapter units, two
+All 100 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
 nine directory cases, two domain cases, six index cases, two native peer
-cases, one signed local SDK case, 24 transaction cases and eight native
-lease/log cases. The thirteen rebuilt focused test executables were checked
-for SHA-256 equality before running from the internal SSD, with unchanged
-parallelism, assertions and deadlines. The index target passed all six cases
-in 43.76 seconds during this complete rerun.
+cases, one signed local SDK case, 24 transaction cases, twelve native
+lease/log/shutdown cases and three reservation-pressure cases. The fourteen
+rebuilt executables were checked for SHA-256 equality before running from the
+internal SSD, with normal test parallelism and zero failed or ignored cases.
+The capacity target passed in 134.84 seconds and the index target in 44.51
+seconds during this complete run, including the typed prepare-capacity fix.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. Production build `11432e7`, including the frontend
-read policy and idle-index worker fix, passed all nine explicitly executed
-RustFS process cases in 464.15 seconds, with zero failures or ignored cases.
-The subsequent backfill/transfer, multipart-upload and shutdown ports change
-only tests and documentation; the server executable still matches that process build's
-SHA-256.
-They cover the broad signed
-SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards
-beyond residency, native follower recovery
+integration/process targets. The rebuilt production server, including typed
+prepare-capacity rejection, passed all nine explicitly executed RustFS process
+cases in 506.80 seconds, with zero failures or ignored cases. Its SHA-256 is
+`c651b2c21a736d31191830442473974019f58ab34bdfb73a2389084bf8d73fe3`.
+The earlier `11432e7` build independently passed those nine cases in 464.15
+seconds before this production change.
+They cover the broad signed SDK/restart scenario, measured capacity and peer
+identity, 70 coordinator shards beyond residency, native follower recovery
 with bundle and LTX publication withheld, GSI recovery, large transactional
 reads, metadata caching, LSI pagination and retained Streams after hard restart.
 The process test executable was also copied and checked for SHA-256 equality;
@@ -254,6 +254,52 @@ The combined lease/log/shutdown target passed all twelve cases in 46.97
 seconds, with zero failed or ignored cases and default test parallelism. Its
 rebuilt executable was copied to the internal SSD after verifying SHA-256
 equality. Selected strict Clippy and formatting also pass.
+
+### Native reservation pressure and prepare refusal
+
+Three `tests/cellar_capacity.rs` cases retain the original reservation
+workloads: 50 small-item operations per participant with 144 MiB limits,
+four 380 KiB images per participant with 32 MiB limits, and four small
+operations refused under 2 MiB limits. Account placement is an explicit
+private fixture; the public table has two independently installed ordered data
+ranges. Both compiled participant modules receive their smaller budget before
+any SDK factory exists; production type declarations remain unchanged.
+
+Positive cases prepare both participants, allow an unrelated writer, and fill
+remaining space with the original 380 KiB, 8 KiB and empty-image steps. Each
+step must refuse within 256 attempts. Complete non-owning SDK snapshots verify
+that reservations occupy actual BLOB bytes, total used pages remain bounded,
+and the final unused space is below eight pages. Physical used-page counts
+already include the held BLOB pages; they are not added a second time.
+After COMMIT, all expected items are visible and snapshots show no remaining
+locks, reservation rows/chunks or staged transaction payloads. A fresh owner,
+without the former local directory, serves every item through signed reads.
+
+The refusal case first reproduced an ambiguous HTTP 500 from
+`database reservation exceeds the cell limit`. Account and data prepares now
+translate only that typed application-capacity error into the existing
+Throttled rejection. The runtime rolls back the entire application savepoint
+before committing its rejected receipt. Unknown SQL and transport failures
+retain their ambiguity. Snapshot audits prove failed prepare left no intents,
+locks, staged payloads or physical reservations; coordinator recovery reaches
+ABORT and resolves both participants. After owner replacement, exact rejected
+receipts replay using their original mutation identity and upload reference,
+and ordinary writes can reuse the original keys.
+
+The largest reservation can produce an uncertain native durability reply.
+The fixture resolves it only with the same mutation identity and immutable
+input, within its original deadline. It keeps the original operation counts,
+payload sizes, native deadlines and final durability assertions. No command
+is assumed rolled back from an HTTP failure.
+
+This is not a port of the fourth legacy fixture's forced SQLite FULL. Cellar
+`0.1.0` exposes no public per-connection max-page-count control, so that physical
+failure case remains explicit and its original fixture is retained. The new
+reservation cases do not replace it with an application-budget refusal. CI's
+selected native qualification command includes the new capacity target.
+The standalone three-case run passed in 144.96 seconds; the subsequent full
+100-case run includes the same capacity cases with normal parallelism and all
+original workload sizes and native deadlines. Selected strict Clippy passes.
 
 ## Current state
 
@@ -598,9 +644,12 @@ replica-read-policy override.
 7. Update contributor guidance, startup configuration, CI and operational docs
    to describe the actual Cellar server and its qualified capability boundary.
 
-The remaining `elastic_cells` setup still covers SQLite-full and reservation
-behavior and its large root fixture. GSI backfill/transfer, multipart upload
-replacement and native shutdown now run in the selected native targets. Its previously ported modules also remain included there
+The remaining `elastic_cells` setup still contains the forced SQLite-full
+upload case and its large root fixture. The three reservation contracts moved
+to `cellar_capacity`; the physical-failure case still needs a native equivalent.
+GSI backfill/transfer, multipart upload replacement and native shutdown now run
+in the selected native targets. Its previously ported modules also remain
+included there
 until that root is migrated. `peer_network` retains
 its separate physical and residency fixtures. Passing the selected native
 targets does not complete either aggregate suite.
@@ -639,7 +688,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -660,7 +709,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:

@@ -203,6 +203,13 @@ the remaining account/data pieces arrive: delayed prepares remain rejected,
 normal writes succeed and signed reads contain no aborted payload. The
 controlled fixture clock governs application deadlines; SDK lease time stays
 independent.
+Three `tests/cellar_capacity.rs` cases verify physical reservation occupancy,
+near-full unrelated writes, durable Throttled prepare rejection and reservation
+release on COMMIT/ABORT. The original 144/32/2 MiB fixture budgets and item
+sizes are retained. Complete SDK snapshots audit rollback and cleanup; signed
+reads and exact rejected receipts survive fresh-owner recovery. Submitted SQL
+or transport errors remain ambiguous. A forced physical SQLite FULL upload is
+still unqualified on the public SDK and remains a separate migration gate.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count
