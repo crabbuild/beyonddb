@@ -30,8 +30,9 @@ test parallelism (399.78 seconds summed execution time), including public
 multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
-five native creation cases in 48.56 seconds. These are separate focused runs;
-no combined 139-case run is claimed. Production code
+five native creation cases in 48.56 seconds. The deletion port adds two native
+cases in 26.37 seconds. These are separate focused runs;
+no combined 141-case run is claimed. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
 passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
@@ -39,7 +40,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (142 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (139 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -774,6 +775,41 @@ red in `elastic_cells` (27 errors) and `peer_network` (142). Production code,
 dependency pins and shared runtime helpers are unchanged; prior complete native,
 peer and nine-process results remain separate evidence.
 
+### Native large deletion and generation isolation
+
+`tests/cellar_deletion.rs` preserves the original account cleanup contract and
+adds its public two-range counterpart. Both retain 160 base items and 160 ALL
+LSI entries, two caller threads, the eight-cell resident budget, 100 ms capacity
+cadence and fifteen-second worker recovery bound. The internal account table is
+created with an explicit private domain command because public CreateTable now
+requires multiple data cells. Its subsequent writes, LSI scan, lifecycle checks,
+deletion and recreation still use signed AWS requests. No public Single path is
+enabled. The public counterpart creates its LSI through the AWS SDK and places
+80 items in each of two distinct ordered data cells.
+
+Before deletion, both cases verify all 160 projected LSI values. DELETING blocks
+CreateTable, UpdateTable and late PutItem. After the initial deletion command,
+the owner is stopped, its local directory is removed and native lease/sample
+departure is observed. The restored account still has the same deleting
+generation. Only the installed capacity worker advances cleanup. The account
+case observes at least four continuation commands, preserving bounded cleanup
+of its base and LSI rows. The public case verifies terminal directory retirement
+and all original base and LSI values in both recovered data ranges, with the
+same SDK scopes at higher owner epochs. Retained historical data is distinct
+from the live replacement generation.
+
+Name reuse creates a new generation containing only the replacement item.
+Delayed cleanup of the original generation is harmless, and its stale DeleteTable
+is rejected. Replacement contents survive a second complete owner replacement.
+The two cases pass together in 26.37 seconds, zero failed/ignored,
+with default parallelism and a SHA-256-verified executable copy.
+Strict target Clippy, formatting and diff checks pass. CI includes the native
+target; only the now-covered legacy deletion module is retired. The aggregate
+checks remain enabled and red in `elastic_cells` (27 errors) and `peer_network`
+(139). This fixture-only port leaves production code, dependency pins and shared
+runtime helpers unchanged. Earlier full native and process runs remain separate
+evidence.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1161,7 +1197,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -1182,7 +1218,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:

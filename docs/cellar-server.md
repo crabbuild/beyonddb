@@ -301,13 +301,19 @@ initial counts and unpublished-directory retirement. Known pre-submission
 admission failures establish the partial checkpoints; SDK ownership and actual
 installed contracts remain authoritative. Signed values and index contents
 survive fresh owners after local-file deletion.
+Two native deletion cases retain the 160-item/160-LSI workload under an
+eight-cell resident limit, with worker-only cleanup after owner replacement.
+An internal account fixture retains bounded row cleanup; the public fixture
+spans two data cells, verifies retained base/LSI history and a retired directory,
+and recovers both SDK scopes at higher epochs. Stale deletion cannot affect the
+replacement generation, whose signed contents survive another fresh owner.
 The latest complete fixture run passed 133 focused native tests; its unchanged
 server passed all nine explicitly executed RustFS process cases, zero
 failed/ignored. The later fixture-only discovery port passes all three native
 peer cases, using non-owning snapshots and SDK owner observations so the test
 cannot perform the recovery it is meant to observe. The creation target's five
-cases pass as a separate focused run. See the current fingerprint
-and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
+cases pass as a separate focused run, as do the two deletion cases. See the
+current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. These are application transport faults; they do not qualify fleet
 fencing or follower-log recovery; the separate process fixture supplies the

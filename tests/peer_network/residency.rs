@@ -4,7 +4,6 @@ mod active_owners;
 mod cell_models;
 mod codec;
 mod coordinator_admission;
-mod deletion;
 mod directories;
 mod discovery;
 mod follower_durability;
