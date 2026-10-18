@@ -79,17 +79,17 @@ pub use credentials::{CellCredentialStore, credential_target};
 
 use std::{collections::HashSet, sync::OnceLock};
 
-use bdb_cellar_runtime::app::{ApplicationBuilder, CellApplication, CellType};
-use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use bdb_cellar_runtime::descriptors::CatalogRole;
-use bdb_cellar_runtime::identity::partition_for_shard;
-use bdb_cellar_runtime::identity::{ApplicationId, CellTarget, Digest, NamespaceId, TenantId};
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::app::{ApplicationBuilder, CellApplication, CellType};
+use cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellar_runtime::descriptors::CatalogRole;
+use cellar_runtime::identity::partition_for_shard;
+use cellar_runtime::identity::{ApplicationId, CellTarget, Digest, NamespaceId, TenantId};
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
-use bdb_cellar_runtime::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
-use bdb_cellar_runtime::{Error, Result};
+use cellar_runtime::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use cellar_runtime::{Error, Result};
 use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, CreateTableInput, Item, KeySchemaElement,
@@ -108,7 +108,7 @@ pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        bdb_cellar_runtime::capacity::SCHEMA,
+        cellar_runtime::capacity::SCHEMA,
         participant::SCHEMA,
         secondary_index::SCHEMA,
         global_index::outbox::SCHEMA,
@@ -393,7 +393,7 @@ fn account_for_tenant(tenant: TenantId) -> Result<CellTarget> {
 
 struct AccountModule;
 
-impl bdb_cellar_runtime::registry::CellModule for AccountModule {
+impl cellar_runtime::registry::CellModule for AccountModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {

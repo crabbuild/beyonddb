@@ -5,12 +5,12 @@ use crate::{
     table_helpers,
 };
 use aws_sdk_dynamodb::types::AttributeValue as V;
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     client::{Invocation, InvocationAdmission},
     identity::CellTarget,
     registry::Command,
 };
-use beyonddb::*;
 use std::{
     future::Future,
     pin::Pin,
@@ -30,7 +30,7 @@ impl InvocationAdmission for DeleteDuringInstall {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target == self.target
                 && invocation.mutation.is_some()

@@ -2,11 +2,10 @@
 use crate::native_peer::{self, FRONT, Inspection, Peer, SOURCE};
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::client::{Invocation, InvocationTransport};
-use bdb_keyspace::RangeKey;
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::client::{Invocation, InvocationTransport};
 use extenddb_auth::{AuthCacheRegistry, CredentialStore, StoredCredential};
 use extenddb_core::{
     expression::{CompareOp, Expr, ExpressionMaps, KeyCondition, PathElement, SortKeyCondition},
@@ -22,6 +21,7 @@ use extenddb_storage::{
     authorization_store::AuthorizationStore, error::StorageError, management_store::OpError,
 };
 use http_body_util::Full;
+use keyspace::RangeKey;
 use std::{
     collections::HashMap,
     future::Future,
@@ -37,7 +37,7 @@ const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const TEST_ENCRYPTION_KEY: [u8; 32] = [0x36; 32];
 struct CredentialQueries {
     inner: Arc<dyn InvocationTransport>,
-    target: bdb_cellar_runtime::identity::CellTarget,
+    target: cellar_runtime::identity::CellTarget,
     queries: Arc<AtomicUsize>,
 }
 impl InvocationTransport for CredentialQueries {
@@ -250,11 +250,11 @@ fn numeric_query_pages_survive_ordered_splits_signed_auth_and_owner_replacement(
                 last_evaluated_key: None
             }
         );
-        let span = bdb_keyspace::KeySchema {
-            partition: bdb_keyspace::KeyKind::String,
-            sort: Some(bdb_keyspace::KeyKind::Number),
+        let span = keyspace::KeySchema {
+            partition: keyspace::KeyKind::String,
+            sort: Some(keyspace::KeyKind::Number),
         }
-        .query(bdb_keyspace::Component::String("same"), None)
+        .query(keyspace::Component::String("same"), None)
         .unwrap();
         assert!(
             route.partitions[0]

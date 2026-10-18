@@ -1,9 +1,9 @@
 //! Observe actual SDK application activations without retaining their handles.
 use crate::native_peer;
-use bdb_cellar_runtime::{
+use cellar::{bucket::Bucket, sdk::*};
+use cellar_runtime::{
     app::CompiledApplication, application::cell_name, client::CellClient, identity::CellTarget,
 };
-use cellar::{bucket::Bucket, sdk::*};
 use std::{
     collections::{BTreeSet, HashMap},
     path::Path,
@@ -215,7 +215,7 @@ pub async fn start_with_pins(
     config.runtime.max_cell_requests = 16;
     config.runtime.handler_budget = Duration::from_secs(30);
     config.cell_limits = CellLimits::unrestricted();
-    config.cell_limits.sql = bdb_cellar_runtime::sql::host_limits();
+    config.cell_limits.sql = cellar_runtime::sql::host_limits();
     let http = reqwest::Client::new();
     let services = ExternalNodeServices {
         wall_clock: None,

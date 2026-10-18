@@ -1,6 +1,6 @@
 //! Bounded phase inputs and immutable coordinator payload retrieval.
 
-use bdb_cellar_runtime::{
+use cellar_runtime::{
     MutationIdentity,
     client::{Committed, InvocationError},
     identity::{CellTarget, RequestId},
@@ -19,14 +19,14 @@ use crate::{
 // ABORT. Pending outcomes stay retryable; they are never classified by source
 // text or by an error nested inside an unknown mutation result.
 pub(super) enum PhaseError {
-    Capacity(bdb_cellar_runtime::Error),
+    Capacity(cellar_runtime::Error),
     Other(StorageError),
 }
 
 impl<T> From<InvocationError<T>> for PhaseError {
     fn from(error: InvocationError<T>) -> Self {
         match error {
-            InvocationError::NotStarted(error @ bdb_cellar_runtime::Error::Capacity(_)) => {
+            InvocationError::NotStarted(error @ cellar_runtime::Error::Capacity(_)) => {
                 Self::Capacity(error)
             }
 

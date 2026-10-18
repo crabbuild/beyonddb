@@ -109,7 +109,7 @@ fn sdk_table_class_and_change_limit_survive_account_restoration() {
                 range
                     .lower
                     .clone()
-                    .unwrap_or_else(bdb_keyspace::RangeKey::minimum),
+                    .unwrap_or_else(keyspace::RangeKey::minimum),
             )
             .await
             .unwrap();

@@ -1,11 +1,11 @@
 //! Bound this gateway's calls before SDK submission, through response-body EOF.
 //! This is local load control; SDK ingress still owns admission and authority.
-use bdb_cellar_runtime::{
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use cellar_runtime::{
     client::{Invocation, InvocationTransport},
     identity::CellId,
 };
-use bytes::Bytes;
-use cellar::sdk::IngressResponse;
 use http_body::{Body, Frame, SizeHint};
 use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use std::{
@@ -111,7 +111,7 @@ impl InvocationTransport for Dispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bdb_cellar_runtime::{
+    use cellar_runtime::{
         MutationIdentity,
         identity::{ApplicationId, CellTarget, NamespaceId, RequestId, TenantId},
     };

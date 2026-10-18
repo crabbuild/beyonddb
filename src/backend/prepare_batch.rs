@@ -7,8 +7,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use bdb_cellar_runtime::client::{CellClient, Committed, InvocationError, Receipt};
-use bdb_cellar_runtime::identity::{CellTarget, RequestId};
+use cellar_runtime::client::{CellClient, Committed, InvocationError, Receipt};
+use cellar_runtime::identity::{CellTarget, RequestId};
 use extenddb_storage::error::StorageError;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -188,7 +188,7 @@ impl PrepareBatcher {
                         let _ = pending.reply.send(result);
                     }
                 }
-                Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(reason))) => {
+                Err(InvocationError::NotStarted(cellar_runtime::Error::Capacity(reason))) => {
                     // The complete batch is proven not to have started. Its
                     // combined capture/resolution reservation may exceed the
                     // budget even when each participant fits independently.
@@ -236,7 +236,7 @@ impl PrepareBatcher {
             if committed.output.0 == PrepareTransactionOutcome::WideRequired)
         {
             // Different command digests require different mutation identities.
-            let identity = bdb_cellar_runtime::MutationIdentity {
+            let identity = cellar_runtime::MutationIdentity {
                 request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
                 ..identity
             };

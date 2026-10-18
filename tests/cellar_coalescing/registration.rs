@@ -1,11 +1,11 @@
 use crate::fixture::{ACCOUNT, Fixture, runtimes};
-use bdb_cellar_runtime::{
-    client::{CellClient, Invocation, InvocationAdmission, InvocationTransport},
-    identity::CellTarget,
-};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{CellClient, Invocation, InvocationAdmission, InvocationTransport},
+    identity::CellTarget,
+};
 use http_body_util::{BodyExt, Full};
 use std::{
     future::Future,
@@ -27,11 +27,11 @@ impl InvocationAdmission for Policy {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target == self.account && invocation.mutation.is_some() {
                 if self.refuse {
-                    return Err(bdb_cellar_runtime::Error::Capacity(
+                    return Err(cellar_runtime::Error::Capacity(
                         "registration caller refused",
                     ));
                 }
@@ -58,7 +58,7 @@ impl InvocationTransport for Transport {
             let response = self.inner.call(invocation, request).await;
             if invocation.mutation.is_some()
                 && invocation.operation
-                    == <RegisterCoordinatorShards as bdb_cellar_runtime::registry::Command>::ID
+                    == <RegisterCoordinatorShards as cellar_runtime::registry::Command>::ID
                 && response.status().is_success()
                 && let Some(lose) = &self.lose
                 && !lose.swap(true, Ordering::SeqCst)

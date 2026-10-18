@@ -144,7 +144,7 @@ impl Query for PartitionQuery {
             Ok(span) => span,
             Err(_) => return Ok(Json(PartitionQueryOutcome::InvalidKey)),
         };
-        let owned = bdb_keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
+        let owned = keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
             .map_err(|_| Error::Command("invalid installed partition range"))?;
         if span.intersection(&owned).is_none() {
             return Ok(Json(PartitionQueryOutcome::WrongPartition));

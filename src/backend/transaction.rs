@@ -1,7 +1,7 @@
 //! Resume read and write transactions from immutable coordinator records.
 
-use bdb_cellar_runtime::client::{InvocationError, Receipt};
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::{InvocationError, Receipt};
+use cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
 use std::time::Duration;
@@ -234,7 +234,7 @@ impl CellStorage {
                         .prepare_transaction_participant(&target, input.clone())
                         .await;
                     match result {
-                        Err(PhaseError::Capacity(bdb_cellar_runtime::Error::Capacity(_)))
+                        Err(PhaseError::Capacity(cellar_runtime::Error::Capacity(_)))
                             if admission_retries < 4 =>
                         {
                             admission_retries += 1;

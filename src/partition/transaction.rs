@@ -3,8 +3,8 @@
 use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
-use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 

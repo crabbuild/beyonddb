@@ -1,6 +1,6 @@
 //! Transaction payloads stored within the runtime's bounded SQL interface.
 
-use bdb_cellar_runtime::registry::CommandContext;
+use cellar_runtime::registry::CommandContext;
 
 use crate::table::statement;
 use crate::transaction_transport::CHUNK_BYTES;

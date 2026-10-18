@@ -1,8 +1,8 @@
 use crate::native_peer::{self, FRONT, Http, Inspection, Observations, Peer, PeerPolicy, SOURCE};
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::{app::CompiledApplication, client::CellClient, identity::CellTarget};
 use beyonddb::*;
 use cellar::bucket::Bucket;
+use cellar_runtime::{app::CompiledApplication, client::CellClient, identity::CellTarget};
 use extenddb_core::types::{AttributeValue, Item};
 use extenddb_storage::TableEngine;
 use std::{

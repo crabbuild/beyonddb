@@ -3,7 +3,7 @@
 mod read;
 pub(crate) use read::{QueryAccountIndex, query};
 
-use bdb_cellar_runtime::registry::CommandContext;
+use cellar_runtime::registry::CommandContext;
 use extenddb_core::types::{Item, KeySchemaElement, LsiInput, extract_key};
 use serde::{Deserialize, Serialize};
 
@@ -184,7 +184,7 @@ pub(crate) fn valid_cursor(key: &Item, table: &TableRecord, index: &LsiInput) ->
 }
 
 pub(crate) fn scan_keys(
-    context: &bdb_cellar_runtime::registry::QueryContext<'_>,
+    context: &cellar_runtime::registry::QueryContext<'_>,
     table_id: &str,
     index_name: Option<&str>,
     cursor: &[u8],

@@ -1,6 +1,6 @@
 //! Independently owned, versioned global-index projections.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 pub(crate) mod outbox;
 pub use outbox::*;
 mod read;
@@ -14,10 +14,10 @@ pub use transfer::*;
 
 use std::sync::OnceLock;
 
-use bdb_cellar_runtime::app::CellType;
-use bdb_cellar_runtime::descriptors::CatalogRole;
-use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::app::CellType;
+use cellar_runtime::descriptors::CatalogRole;
+use cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -35,7 +35,7 @@ pub(crate) const NAMESPACE: NamespaceId = NamespaceId::from_bytes([0x46; 16]);
 const SCHEMA: &str = include_str!("global_index_schema.sql");
 // Lifecycle and projection mutations only return status values. Reserving an
 // item-sized response would reduce concurrency without carrying images back.
-static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 6] = [
+static COMMANDS: [cellar_runtime::registry::OperationDescriptor; 6] = [
     status_operation(1),
     status_operation(2),
     status_operation(3),
@@ -44,14 +44,14 @@ static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 6] = [
     status_operation(6),
 ];
 
-const fn status_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
-    bdb_cellar_runtime::registry::OperationDescriptor {
+const fn status_operation(id: u32) -> cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         output_limit: 4096,
         ..crate::operation(id)
     }
 }
 
-static QUERIES: [bdb_cellar_runtime::registry::OperationDescriptor; 8] = [
+static QUERIES: [cellar_runtime::registry::OperationDescriptor; 8] = [
     crate::operation(1),
     crate::operation(2),
     crate::operation(3),
@@ -218,7 +218,7 @@ pub enum GlobalIndexApplyOutcome {
 
 pub(crate) struct GlobalIndexModule;
 
-impl bdb_cellar_runtime::registry::CellModule for GlobalIndexModule {
+impl cellar_runtime::registry::CellModule for GlobalIndexModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -337,7 +337,7 @@ impl Command for InstallGlobalIndexPartition {
             &spec.partition_id,
         )?;
         if target != *context.target()
-            || spec.table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION
+            || spec.table.key_encoding_version != keyspace::KEY_ENCODING_VERSION
             || spec.epoch == 0
             || spec
                 .lower
@@ -379,7 +379,7 @@ fn read_spec(
         None => Ok(None),
         Some([SqlValue::Blob(bytes)]) => {
             let spec: GlobalIndexPartitionSpec = serde_json::from_slice(bytes)?;
-            if spec.table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION {
+            if spec.table.key_encoding_version != keyspace::KEY_ENCODING_VERSION {
                 return Err(Error::Command("unsupported installed index encoding"));
             }
             Ok(Some(spec))

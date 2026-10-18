@@ -1,6 +1,6 @@
 //! Read projected images without fetching base-table attributes.
 
-use bdb_cellar_runtime::registry::{Query, QueryContext};
+use cellar_runtime::registry::{Query, QueryContext};
 use extenddb_core::types::{Item, KeyType, extract_key, item_size_bytes};
 
 use super::{MODULE, read_spec};
@@ -52,7 +52,7 @@ impl Query for GlobalIndexQuery {
             return Ok(Json(Outcome::InvalidKey));
         }
         let span = crate::partition::key::partition_span(&input.partition_key, schema)?;
-        let owned = bdb_keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
+        let owned = keyspace::KeySpan::new(spec.lower.clone(), spec.upper.clone())
             .map_err(|_| Error::Command("invalid installed index range"))?;
         if span.intersection(&owned).is_none() {
             return Ok(Json(Outcome::WrongPartition));

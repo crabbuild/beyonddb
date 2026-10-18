@@ -4,12 +4,12 @@ mod authority;
 use crate::{native_peer::*, runtimes};
 use authority::{Boundary, Control, Store};
 use aws_sdk_dynamodb::types::AttributeValue as V;
-use bdb_cellar_runtime::{app::CompiledApplication, identity::CellTarget};
 use beyonddb::*;
 use cellar::{
     bucket::Bucket,
     sdk::{NodeOutcome, ShutdownMode},
 };
+use cellar_runtime::{app::CompiledApplication, identity::CellTarget};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -164,12 +164,12 @@ async fn read(sdk: &aws_sdk_dynamodb::Client, item: &Item) -> Item {
         .unwrap()
 }
 struct Observe {
-    inner: Arc<dyn bdb_cellar_runtime::client::InvocationTransport>,
+    inner: Arc<dyn cellar_runtime::client::InvocationTransport>,
 }
-impl bdb_cellar_runtime::client::InvocationTransport for Observe {
+impl cellar_runtime::client::InvocationTransport for Observe {
     fn call<'a>(
         &'a self,
-        invocation: &'a bdb_cellar_runtime::client::Invocation<'a>,
+        invocation: &'a cellar_runtime::client::Invocation<'a>,
         request: http::Request<http_body_util::Full<bytes::Bytes>>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = cellar::sdk::IngressResponse> + Send + 'a>,
@@ -188,7 +188,7 @@ impl bdb_cellar_runtime::client::InvocationTransport for Observe {
                 invocation.mutation,
                 invocation.operation,
                 invocation.target.namespace(),
-                bdb_cellar_runtime::application::cell_name(&invocation.target),
+                cellar_runtime::application::cell_name(&invocation.target),
                 String::from_utf8_lossy(&bytes)
             );
             http::Response::from_parts(

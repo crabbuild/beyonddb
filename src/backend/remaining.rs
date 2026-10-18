@@ -9,8 +9,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::InvocationError;
+use cellar_runtime::identity::CellTarget;
 use extenddb_core::expression::{CompareOp, Expr, ExpressionMaps, PathElement};
 use extenddb_core::types::{
     AttributeValue, BackupDescription, BackupDetails, BackupSummary, ContinuousBackupsDescription,

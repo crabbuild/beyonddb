@@ -47,7 +47,7 @@ fn range_read_barriers_cover_signed_sdk_requests_after_same_pk_split_and_restart
         assert_eq!(transaction_fixture::participant_for_key(&client, &info, &key("8")).await.0, source);
         let spec = client.query::<ReadPartitionState>(&source, None, Json(())).await.unwrap().output.0.unwrap().spec;
         assert_range_read_barriers(&storage, &client, &source, spec.epoch, &info).await;
-        let plan = provisioner.split_partition(account, client.clone(), &info.table_id, spec.partition_id, spec.lower.unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await.unwrap();
+        let plan = provisioner.split_partition(account, client.clone(), &info.table_id, spec.partition_id, spec.lower.unwrap_or_else(keyspace::RangeKey::minimum)).await.unwrap();
         assert_eq!(plan.children.len(), 2);
         let (left, _) = transaction_fixture::participant_for_key(&client, &info, &key("1.5")).await;
         let (right, _) = transaction_fixture::participant_for_key(&client, &info, &key("8")).await;

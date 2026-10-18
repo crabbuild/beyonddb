@@ -4,14 +4,14 @@ use crate::{
     APPLICATION, Error, Json, Result, RoutePagePartition, SqlBatch, SqlResultSet, SqlValue,
     account_target, table::statement,
 };
-use bdb_cellar_runtime::app::CellType;
-use bdb_cellar_runtime::descriptors::CatalogRole;
-use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::app::CellType;
+use cellar_runtime::descriptors::CatalogRole;
+use cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, Query, QueryContext, RegistryBuilder,
 };
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
@@ -32,8 +32,8 @@ const SCHEMA: &str = include_str!("directory/schema.sql");
 const MAX_RANGES: usize = 1024;
 const PAGE_SIZE: usize = 64;
 
-const fn directory_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
-    bdb_cellar_runtime::registry::OperationDescriptor {
+const fn directory_operation(id: u32) -> cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: 1024 * 1024,
         output_limit: 512 * 1024,
         ..crate::operation(id)
@@ -42,8 +42,8 @@ const fn directory_operation(id: u32) -> bdb_cellar_runtime::registry::Operation
 const PAGE_BYTES: usize = 360 * 1024;
 const LEAF_BYTES: i64 = 512 * 1024;
 
-static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 12] = [
-    bdb_cellar_runtime::registry::OperationDescriptor {
+static COMMANDS: [cellar_runtime::registry::OperationDescriptor; 12] = [
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: 1024 * 1024,
         ..directory_operation(1)
     },
@@ -53,46 +53,46 @@ static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 12] = [
     directory_operation(5),
     directory_operation(6),
     directory_operation(7),
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
         ..directory_operation(8)
     },
     directory_operation(9),
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
         ..directory_operation(10)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
         ..directory_operation(11)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: crate::OPERATION_BYTES,
         codec_version: 2,
         ..directory_operation(12)
     },
 ];
-static QUERIES: [bdb_cellar_runtime::registry::OperationDescriptor; 6] = [
-    bdb_cellar_runtime::registry::OperationDescriptor {
+static QUERIES: [cellar_runtime::registry::OperationDescriptor; 6] = [
+    cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
         ..directory_operation(1)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         output_limit: 512 * 1024,
         codec_version: 2,
         ..directory_operation(2)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         output_limit: 512 * 1024,
         ..directory_operation(3)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
         ..directory_operation(4)
     },
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         codec_version: 2,
         output_limit: crate::OPERATION_BYTES,
         ..directory_operation(5)
@@ -116,7 +116,7 @@ impl DirectorySpec {
     pub fn root(table_id: String) -> Self {
         Self {
             table_id,
-            key_encoding_version: bdb_keyspace::KEY_ENCODING_VERSION,
+            key_encoding_version: keyspace::KEY_ENCODING_VERSION,
             node_id: [0; 16],
             lower: RangeKey::minimum(),
             upper: None,
@@ -125,7 +125,7 @@ impl DirectorySpec {
     }
 
     fn valid(&self) -> bool {
-        self.key_encoding_version == bdb_keyspace::KEY_ENCODING_VERSION
+        self.key_encoding_version == keyspace::KEY_ENCODING_VERSION
             && self.depth < 128
             && self.upper.clone().is_none_or(|upper| self.lower < upper)
     }
@@ -169,7 +169,7 @@ pub struct DirectoryState {
 }
 
 pub(crate) struct DirectoryModule;
-impl bdb_cellar_runtime::registry::CellModule for DirectoryModule {
+impl cellar_runtime::registry::CellModule for DirectoryModule {
     const NAME: &'static str = MODULE;
     fn descriptor(&self) -> &'static ModuleDescriptor {
         static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();

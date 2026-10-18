@@ -1,6 +1,6 @@
 //! Serializable transactional reads from immutable participant snapshots.
 
-use bdb_cellar_runtime::client::InvocationError;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
@@ -21,8 +21,8 @@ use crate::{
 
 #[derive(Clone)]
 enum ReadTarget {
-    Account(bdb_cellar_runtime::identity::CellTarget),
-    Data(bdb_cellar_runtime::identity::CellTarget),
+    Account(cellar_runtime::identity::CellTarget),
+    Data(cellar_runtime::identity::CellTarget),
 }
 
 impl CellStorage {
@@ -284,9 +284,9 @@ impl CellStorage {
                         }
                     };
                     match result {
-                        Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(
-                            _,
-                        ))) if admission_retries < 4 => {
+                        Err(InvocationError::NotStarted(cellar_runtime::Error::Capacity(_)))
+                            if admission_retries < 4 =>
+                        {
                             admission_retries += 1;
                             tokio::time::sleep(Duration::from_millis(2 << admission_retries)).await;
                         }

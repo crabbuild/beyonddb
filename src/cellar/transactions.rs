@@ -4,7 +4,7 @@ use crate::{
     CellStorage, Json, ListCoordinatorShards, ListCoordinatorShardsInput, PendingTransactionCursor,
     account_target,
 };
-use bdb_cellar_runtime::identity::{CellTarget, partition_for_shard};
+use cellar_runtime::identity::{CellTarget, partition_for_shard};
 use extenddb_storage::error::StorageError;
 use std::sync::Arc;
 

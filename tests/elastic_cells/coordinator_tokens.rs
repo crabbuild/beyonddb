@@ -1,6 +1,6 @@
 use crate::local_node;
-use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use beyonddb::*;
+use cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use extenddb_core::types::{AttributeValue, Item};
 use std::sync::{
     Arc,
@@ -65,8 +65,8 @@ fn request() -> BeginCrossCellTransactionInput {
 }
 
 async fn assert_payload(
-    client: &bdb_cellar_runtime::client::CellClient,
-    coordinator: &bdb_cellar_runtime::identity::CellTarget,
+    client: &cellar_runtime::client::CellClient,
+    coordinator: &cellar_runtime::identity::CellTarget,
     original: &BeginCrossCellTransactionInput,
     position: usize,
 ) {

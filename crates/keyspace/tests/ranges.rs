@@ -1,4 +1,4 @@
-use bdb_keyspace::{
+use keyspace::{
     Component as C, Directory, Error, KeyKind, KeySchema, KeySpan, RangeKey, SortCondition as S,
 };
 
@@ -123,7 +123,7 @@ fn byte_order_survives_zeroes_prefixes_and_composite_boundaries() {
         .unwrap();
     assert_eq!(
         large.as_bytes().len(),
-        bdb_keyspace::MAX_ENCODED_PRIMARY_KEY_BYTES
+        keyspace::MAX_ENCODED_PRIMARY_KEY_BYTES
     );
 }
 

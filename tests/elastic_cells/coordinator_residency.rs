@@ -1,11 +1,11 @@
 //! Coordinator history and admission pressure through the native Cellar SDK.
 use crate::{cellar_node, local_node, transaction_fixture};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     client::{CellClient, Invocation, InvocationAdmission},
     identity::CellTarget,
     registry::Command,
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item, TableKeyInfo, TableStatus},
@@ -321,7 +321,7 @@ pub(super) async fn assert_read_results(
 }
 
 struct RefuseChildInstall {
-    namespace: bdb_cellar_runtime::identity::NamespaceId,
+    namespace: cellar_runtime::identity::NamespaceId,
     refuse: Arc<AtomicBool>,
     attempts: Arc<AtomicUsize>,
 }
@@ -329,14 +329,14 @@ impl InvocationAdmission for RefuseChildInstall {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target.namespace() == self.namespace
                 && invocation.operation == InstallPartition::ID
                 && self.refuse.load(Ordering::SeqCst)
             {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "injected child admission budget",
                 ));
             }

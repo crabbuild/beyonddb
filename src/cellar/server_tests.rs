@@ -1,5 +1,5 @@
 use super::*;
-use bdb_cellar_runtime::{
+use cellar_runtime::{
     client::{Invocation, InvocationAdmission},
     registry::Query,
 };
@@ -16,13 +16,13 @@ impl InvocationAdmission for AccountAdmission {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.operation == crate::ListCoordinatorShards::ID {
                 if invocation.target == crate::account_target("123456789012")?
                     && self.refuse.load(Ordering::SeqCst)
                 {
-                    return Err(bdb_cellar_runtime::Error::Capacity(
+                    return Err(cellar_runtime::Error::Capacity(
                         "startup account admission withheld",
                     ));
                 }

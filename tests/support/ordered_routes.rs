@@ -1,8 +1,8 @@
 // Fixture inspection for tables whose directory has not split into branches.
 // Fleet traversal tests use bounded public pages and do not assume a global epoch.
 async fn single_leaf_route(
-    client: &bdb_cellar_runtime::client::CellClient,
-    account: &bdb_cellar_runtime::identity::CellTarget,
+    client: &cellar_runtime::client::CellClient,
+    account: &cellar_runtime::identity::CellTarget,
     table_id: &str,
 ) -> Option<beyonddb::TableRoute> {
     use beyonddb::{Json, ReadRouteDirectory, RoutePageInput, RoutePageOutcome};
@@ -12,7 +12,7 @@ async fn single_leaf_route(
         .unwrap()
         .output
         .0?;
-    let directory = beyonddb::read_directory_leaf(client, account.tenant(), table_id, bdb_keyspace::RangeKey::minimum())
+    let directory = beyonddb::read_directory_leaf(client, account.tenant(), table_id, keyspace::RangeKey::minimum())
         .await
         .unwrap();
     assert_eq!(
@@ -61,7 +61,7 @@ async fn single_leaf_route(
             .extend(partitions.into_iter().map(|part| beyonddb::PartitionSpec {
                 table: table.clone(),
                 partition_id: part.partition_id,
-                lower: (part.lower != bdb_keyspace::RangeKey::minimum()).then_some(part.lower),
+                lower: (part.lower != keyspace::RangeKey::minimum()).then_some(part.lower),
                 upper: part.upper,
                 epoch: part.epoch,
             }));

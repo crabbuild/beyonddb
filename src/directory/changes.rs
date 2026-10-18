@@ -1,7 +1,7 @@
 //! Range replacement reservations stay with one metadata leaf until completion.
 
 use super::*;
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 
 /// One data or GSI range replacement, independent of unrelated leaf versions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

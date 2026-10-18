@@ -1,14 +1,14 @@
 //! Native recovery refuses startup while healthy terminal work progresses.
 use crate::{local_node, transaction_fixture};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, Invocation, InvocationAdmission, InvocationTransport},
     identity::CellTarget,
     registry::Command,
 };
-use beyonddb::*;
-use bytes::Bytes;
-use cellar::sdk::IngressResponse;
 use extenddb_core::types::AttributeValue;
 use extenddb_storage::error::StorageError;
 use http_body_util::Full;
@@ -32,11 +32,11 @@ impl InvocationAdmission for ParticipantAdmission {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target == self.target && self.refuse.load(Ordering::SeqCst) {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "participant admission withheld",
                 ));
             }

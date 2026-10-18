@@ -1,10 +1,10 @@
 use crate::{cellar_node, local_node, transaction_fixture};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, InvocationError, Receipt},
     identity::CellTarget,
 };
-use beyonddb::*;
 fn mutation() -> MutationIdentity {
     local_node::wall_mutation()
 }

@@ -3,13 +3,13 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application},
 };
-use bdb_cellar_runtime::{
-    client::{CellClient, Invocation, InvocationTransport},
-    registry::Command,
-};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{CellClient, Invocation, InvocationTransport},
+    registry::Command,
+};
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, DeleteTableInput, Item},

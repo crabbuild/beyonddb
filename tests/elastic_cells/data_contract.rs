@@ -1,12 +1,11 @@
 //! Ordered data-range cutover, transaction, stream and restoration contracts.
 use crate::native_peer::{self, Inspection, Peer, SOURCE};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, InvocationError},
     identity::{CellTarget, RequestId},
 };
-use bdb_keyspace::RangeKey;
-use beyonddb::*;
 use extenddb_core::{
     expression::{Expr, ExpressionMaps, PathElement, UpdateAction},
     types::{
@@ -18,6 +17,7 @@ use extenddb_storage::{
     DataEngine, IdempotencyKey, StreamContinuation, StreamEngine, TableEngine, TransactGetOp,
     TransactWriteOp, error::StorageError,
 };
+use keyspace::RangeKey;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

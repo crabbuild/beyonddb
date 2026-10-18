@@ -1,12 +1,12 @@
 //! Shared ordered-read and prepared-intent contracts over native SDK cells.
 use crate::local_node;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, InvocationError},
     identity::CellTarget,
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::{Expr, ExpressionMaps, KeyCondition, PathElement},
     types::{AttributeValue, Item, TableKeyInfo},

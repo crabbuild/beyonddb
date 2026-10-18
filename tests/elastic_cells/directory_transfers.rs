@@ -2,8 +2,8 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application, mutation},
 };
-use bdb_cellar_runtime::client::InvocationError;
 use beyonddb::*;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::types::{AttributeValue, Item};
 use extenddb_storage::TableEngine;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ fn base_transfer_retains_exact_contract_through_publication_and_owner_restart() 
             lower: part
                 .lower
                 .clone()
-                .unwrap_or_else(bdb_keyspace::RangeKey::minimum),
+                .unwrap_or_else(keyspace::RangeKey::minimum),
             upper: part.upper.clone(),
             epoch: part.epoch,
         };

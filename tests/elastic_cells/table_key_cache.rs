@@ -1,9 +1,9 @@
 //! Backend metadata cache behavior through actual native SDK ingress.
 use crate::local_node;
-use bdb_cellar_runtime::client::{CellClient, Invocation, InvocationTransport};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::client::{CellClient, Invocation, InvocationTransport};
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, Item, KeySchemaElement,
     KeyType, ScalarAttributeType,
@@ -22,7 +22,7 @@ use std::{
 struct AccountQueries {
     inner: Arc<dyn InvocationTransport>,
     queries: Arc<AtomicU64>,
-    account: bdb_cellar_runtime::identity::CellTarget,
+    account: cellar_runtime::identity::CellTarget,
 }
 impl InvocationTransport for AccountQueries {
     fn call<'a>(

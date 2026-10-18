@@ -5,7 +5,7 @@ use crate::{
     Beyonddb, CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome,
     TableClass, TablePlacement, TableSpec,
 };
-use bdb_cellar_runtime::{app::CellApplication, descriptors::BuildDescriptor, identity::Digest};
+use cellar_runtime::{app::CellApplication, descriptors::BuildDescriptor, identity::Digest};
 use extenddb_core::{
     expression::{ExpressionMaps, parse_key_condition, tokenize},
     types::{

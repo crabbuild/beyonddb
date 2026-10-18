@@ -1,7 +1,7 @@
 //! Table installation and domain split orchestration over Cellar SDK routing.
 //! Cellar owns all physical activation, placement, owner fences and restoration.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 #[path = "../provision/capacity.rs"]
 mod capacity;
 #[path = "provision/coordinator_registration.rs"]
@@ -18,7 +18,7 @@ use crate::{
     InstallPartition, InstallPartitionOutcome, Json, ListTables, ListTablesInput, PartitionInstall,
     PartitionSpec, SplitPlan, TableRecord, account_target, data_target,
 };
-use bdb_cellar_runtime::{
+use cellar_runtime::{
     app::CompiledApplication,
     client::{CellClient, InvocationError},
     identity::CellTarget,
@@ -379,9 +379,9 @@ fn initial_partition(
     })
 }
 
-fn provision_error(error: bdb_cellar_runtime::Error) -> StorageError {
+fn provision_error(error: cellar_runtime::Error) -> StorageError {
     match error {
-        bdb_cellar_runtime::Error::Capacity(_) => StorageError::LimitExceeded(error.to_string()),
+        cellar_runtime::Error::Capacity(_) => StorageError::LimitExceeded(error.to_string()),
         _ => StorageError::Internal(error.to_string()),
     }
 }

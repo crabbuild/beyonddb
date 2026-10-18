@@ -4,7 +4,7 @@ Status: ordered routing is implemented in the Cellar-backed executable and
 passes the local signed SDK/process-restart fixture. The root serving-router
 fixture puts one PK in three actual cells, queries across them, splits the
 middle cell at an observed SK, resumes in both directions and reopens the node.
-The shared contracts are in `crates/bdb-keyspace`. Complete API/index and fleet
+The shared contracts are in `crates/keyspace`. Complete API/index and fleet
 fault qualification remain unfinished. This document records the architecture
 and delivery gates and supersedes the hash-based proposal in `scaling.md`.
 
@@ -60,7 +60,7 @@ No hash, node identity, or cell ID precedes the key. Table generation and tenant
 are directory/storage scope, not parts of the user-key comparison. Encodings
 are versioned; an installation must reject a directory with another version.
 
-`bdb-keyspace` implements encoding version 1:
+`keyspace` implements encoding version 1:
 
 * String: UTF-8 bytes in unsigned byte order.
 * Binary: unsigned byte order.
@@ -238,8 +238,8 @@ must coordinate with admission so a transaction cannot prepare between the
 
 | Slice | Files / implementation | Exit evidence |
 | --- | --- | --- |
-| Ordered contracts | `crates/bdb-keyspace`: canonical keys, query spans, validated multi-cell directories, split CAS and logical-key resume | Implemented: nine tests plus clippy. Exact decimal pairs, zero/ff escaping, same-PK ranges and resume through a split. |
-| Real Cellar range fixture | `crates/bdb-cellar-runtime/tests/embedded/range_cells.rs` | Passed: three actual Cellar targets hold one PK split by SK; clipped ascending/descending reads, wrong-range/epoch rejection and restart. This is a local SDK fixture, not signed DynamoDB/API or fleet qualification. |
+| Ordered contracts | `crates/keyspace`: canonical keys, query spans, validated multi-cell directories, split CAS and logical-key resume | Implemented: nine tests plus clippy. Exact decimal pairs, zero/ff escaping, same-PK ranges and resume through a split. |
+| Real Cellar range fixture | `crates/cellar-runtime/tests/embedded/range_cells.rs` | Passed: three actual Cellar targets hold one PK split by SK; clipped ascending/descending reads, wrong-range/epoch rejection and restart. This is a local SDK fixture, not signed DynamoDB/API or fleet qualification. |
 | Durable schema/handler cutover | `partition.rs`, `partition_schema.sql`, `partition/{key,query,scan,transaction,ttl}.rs`, item/index helpers | Persist encoding/range contract; bound every local read/export/write by full key. Verify numeric canonicalization against ExtendDB. |
 | Directory and bootstrap | `routing.rs`, `directory/**`, `provision/**`, `backend/table_creation.rs` | Variable BLOB bounds and fingerprints; multi-cell creation required; no account/single fallback or power-of-two rule. Restart at each create/publication step. |
 | Serving requests | `backend/{data,remaining,transaction,batch}*`, metadata cache | Signed SDK CRUD, Query/Scan, ascending/descending limits, filtering, LEK and transactional reads across several cells. No full-map lookups. |

@@ -1,7 +1,7 @@
 //! Complete published cross-Cell decisions after a request or owner exits.
 
-use bdb_cellar_runtime::client::{InvocationError, Observed, Receipt};
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::{InvocationError, Observed, Receipt};
+use cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
 use std::time::Duration;
@@ -593,7 +593,7 @@ read_barrier!(
 );
 
 impl CellStorage {
-    pub(super) async fn query_resolving<Q: bdb_cellar_runtime::registry::Query>(
+    pub(super) async fn query_resolving<Q: cellar_runtime::registry::Query>(
         &self,
         target: &CellTarget,
         account_id: &str,

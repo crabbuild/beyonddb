@@ -1,11 +1,11 @@
 use super::global_indexes::{ACCOUNT, contains, mutation, owner, ranges, runtimes};
 use crate::native_peer::{self, FRONT, Inspection, Observations, Peer, SOURCE};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     app::CompiledApplication,
     client::{CellClient, InvocationError},
     identity::CellTarget,
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item, ScalarAttributeType},
@@ -432,7 +432,7 @@ fn split_inherits_unfinished_backfill_and_mutable_policy_without_changing_instal
                     .spec
                     .lower
                     .clone()
-                    .unwrap_or_else(bdb_keyspace::RangeKey::minimum),
+                    .unwrap_or_else(keyspace::RangeKey::minimum),
             )
             .await
             .unwrap();

@@ -1,8 +1,8 @@
 //! Recoverable host orchestration of one planned data-range split.
 
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::error::StorageError;
+use keyspace::RangeKey;
 
 use crate::backend::{cell_error, mutation_identity};
 use crate::{
@@ -350,6 +350,6 @@ fn split_state(message: &str) -> StorageError {
     StorageError::Transient(message.into())
 }
 
-fn cell_identity(error: bdb_cellar_runtime::Error) -> StorageError {
+fn cell_identity(error: cellar_runtime::Error) -> StorageError {
     StorageError::Internal(error.to_string())
 }

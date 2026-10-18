@@ -1,162 +1,218 @@
 # BeyondDB
 
-BeyondDB is an **in-progress, self-hosted DynamoDB-compatible service**. It
-uses [ExtendDB](https://github.com/ExtendDB/extenddb) for the DynamoDB HTTP
-protocol, SigV4, IAM evaluation, validation, and expressions. It uses
-[Cellar](https://github.com/crabbuild/cellar) for fenced Cell ownership,
-SQLite execution, LTX publication, and object-store durability. The
-[`cellar-main` crates.io release](https://crates.io/crates/cellar-main/0.1.0) is
-pinned to `=0.1.0`, and ExtendDB's reviewed Git revision is pinned in
-[Cargo.toml](Cargo.toml).
+**A self-hosted DynamoDB-compatible service, built on ExtendDB and Cellar.**
 
-An AWS SDK can send signed requests to BeyondDB's public endpoint. Core table
-and item operations, transactions, TTL, selected secondary indexes, and a
-partial Streams path have durable Cell implementations and focused restart
-tests. **BeyondDB is not yet a complete or production-qualified DynamoDB
-replacement.** See the [API coverage and gaps](docs/api.md) before choosing a
-workload.
+Use familiar AWS SDKs and DynamoDB requests against your own server. BeyondDB
+embeds the protocol frontend and storage runtime in one executable, and spreads
+each table across ordered **partition-key + sort-key ranges** in multiple cells.
 
-**Cellar migration branch:** the production manifest and domain handlers now use
-Cellar. The executable passes local signed SDK/restart checks. Table ownership
-now uses ordered `(PK, SK)` ranges across multiple cells, with a real serving
-router/split fixture. Nine bucket-backed process cases and SDK handoff to a
-second node pass. Historical Cellule results below are not Cellar qualification.
-The user retired the unported Cellule-only test targets; their
-[coverage inventory](docs/retired-cellule-tests.md) records the gaps and source
-revision. All-target build and strict Clippy gates remain enabled and pass.
-Broader API/index and fleet fault qualification remains future work.
-See [migration status](CELLAR_MIGRATION.md) and the
-[ordered range plan](docs/ordered-cell-partitioning.md).
+> **Status: in development.** Signed SDK and recovery tests cover core operations,
+> transactions and selected index/Streams paths. Full DynamoDB compatibility,
+> fleet-scale capacity, backup/PITR and safe format upgrades remain unfinished.
+> Check the [API coverage](docs/api.md) before choosing a workload.
 
-## Start here
+[Quick start](#quick-start) · [Architecture](#how-it-fits-together) ·
+[Capabilities](#capabilities-and-limits) · [Development](#development) ·
+[Documentation](#documentation)
 
-| Need | Read |
+## How it fits together
+
+![BeyondDB architecture: AWS clients enter one executable containing ExtendDB, BeyondDB routing and Cellar. A table spans ordered range cells hosted across multiple fleet nodes.](diagram/architecture.svg)
+
+| Layer | Responsibility |
 | --- | --- |
-| Configure and start a node | [Embedded Cellar server](docs/cellar-server.md) |
-| Send AWS CLI requests | [User guide](docs/user-guide.md) |
-| Check an operation or limitation | [API coverage](docs/api.md) |
-| Understand Cells, routing, and transactions | [Ordered cell architecture](docs/ordered-cell-partitioning.md) |
-| Measure latency and throughput | [Performance guide](docs/performance.md) |
-| Follow implementation evidence and open gates | [Implementation status](docs/implementation-status.md) |
+| **ExtendDB** | DynamoDB HTTP, SigV4, IAM evaluation, validation and expressions |
+| **BeyondDB** | Table metadata, ordered range routing, indexes and cross-cell transactions |
+| **Cellar** | Cell execution, placement, fenced ownership, peer transport and durability |
 
-## Architecture at a glance
+ExtendDB and Cellar run **inside the BeyondDB executable**. Cellar is pinned to
+[`cellar-main = "=0.1.0"`](Cargo.toml); ExtendDB uses a reviewed Git revision.
 
-ExtendDB owns the public HTTP, SigV4, IAM, validation, and expression layers.
-BeyondDB implements ExtendDB's storage contracts with Cell-backed state,
-routing, provisioning, and transaction coordination. Cellar owns fenced Cell
-execution, peer transport, SQLite commands, and durability. ExtendDB and Cellar
-are embedded in the BeyondDB executable. In fleet mode the object store holds
-published state for owner recovery.
+### One table, many cells
 
-### BeyondDB's Cell types
+A table starts with **four ordered data ranges** by default. Configure
+`initial_partitions` from **2 to 256**; public single-cell tables are rejected.
+Cells can share a node or live on different fleet nodes. Adding ranges does not
+by itself add physical capacity.
 
-```mermaid
-flowchart LR
-    Request["ExtendDB request handling"] --> Account["Account Cell<br/>tables · policies · TTL settings"]
-    Request -. "SigV4 lookup" .-> Credential["Credential Cells<br/>encrypted access keys"]
-    Account --> Directory["Directory Cells<br/>base and GSI ranges"]
-    Directory --> Data["Data Cells<br/>items · LSIs · streams · GSI journal"]
-    Data -. "asynchronous projection" .-> GSI["GSI Cells<br/>projected entries"]
-    Request --> Coordinator["Coordinator Cells<br/>durable transaction decision"]
-    Coordinator --> Data
-    Coordinator --> Account
+```text
+Logical order: (partition key, sort key)
+
+          one table
+   ┌─────────┬─────────┬─────────┬─────────┐
+   │ range 1 │ range 2 │ range 3 │ range 4 │
+   └────┬────┴────┬────┴────┬────┴────┬────┘
+        │         │         │         │
+      cell A    cell B    cell C    cell D
+
+Point read/write → the cell containing the complete key
+Query            → cells intersecting the requested PK/SK range
+Scan             → a paginated walk across the table's ranges
 ```
 
-Each box represents BeyondDB state hosted in Cellar, not an independent
-HTTP service. An account Cell owns table metadata; data Cells own
-ordered `(PK, SK)` ranges. A GSI is maintained asynchronously from a journal
-committed with the base item. Cross-Cell transactions use a durable
-coordinator decision and idempotent participant resolution.
+A hot partition key can split across cells by sort key when the table has no
+LSIs. GSIs have their own independently partitioned cells. See the
+[ordered partitioning design](docs/ordered-cell-partitioning.md) for split,
+pagination and LSI locality rules.
 
-### Partition every table across cells
+### Commit and recovery
 
-Every new table starts with multiple ordered data ranges. `initial_partitions`
-defaults to four and accepts counts from two through 256. The `CreateTable` tag
-`beyonddb:cell-model` accepts `auto` or `partitioned`; `single` is rejected.
-Point requests route by the full primary key. Query visits only intersecting
-ranges, and a hot PK can split by SK when the table has no LSIs. GSIs have their
-own ordered data cells. See [ordered cell partitioning](docs/ordered-cell-partitioning.md).
+A partition-local write commits its item, result, LSI changes, GSI journal and
+stream intent in one cell command. Cross-cell transactions record a durable
+coordinator decision and resolve participants idempotently. GSI projection is
+asynchronous.
 
-### When a write becomes durable
+Local mode persists to the configured directory. Fleet mode uses an object
+store for recovery; bucket publication is the default acknowledgement path.
+Optional follower durability allows native follower fsyncs to race publication.
+See [server configuration](docs/cellar-server.md) and
+[follower durability](docs/follower-durability.md) for the tested boundaries.
 
-A partition-local mutation, its result, LSI changes, GSI journal entry, and
-stream intent commit in one Cell command. The successful response follows
-Cellar's durability proof. See the [embedded server guide](docs/cellar-server.md)
-for the selected persistence mode.
+## Quick start
 
-Fleet mode requires bucket publication by default. Opt-in
-`fleet.follower_durability: true` lets native follower fsyncs race bucket
-publication. A RustFS crash fixture recovers acknowledged writes on a fresh
-successor after deleting the failed owner's local directory while both bundle
-and LTX uploads were withheld. Cellar controls enrollment, proofs and recovery;
-see [follower durability](docs/follower-durability.md) for the tested boundary.
-Local-only mode persists to the configured local directory.
+This loopback demo needs **Rust 1.97+, Python 3, OpenSSL and the AWS CLI**.
+Run the setup from the repository root. It creates a temporary data directory
+and an admin credential for the local account.
 
-## Current capability boundary
-
-| Area | Current state |
-| --- | --- |
-| Tables and items | Create/describe/list/update/delete tables; keyed CRUD, Query, Scan, batches, conditions, expressions, and pagination have Cell paths. Some `CreateTable` and `UpdateTable` options are rejected. |
-| Transactions | `TransactWriteItems` and `TransactGetItems` use durable coordination across Cells, with signed SDK restart tests. |
-| Indexes | LSIs support `ALL` projection. GSIs created with a table support `ALL`, `KEYS_ONLY`, and `INCLUDE` through asynchronous projection. Online GSI changes and non-`ALL` LSI projections remain unsupported. |
-| TTL and Streams | TTL settings and bounded expiry sweeps are Cell-backed. A stream enabled at table creation can journal writes and expose current and retained generations. Bounded retention sweeps cover active and dormant data Cells; stream policy updates and full lifecycle qualification remain open. |
-| Operations | Backup, restore, PITR, account/IAM management, and safe data-format upgrades remain unfinished. Fleet-scale throughput and unattended recovery are unqualified. |
-| Other DynamoDB features | PartiQL and Global Tables are not dispatched by pinned ExtendDB. Its local-file import/export extensions do not implement DynamoDB's S3 workflow; BeyondDB disables them. |
-
-The table is a guide, not a blanket compatibility claim. The
-[API matrix](docs/api.md) distinguishes implemented methods from operations
-verified through signed SDK requests and owner restart.
-
-## Minimal client example
-
-After following the [deployment guide](docs/deployment.md), configure an
-account's access key and point the AWS CLI at the public listener:
+### 1. Build and configure
 
 ```sh
-export AWS_ACCESS_KEY_ID='your-bootstrapped-key-id'
-export AWS_SECRET_ACCESS_KEY='your-bootstrapped-secret'
+cargo build --locked --bin beyonddb
+
+umask 077
+export BEYONDDB_HOME="$(mktemp -d)"
+openssl rand -out "$BEYONDDB_HOME/peer.key" 32
+openssl rand -out "$BEYONDDB_HOME/encryption.key" 32
+
+python3 - "$BEYONDDB_HOME" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve()
+config = json.loads(Path("config/cellar.example.json").read_text())
+config.update(
+    node_name="local-demo",
+    data_dir=str(root / "data"),
+    peer_key_file=str(root / "peer.key"),
+    encryption_key_file=str(root / "encryption.key"),
+)
+config["bootstrap"].update(
+    access_key_id="AKIABEYONDDBDEMO00001",
+    policy_file=str(root / "policy.json"),
+)
+policy = {"Version": "2012-10-17", "Statement": [
+    {"Effect": "Allow", "Action": "dynamodb:*", "Resource": "*"}
+]}
+(root / "policy.json").write_text(json.dumps(policy))
+(root / "config.json").write_text(json.dumps(config, indent=2))
+PYTHON
+```
+
+### 2. Start the server
+
+Keep this terminal open. Bootstrap reads the demo secret from stdin.
+
+```sh
+printf '%s' 'local-development-secret' | \
+  "${CARGO_TARGET_DIR:-target}/debug/beyonddb" "$BEYONDDB_HOME/config.json" --bootstrap
+```
+
+The public listener is `http://127.0.0.1:8000`; the authenticated peer listener
+is `127.0.0.1:9000`. After stopping the server, restart with the same configuration
+and omit `--bootstrap`. Keep the data directory and encryption key together.
+For external TLS serving or a fleet, follow the [server guide](docs/cellar-server.md).
+
+### 3. Create, write and query
+
+In a **second terminal**, configure the demo credentials and endpoint:
+
+```sh
+export AWS_ACCESS_KEY_ID='AKIABEYONDDBDEMO00001'
+export AWS_SECRET_ACCESS_KEY='local-development-secret'
 export AWS_DEFAULT_REGION='us-east-1'
-export AWS_CA_BUNDLE='/etc/beyonddb/public-ca.crt'
-export BEYONDDB_ENDPOINT='https://ddb.example.com:8000'
+export BEYONDDB_ENDPOINT='http://127.0.0.1:8000'
 
-aws dynamodb list-tables --endpoint-url "$BEYONDDB_ENDPOINT"
+aws dynamodb create-table \
+  --table-name Orders \
+  --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST \
+  --endpoint-url "$BEYONDDB_ENDPOINT"
+
+aws dynamodb wait table-exists \
+  --table-name Orders --endpoint-url "$BEYONDDB_ENDPOINT"
+
+aws dynamodb put-item \
+  --table-name Orders \
+  --item '{"pk":{"S":"customer#42"},"sk":{"S":"order#0001"},"total":{"N":"19.95"}}' \
+  --endpoint-url "$BEYONDDB_ENDPOINT"
+
+aws dynamodb query \
+  --table-name Orders \
+  --key-condition-expression 'pk = :customer AND sk BETWEEN :start AND :end' \
+  --expression-attribute-values '{":customer":{"S":"customer#42"},":start":{"S":"order#0001"},":end":{"S":"order#0099"}}' \
+  --consistent-read \
+  --endpoint-url "$BEYONDDB_ENDPOINT"
 ```
 
-The CA bundle must trust the public listener certificate. A loopback listener
-without TLS uses an `http://` endpoint and does not need `AWS_CA_BUNDLE`.
-For runnable table and item commands, see the [user guide](docs/user-guide.md).
+The query returns the inserted order. The AWS CLI follows pagination by default.
+For conditional updates, transactions, TTL and Streams examples, see the
+[user guide](docs/user-guide.md).
 
-## Development and qualification
+## Capabilities and limits
 
-The ordinary test suite excludes ignored process tests. The latter start a
-RustFS fixture, use signed AWS SDK calls, kill the server, and read committed
-state after fenced recovery. They require Docker and the AWS CLI. Legacy peer
-fixtures also require OpenSSL.
-Use a unique target directory under `$HOME/Workspace/crabbuild-target` on
-workstations with the mounted Workspace volume.
+| Area | Available paths | Remaining limits |
+| --- | --- | --- |
+| Tables and items | Table lifecycle, keyed CRUD, Query/Scan, batches, conditions, expressions and pagination | Some create/update options are rejected |
+| Transactions | Durable `TransactWriteItems` and `TransactGetItems` across cells | Focused fault tests do not establish fleet-scale recovery |
+| Indexes | `ALL` LSIs; GSIs created with a table support `ALL`, `KEYS_ONLY` and `INCLUDE` | Online GSI changes and non-`ALL` LSIs are unsupported |
+| TTL and Streams | Bounded TTL sweeps; creation-time Streams with retained generations and retention sweeps | Stream policy changes and full lifecycle qualification remain open |
+| Operations | Local persistence, bucket-backed recovery and optional follower durability | Backup, restore, PITR, account/IAM management and safe format upgrades are unfinished |
+| Other DynamoDB features | See the [API matrix](docs/api.md) | PartiQL and Global Tables are not dispatched; local-file import/export is disabled |
+
+The [API matrix](docs/api.md) distinguishes implemented paths from behavior
+verified through signed SDK requests and owner restart. Fleet-scale throughput
+and unattended recovery remain unqualified. Retired legacy test coverage is
+listed [here](docs/retired-cellule-tests.md).
+
+## Development
+
+| Crate | Purpose |
+| --- | --- |
+| [`beyonddb`](Cargo.toml) | Executable, frontend composition and DynamoDB storage implementation |
+| [`cellar-runtime`](crates/cellar-runtime) | Compiled commands, queries, SQL, identities and SDK integration |
+| [`keyspace`](crates/keyspace) | Ordered key encoding, range planning and logical continuations |
 
 ```sh
-export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-docs-3c23"
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --lib
-cargo test --test cellar_process --locked -- --ignored --test-threads=1
-cargo test --test server_binary -- --ignored --test-threads=1
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
-The [independent client qualification instructions](docs/implementation-status.md#independent-client-qualification)
-run ExtendDB's Python protocol tests against the BeyondDB binary. Passing
-selected tests does not establish full DynamoDB compatibility. For scale
-claims, use the [measured completion gates](docs/scaling.md#completion-proof).
+Workstations with the mounted Workspace volume should use a checkout-specific
+`CARGO_TARGET_DIR` beneath `$HOME/Workspace/crabbuild-target`. Process tests are
+ignored by default and require Docker, OpenSSL and the AWS CLI:
 
-## Design and evidence
+```sh
+cargo test --locked --test cellar_process -- --ignored --test-threads=1
+cargo test --locked --test server_binary -- --include-ignored --test-threads=1
+```
 
-- [Cross-Cell transaction protocol](docs/cross-cell-transactions.md)
-- [Metadata ownership](docs/metadata-sharding.md)
-- [Global secondary indexes](docs/global-indexes.md)
-- [Streams contract](docs/streams-contract.md)
-- [Local secondary index contract](docs/lsi-contract.md)
-- [Scaling and measured limits](docs/scaling.md)
+See [contributor invariants](AGENTS.md),
+[migration evidence](CELLAR_MIGRATION.md) and
+[independent protocol qualification](docs/implementation-status.md#independent-client-qualification).
 
-BeyondDB is licensed under Apache-2.0. Its contributor invariants are in
-[AGENTS.md](AGENTS.md).
+## Documentation
+
+| Goal | Guide |
+| --- | --- |
+| Deploy and configure a node | [Embedded Cellar server](docs/cellar-server.md) |
+| Use AWS CLI and SDK requests | [User guide](docs/user-guide.md) |
+| Check API support | [API coverage](docs/api.md) |
+| Understand routing and splits | [Ordered cell partitioning](docs/ordered-cell-partitioning.md) |
+| Understand transactions and indexes | [Transactions](docs/cross-cell-transactions.md) · [GSIs](docs/global-indexes.md) · [LSIs](docs/lsi-contract.md) |
+| Work with change records | [Streams contract](docs/streams-contract.md) |
+| Measure and qualify a workload | [Performance](docs/performance.md) · [Scaling](docs/scaling.md) |
+
+Apache-2.0 licensed. See [LICENSE](LICENSE).

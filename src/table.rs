@@ -213,7 +213,7 @@ impl Command for CreateTable {
             }
         }
         let record = TableRecord {
-            key_encoding_version: bdb_keyspace::KEY_ENCODING_VERSION,
+            key_encoding_version: keyspace::KEY_ENCODING_VERSION,
             table_class: input.table_class,
             table_class_updates_ms: Vec::new(),
             placement: input.placement,
@@ -627,7 +627,7 @@ pub(super) fn decode_table(result: &SqlResultSet) -> Result<Option<TableRecord>>
         return Err(Error::Command("invalid account table row"));
     };
     let table: TableRecord = serde_json::from_slice(record)?;
-    if table.key_encoding_version != bdb_keyspace::KEY_ENCODING_VERSION {
+    if table.key_encoding_version != keyspace::KEY_ENCODING_VERSION {
         return Err(Error::Command("unsupported table key encoding"));
     }
     Ok(Some(table))

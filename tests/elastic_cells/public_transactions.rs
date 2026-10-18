@@ -1,8 +1,8 @@
 use crate::{local_node, transaction_fixture};
-use bdb_cellar_runtime::client::{CellClient, Invocation, InvocationTransport};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::client::{CellClient, Invocation, InvocationTransport};
 use extenddb_core::{
     expression::{Expr, ExpressionMaps, PathElement},
     types::{AttributeValue, Item, ReturnValuesOnConditionCheckFailure, TableKeyInfo},

@@ -1,10 +1,10 @@
 //! Bucket-backed embedded Cellar host shared by integration fixtures.
-use bdb_cellar_runtime::{app::CompiledApplication, client::CellClient};
 use cellar::sdk::{
     ActorIdentity, ActorOptions, ActorPolicy, CellLimits, ExternalNodeServices, LogOptions, Node,
     NodeConfig, NodeFleet, NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner,
     ReplicaStorage, ReplicaStorageOptions, ReplicationOptions, ShutdownMode, SignedPeerTransport,
 };
+use cellar_runtime::{app::CompiledApplication, client::CellClient};
 use std::{path::Path, sync::Arc, time::Duration};
 
 pub async fn start(
@@ -66,7 +66,7 @@ pub async fn start_limited(
     config.maintenance.rebalance = false;
     config.runtime.handler_budget = Duration::from_secs(30);
     config.cell_limits = CellLimits::unrestricted();
-    config.cell_limits.sql = bdb_cellar_runtime::sql::host_limits();
+    config.cell_limits.sql = cellar_runtime::sql::host_limits();
     let services = ExternalNodeServices {
         wall_clock: None,
         http_client: None,

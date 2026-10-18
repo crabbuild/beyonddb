@@ -7,8 +7,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::InvocationError;
+use cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -38,7 +38,7 @@ struct Slot {
 }
 
 pub(crate) struct UpdateBatcher {
-    client: bdb_cellar_runtime::CellClient,
+    client: cellar_runtime::CellClient,
     slots: Mutex<HashMap<[u8; 32], Weak<Slot>>>,
 }
 
@@ -54,7 +54,7 @@ impl super::CellStorage {
 }
 
 impl UpdateBatcher {
-    pub(crate) fn new(client: bdb_cellar_runtime::CellClient) -> Self {
+    pub(crate) fn new(client: cellar_runtime::CellClient) -> Self {
         Self {
             client,
             slots: Mutex::new(HashMap::new()),

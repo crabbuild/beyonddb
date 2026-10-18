@@ -1,5 +1,5 @@
 [package]
-name = "bdb-cellar-runtime"
+name = "cellar-runtime"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ tracing = "0.1"
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-bdb-keyspace = { path = "../bdb-keyspace" }
+keyspace = { path = "../keyspace" }
 getrandom = "0.3"
 reqwest = { version = "0.12", default-features = false }
 tempfile = "3"

@@ -1,6 +1,6 @@
 //! Durable initial placement of a table's independently owned data ranges.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 #[cfg(test)]
 mod ordered_tests;
 #[cfg(test)]
@@ -8,7 +8,7 @@ mod tests;
 
 use std::collections::HashSet;
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use crate::table::{TableRecord, decode_table, statement};
@@ -342,15 +342,15 @@ impl Query for ReadRouteDirectory {
 
 /// Page a published base or index directory through bounded, independently versioned metadata leaves.
 pub async fn read_route_page(
-    client: &bdb_cellar_runtime::client::CellClient,
-    account: &bdb_cellar_runtime::identity::CellTarget,
+    client: &cellar_runtime::client::CellClient,
+    account: &cellar_runtime::identity::CellTarget,
     input: RoutePageInput,
 ) -> std::result::Result<RoutePageOutcome, extenddb_storage::error::StorageError> {
     read_route_page_direction(client, account, input, true).await
 }
 pub async fn read_route_page_direction(
-    client: &bdb_cellar_runtime::client::CellClient,
-    account: &bdb_cellar_runtime::identity::CellTarget,
+    client: &cellar_runtime::client::CellClient,
+    account: &cellar_runtime::identity::CellTarget,
     input: RoutePageInput,
     forward: bool,
 ) -> std::result::Result<RoutePageOutcome, extenddb_storage::error::StorageError> {
@@ -408,14 +408,12 @@ pub async fn read_route_page_direction(
 
 /// Resolve the leaf owning a logical position after checking its live anchor.
 pub async fn route_directory_target(
-    client: &bdb_cellar_runtime::client::CellClient,
-    account: &bdb_cellar_runtime::identity::CellTarget,
+    client: &cellar_runtime::client::CellClient,
+    account: &cellar_runtime::identity::CellTarget,
     directory_id: &str,
     lower: RangeKey,
-) -> std::result::Result<
-    bdb_cellar_runtime::identity::CellTarget,
-    extenddb_storage::error::StorageError,
-> {
+) -> std::result::Result<cellar_runtime::identity::CellTarget, extenddb_storage::error::StorageError>
+{
     use extenddb_storage::error::StorageError;
     let client = client.clone();
     if client
@@ -436,7 +434,7 @@ pub async fn route_directory_target(
 }
 
 pub(crate) async fn split_route_state(
-    client: &bdb_cellar_runtime::client::CellClient,
+    client: &cellar_runtime::client::CellClient,
     account_id: &str,
     plan: &crate::DirectoryTransfer,
 ) -> std::result::Result<crate::SplitRouteState, extenddb_storage::error::StorageError> {

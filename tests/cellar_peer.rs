@@ -16,8 +16,8 @@ mod native_peer;
 #[path = "cellar_peer/ownership_race.rs"]
 mod ownership_race;
 
-use bdb_cellar_runtime::application::cell_name;
 use beyonddb::{account_target, credential_target};
+use cellar_runtime::application::cell_name;
 use native_peer::*;
 use std::sync::{Arc, Mutex, atomic::Ordering};
 
@@ -133,7 +133,7 @@ fn signed_sdk_requests_cross_native_owners_and_survive_source_replacement() {
 async fn assert_items(
     sdk: &aws_sdk_dynamodb::Client,
     items: &[(
-        bdb_cellar_runtime::identity::CellTarget,
+        cellar_runtime::identity::CellTarget,
         extenddb_core::types::Item,
     )],
 ) {

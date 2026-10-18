@@ -1,12 +1,12 @@
 //! Lost transport replies around real SDK execution and durable command replay.
 use crate::{local_node, transaction_fixture};
-use bdb_cellar_runtime::{
-    client::{Invocation, InvocationAdmission, InvocationError, InvocationTransport},
-    registry::Command,
-};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{Invocation, InvocationAdmission, InvocationError, InvocationTransport},
+    registry::Command,
+};
 use extenddb_core::{
     expression::{Expr, ExpressionMaps, PathElement, UpdateAction},
     types::AttributeValue,
@@ -31,12 +31,8 @@ impl InvocationAdmission for RefuseAtCaller {
     fn check<'a>(
         &'a self,
         _: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
-        Box::pin(async {
-            Err(bdb_cellar_runtime::Error::Capacity(
-                "injected caller budget",
-            ))
-        })
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
+        Box::pin(async { Err(cellar_runtime::Error::Capacity("injected caller budget")) })
     }
 }
 struct CountIngress {
@@ -113,7 +109,7 @@ fn caller_refusal_preserves_identity_without_entering_sdk_ingress() {
                 .command::<PartitionPut>(target, identity, input.clone())
                 .await,
             Err(InvocationError::NotStarted(
-                bdb_cellar_runtime::Error::Capacity("injected caller budget")
+                cellar_runtime::Error::Capacity("injected caller budget")
             ))
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 0);

@@ -1,6 +1,6 @@
 //! Bounded stream record retention inside account and data Cells.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 
 use crate::table::statement;
 use crate::{DATA_MODULE, Error, Json, MODULE, Result, SqlValue};

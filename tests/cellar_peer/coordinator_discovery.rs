@@ -1,14 +1,14 @@
 //! Discover an account-index entry after its real SDK owner departs.
 use crate::{native_peer::*, runtimes};
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use cellar_runtime::{
     MutationIdentity,
     client::{Invocation, InvocationAdmission, InvocationTransport},
     identity::{CellTarget, RequestId},
     registry::Query,
 };
-use beyonddb::*;
-use bytes::Bytes;
-use cellar::sdk::IngressResponse;
 use http_body_util::{BodyExt, Full};
 use std::{
     future::Future,
@@ -33,12 +33,12 @@ impl InvocationAdmission for Admission {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if self.refuse.load(Ordering::SeqCst) && self.participants.contains(&invocation.target)
             {
                 self.attempts.fetch_add(1, Ordering::SeqCst);
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "participant discovery withheld until owner departure",
                 ));
             }

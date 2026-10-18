@@ -42,8 +42,8 @@ use crate::{
     TransactionFailure, TransactionOperation, TransactionOutcome, TransactionReadOutcome,
     UpdateItem, UpdateItemInput, UpdateItemNoReturn, UpdateItemOutcome, data_key_hash,
 };
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::InvocationError;
+use cellar_runtime::identity::CellTarget;
 
 impl CellStorage {
     async fn try_local_transaction_read(
@@ -106,8 +106,8 @@ impl CellStorage {
                             Err(transaction_canceled(index, reason, count, &[]))
                         }
                     },
-                    Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Codec(
-                        bdb_cellar_runtime::codec::CodecError::Limit,
+                    Err(InvocationError::NotStarted(cellar_runtime::Error::Codec(
+                        cellar_runtime::codec::CodecError::Limit,
                     ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }
@@ -135,8 +135,8 @@ impl CellStorage {
                     Ok(committed) => {
                         local_partition_transaction_read_result(committed.output.0, count)
                     }
-                    Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Codec(
-                        bdb_cellar_runtime::codec::CodecError::Limit,
+                    Err(InvocationError::NotStarted(cellar_runtime::Error::Codec(
+                        cellar_runtime::codec::CodecError::Limit,
                     ))) => Ok(None),
                     Err(error) => Err(cell_error(error)),
                 }

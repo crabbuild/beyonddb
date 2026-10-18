@@ -3,13 +3,13 @@ use crate::{
     residency_fixture::{ACCOUNT, Fixture},
     table_helpers,
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{Invocation, InvocationAdmission},
     identity::{CellTarget, NamespaceId, RequestId},
     registry::Command,
 };
-use beyonddb::*;
 use std::{
     future::Future,
     pin::Pin,
@@ -52,14 +52,14 @@ impl InvocationAdmission for RefuseInstall {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target.namespace() == self.namespace
                 && invocation.mutation.is_some()
                 && invocation.operation == InstallPartition::ID
                 && self.calls.fetch_add(1, Ordering::SeqCst) >= self.allowed
             {
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "creation installation admission withheld",
                 ));
             }

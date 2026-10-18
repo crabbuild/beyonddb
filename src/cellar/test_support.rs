@@ -1,13 +1,13 @@
 //! Real embedded SDK fixture for domain unit tests.
-use bdb_cellar_runtime::{
+use cellar::sdk::{
+    ActorIdentity, ActorOptions, ActorPolicy, CellLimits, ExternalNodeServices, Node, NodeConfig,
+    NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner, ShutdownMode,
+};
+use cellar_runtime::{
     app::CellApplication,
     client::{CellClient, MutationIdentity},
     descriptors::BuildDescriptor,
     identity::{Digest, RequestId},
-};
-use cellar::sdk::{
-    ActorIdentity, ActorOptions, ActorPolicy, CellLimits, ExternalNodeServices, Node, NodeConfig,
-    NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner, ShutdownMode,
 };
 use std::{
     path::Path,

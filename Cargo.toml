@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bdb-cellar-runtime", "crates/bdb-keyspace"]
+members = ["crates/cellar-runtime", "crates/keyspace"]
 
 [workspace.package]
 edition = "2024"
@@ -40,8 +40,8 @@ description = "Cell-based DynamoDB service over the embedded Cellar SDK"
 
 [dependencies]
 anyhow = "1"
-bdb-cellar-runtime = { path = "crates/bdb-cellar-runtime" }
-bdb-keyspace = { path = "crates/bdb-keyspace" }
+cellar-runtime = { path = "crates/cellar-runtime" }
+keyspace = { path = "crates/keyspace" }
 cellar.workspace = true
 http = "1"
 bytes = "1"

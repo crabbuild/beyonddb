@@ -4,7 +4,7 @@ use super::*;
 fn table_class_quota_expires_each_change_at_the_thirty_day_boundary() {
     const DAY: i64 = 24 * 60 * 60 * 1_000;
     let mut table = TableRecord {
-        key_encoding_version: bdb_keyspace::KEY_ENCODING_VERSION,
+        key_encoding_version: keyspace::KEY_ENCODING_VERSION,
         table_class: TableClass::Standard,
         table_class_updates_ms: vec![DAY, 2 * DAY],
         placement: TablePlacement::Account,

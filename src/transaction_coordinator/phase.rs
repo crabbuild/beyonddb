@@ -1,7 +1,7 @@
 //! Decision publication and participant progress in a coordinator Cell.
 
-use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::{

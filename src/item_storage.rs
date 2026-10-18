@@ -1,6 +1,6 @@
 //! Item images transferred through bounded SQL parameters and results.
 
-use bdb_cellar_runtime::registry::CommandContext;
+use cellar_runtime::registry::CommandContext;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{Error, Result, SqlBatch, SqlResultSet, SqlValue, table::statement};

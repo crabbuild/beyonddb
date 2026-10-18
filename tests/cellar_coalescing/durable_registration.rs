@@ -3,15 +3,15 @@ use crate::{
     payload_gate,
     residency_fixture::{ACCOUNT, Fixture},
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, Invocation, InvocationTransport},
     codec::{BoundedEncoder, WireValue},
     identity::{CellTarget, RequestId},
 };
-use beyonddb::*;
-use bytes::Bytes;
-use cellar::sdk::IngressResponse;
 use http_body_util::Full;
 use std::{
     future::Future,
@@ -54,7 +54,7 @@ async fn registration(
     client: &CellClient,
     account: &str,
     shard: u32,
-) -> bdb_cellar_runtime::client::Observed<Json<bool>> {
+) -> cellar_runtime::client::Observed<Json<bool>> {
     client
         .query::<ReadCoordinatorRegistration>(
             &account_target(account).unwrap(),
@@ -108,7 +108,7 @@ impl InvocationTransport for Observe {
             if invocation.target == self.account && invocation.mutation.is_some() {
                 assert_eq!(
                     invocation.operation,
-                    <RegisterCoordinatorShards as bdb_cellar_runtime::registry::Command>::ID
+                    <RegisterCoordinatorShards as cellar_runtime::registry::Command>::ID
                 );
                 self.publications.fetch_add(1, Ordering::SeqCst);
             }

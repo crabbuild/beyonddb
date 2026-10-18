@@ -1,8 +1,8 @@
 //! ExtendDB's real signed HTTP frontend over a supplied native SDK client.
-use bdb_cellar_runtime::client::CellClient;
 use beyonddb::{
     CellAuthorizationStore, CellCredentialStore, CellInitialPartitionProvisioner, build_http_state,
 };
+use cellar_runtime::client::CellClient;
 use extenddb_auth::StoredCredential;
 use std::{sync::Arc, time::Duration};
 

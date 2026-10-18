@@ -1,10 +1,10 @@
 //! Routed capacity sweeps and recoverable data-range splits.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 use std::{sync::Arc, time::Duration};
 
 use crate::server::TaskGroup;
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::{BoxedFuture, error::StorageError};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;

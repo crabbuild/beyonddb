@@ -7,7 +7,7 @@ use crate::{
     OpenDirectory, PublishDirectorySplit, ReadDirectory, ReadDirectoryPage, RoutePagePartition,
     directory_target,
 };
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 
 impl CellInitialPartitionProvisioner {
     pub(super) async fn split_ready_directory(
@@ -16,7 +16,7 @@ impl CellInitialPartitionProvisioner {
         account_id: &str,
         id: &str,
         lower: RangeKey,
-    ) -> Result<bdb_cellar_runtime::identity::CellTarget, StorageError> {
+    ) -> Result<cellar_runtime::identity::CellTarget, StorageError> {
         let account = crate::account_target(account_id).map_err(provision_error)?;
         for _ in 0..128 {
             let directory =

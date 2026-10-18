@@ -1,12 +1,12 @@
 use crate::residency_fixture::{ACCOUNT, Fixture};
 use aws_sdk_dynamodb::types as sdk;
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{Invocation, InvocationAdmission},
     identity::RequestId,
     registry::Command,
 };
-use beyonddb::*;
 use std::{
     future::Future,
     pin::Pin,
@@ -113,7 +113,7 @@ impl InvocationAdmission for CleanupCalls {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if invocation.target == account_target(ACCOUNT).unwrap()
                 && invocation.mutation.is_some()

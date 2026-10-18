@@ -1,5 +1,5 @@
 //! Ordered metadata fixtures over the compiled BeyondDB application.
-use bdb_cellar_runtime::{
+use cellar_runtime::{
     MutationIdentity,
     app::{CellApplication, CompiledApplication},
     descriptors::BuildDescriptor,
@@ -34,7 +34,7 @@ pub fn mutation() -> MutationIdentity {
 /// Complete ordered metadata coverage, with string-key fences rather than hash
 /// midpoints. These fixtures qualify directory contracts, not 1,024 data cells.
 pub fn ranges(count: u16) -> Vec<beyonddb::RoutePagePartition> {
-    use bdb_keyspace::{Component, KeyKind, KeySchema, RangeKey};
+    use keyspace::{Component, KeyKind, KeySchema, RangeKey};
     let fence = |position| {
         KeySchema {
             partition: KeyKind::String,

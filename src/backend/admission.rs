@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::client::InvocationError;
+use cellar_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};

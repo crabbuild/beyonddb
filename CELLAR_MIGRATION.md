@@ -1065,7 +1065,7 @@ are recorded in the current registry section above.
 
 ## Current state
 
-The new `crates/bdb-cellar-runtime` crate implements compiled command/query
+The new `crates/cellar-runtime` crate implements compiled command/query
 registration, canonical logical targets, bounded codecs, typed parameterized
 SQL, per-cell command receipts and a Cellar application/gateway. Its client
 submits through `Node::start_external`'s `IngressHandle`, consumes the complete
@@ -1097,7 +1097,7 @@ qualify object-store durability, hard-kill recovery or a fleet.
 The serving source now uses ordered `(PK, SK)` ranges and requires multiple data
 cells for every table. The executable design and file map are in
 [ordered cell partitioning](docs/ordered-cell-partitioning.md).
-`crates/bdb-keyspace` implements encoding, query spans, validated multi-cell
+`crates/keyspace` implements encoding, query spans, validated multi-cell
 directories, split CAS and topology-independent resume. Its nine focused tests
 and clippy check pass. The three-cell SDK fixture also passes, including ordered
 reads, range/epoch rejection and restart. The root serving-router fixture also
@@ -1432,12 +1432,12 @@ export RUSTC_WRAPPER=
 export CARGO_BUILD_JOBS=4
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
-cargo fmt --manifest-path crates/bdb-keyspace/Cargo.toml -- --check
-cargo test --manifest-path crates/bdb-keyspace/Cargo.toml --locked
-cargo clippy --manifest-path crates/bdb-keyspace/Cargo.toml --all-targets --locked -- -D warnings
-cargo fmt --manifest-path crates/bdb-cellar-runtime/Cargo.toml -- --check
-cargo test --manifest-path crates/bdb-cellar-runtime/Cargo.toml --locked
-cargo clippy --manifest-path crates/bdb-cellar-runtime/Cargo.toml --all-targets --locked -- -D warnings
+cargo fmt --manifest-path crates/keyspace/Cargo.toml -- --check
+cargo test --manifest-path crates/keyspace/Cargo.toml --locked
+cargo clippy --manifest-path crates/keyspace/Cargo.toml --all-targets --locked -- -D warnings
+cargo fmt --manifest-path crates/cellar-runtime/Cargo.toml -- --check
+cargo test --manifest-path crates/cellar-runtime/Cargo.toml --locked
+cargo clippy --manifest-path crates/cellar-runtime/Cargo.toml --all-targets --locked -- -D warnings
 ```
 
 The preceding complete focused run passed 68 tests: nine adapter units, two embedded

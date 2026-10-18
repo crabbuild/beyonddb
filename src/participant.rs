@@ -2,8 +2,8 @@
 
 use crate::table::statement;
 use crate::{Error, Json, Result, SqlValue, TransactionFailure};
-use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use bdb_cellar_runtime::registry::{CommandContext, CommandResult, QueryContext};
+use cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use cellar_runtime::registry::{CommandContext, CommandResult, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
@@ -13,10 +13,10 @@ pub(crate) const SCHEMA: &str = concat!(
     include_str!("participant_schema.sql")
 );
 
-pub(crate) const fn phase_operation(id: u32) -> bdb_cellar_runtime::registry::OperationDescriptor {
+pub(crate) const fn phase_operation(id: u32) -> cellar_runtime::registry::OperationDescriptor {
     // State, resolution, and receipt messages contain no item images. Their
     // actual bounds leave mailbox and node headroom for concurrent resolution.
-    bdb_cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: 4096,
         output_limit: 4096,
         ..crate::operation(id)
@@ -31,8 +31,8 @@ const PREPARE_BYTES: u32 = 64 * 1024;
 
 pub(crate) const fn bounded_prepare_operation(
     id: u32,
-) -> bdb_cellar_runtime::registry::OperationDescriptor {
-    bdb_cellar_runtime::registry::OperationDescriptor {
+) -> cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: PREPARE_BYTES,
         output_limit: PREPARE_BYTES,
         ..crate::operation(id)
@@ -412,8 +412,8 @@ const READ_RESULT_BYTES: u32 = 64 * 1024;
 
 pub(crate) const fn bounded_read_result_operation(
     id: u32,
-) -> bdb_cellar_runtime::registry::OperationDescriptor {
-    bdb_cellar_runtime::registry::OperationDescriptor {
+) -> cellar_runtime::registry::OperationDescriptor {
+    cellar_runtime::registry::OperationDescriptor {
         input_limit: 4096,
         output_limit: READ_RESULT_BYTES,
         ..crate::operation(id)

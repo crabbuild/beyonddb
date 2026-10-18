@@ -1,7 +1,7 @@
 //! Account generation anchors and traversal of independently owned index directories.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::registry::{Command, CommandContext, CommandResult};
+use keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 use super::GlobalIndexRecord;

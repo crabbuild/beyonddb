@@ -2,8 +2,8 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application, mutation, ranges},
 };
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
 use beyonddb::*;
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
 };
@@ -41,7 +41,7 @@ fn activation_replay_compares_large_base_and_index_directories() {
     let receipt = provisioner.provision_route_directory(&client, ACCOUNT, &oversized.id, parts.clone()).await.unwrap();
     let rejected = client.command::<ActivateTableRoute>(&account, mutation(), Json(TableRoutePublication {
         receipt, route: TableRoute {table_id: oversized.id.clone(), epoch: 1, partitions: parts.iter().map(|part| PartitionSpec {
-            table: oversized.clone(), partition_id: part.partition_id, lower: (part.lower != bdb_keyspace::RangeKey::minimum()).then(|| part.lower.clone()), upper: part.upper.clone(), epoch: part.epoch,
+            table: oversized.clone(), partition_id: part.partition_id, lower: (part.lower != keyspace::RangeKey::minimum()).then(|| part.lower.clone()), upper: part.upper.clone(), epoch: part.epoch,
         }).collect()},
     })).await;
     assert!(matches!(rejected, Err(InvocationError::Rejected(result)) if result.output.0 == ActivateTableRouteOutcome::InvalidRoute));
@@ -72,7 +72,7 @@ fn activation_replay_compares_large_base_and_index_directories() {
             .map(|range| PartitionSpec {
                 table: route.table.clone(),
                 partition_id: range.partition_id,
-                lower: (range.lower != bdb_keyspace::RangeKey::minimum()).then(|| range.lower.clone()),
+                lower: (range.lower != keyspace::RangeKey::minimum()).then(|| range.lower.clone()),
                 upper: range.upper.clone(),
                 epoch: range.epoch,
             })
@@ -151,7 +151,7 @@ fn activation_replay_compares_large_base_and_index_directories() {
 
 async fn create(
     client: &CellClient,
-    account: &bdb_cellar_runtime::identity::CellTarget,
+    account: &cellar_runtime::identity::CellTarget,
     name: &str,
 ) -> TableRecord {
     let spec = TableSpec {

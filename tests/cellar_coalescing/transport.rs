@@ -1,6 +1,6 @@
-use bdb_cellar_runtime::client::{Invocation, InvocationTransport};
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::client::{Invocation, InvocationTransport};
 use http_body_util::{BodyExt, Full};
 use std::{
     future::Future,
@@ -16,7 +16,7 @@ pub struct Observe {
     pub queries: Arc<AtomicU64>,
     pub drop_batch: bool,
     pub dropped: Arc<AtomicBool>,
-    pub data_namespace: bdb_cellar_runtime::identity::NamespaceId,
+    pub data_namespace: cellar_runtime::identity::NamespaceId,
 }
 impl InvocationTransport for Observe {
     fn call<'a>(
@@ -32,7 +32,7 @@ impl InvocationTransport for Observe {
             let batch = invocation.target.namespace() == self.data_namespace
                 && invocation.mutation.is_some()
                 && invocation.operation
-                    == <beyonddb::PreparePartitionTransactionBatch as bdb_cellar_runtime::registry::Command>::ID;
+                    == <beyonddb::PreparePartitionTransactionBatch as cellar_runtime::registry::Command>::ID;
             if response.status().is_success() && (query || (self.drop_batch && batch)) {
                 let (parts, body) = response.into_parts();
                 // Observe or lose the reply only after the real SDK gate proves

@@ -1,9 +1,9 @@
 //! Bounded traversal from a generation root to its current metadata leaf.
 
 use super::*;
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::error::StorageError;
+use keyspace::RangeKey;
 
 /// One current leaf page and the immutable interval whose membership it samples.
 pub struct DirectoryLeafPage {

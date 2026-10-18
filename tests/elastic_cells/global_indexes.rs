@@ -3,13 +3,13 @@ use crate::{
     native_peer::{self, FRONT, Inspection, Observations, Peer, SOURCE},
     signed_http::SignedHttp,
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     app::CompiledApplication,
     client::{CellClient, InvocationError},
     identity::{CellTarget, RequestId},
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::{Expr, ExpressionMaps, KeyCondition, PathElement, SortKeyCondition},
     types::{AttributeValue, Item, TableKeyInfo},
@@ -104,7 +104,7 @@ pub(super) async fn ranges(client: &CellClient, table: &str) -> Vec<RoutePagePar
     };
     partitions
 }
-pub(super) fn contains(range: &RoutePagePartition, key: &bdb_keyspace::RangeKey) -> bool {
+pub(super) fn contains(range: &RoutePagePartition, key: &keyspace::RangeKey) -> bool {
     &range.lower <= key && range.upper.as_ref().is_none_or(|upper| key < upper)
 }
 
@@ -300,7 +300,7 @@ fn journal_recovers_partial_projection_and_fences_delayed_images() {
         source_partition_id: range.partition_id,
         epoch: range.epoch,
         next_epoch: 2,
-        source_lower: (range.lower != bdb_keyspace::RangeKey::minimum()).then(|| range.lower.clone()),
+        source_lower: (range.lower != keyspace::RangeKey::minimum()).then(|| range.lower.clone()),
         source_upper: range.upper.clone(),
         boundary: ordered_data_key(&base.table_id, &Item::from([("id".into(), AttributeValue::S("b".into()))]), &base.base_key_schema).unwrap(),
         left_partition_id: [81; 16],
@@ -411,7 +411,7 @@ pub(super) async fn observed_index_recovery(
                     assert!(owner.epoch > old_owner.epoch);
                     assert_eq!(owner.epoch, current.epoch);
                 } else {
-                    missing.push(bdb_cellar_runtime::application::cell_name(target));
+                    missing.push(cellar_runtime::application::cell_name(target));
                 }
             }
             if missing.is_empty() {

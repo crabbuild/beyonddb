@@ -1,7 +1,7 @@
 //! Account-owned table TTL configuration.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 use crate::table::{command_table, query_table, statement};
@@ -161,7 +161,7 @@ pub struct TtlSweepState {
     pub after_lower: Option<RangeKey>,
 }
 
-fn sweep_state(rows: &bdb_cellar_runtime::sql::SqlResultSet) -> Result<Option<TtlSweepState>> {
+fn sweep_state(rows: &cellar_runtime::sql::SqlResultSet) -> Result<Option<TtlSweepState>> {
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };
@@ -264,7 +264,7 @@ fn schedule_sql() -> &'static str {
     "SELECT last_table FROM ddb_ttl_schedule WHERE singleton = 1"
 }
 
-fn schedule_cursor(rows: &bdb_cellar_runtime::sql::SqlResultSet) -> Result<Option<String>> {
+fn schedule_cursor(rows: &cellar_runtime::sql::SqlResultSet) -> Result<Option<String>> {
     match rows.rows.first().map(Vec::as_slice) {
         Some([SqlValue::Null]) => Ok(None),
         Some([SqlValue::Text(name)]) => Ok(Some(name.clone())),

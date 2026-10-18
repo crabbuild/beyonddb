@@ -1,12 +1,4 @@
 //! Real native peer sockets with an opaque, controllable network cut.
-use bdb_cellar_runtime::{
-    app::{CellApplication, CompiledApplication},
-    application::cell_name,
-    client::CellClient,
-    descriptors::BuildDescriptor,
-    identity::{CellTarget, Digest},
-    registry::Registry,
-};
 use beyonddb::*;
 use cellar::{
     bucket::Bucket,
@@ -18,6 +10,14 @@ use cellar::{
         PeerAuth, PeerProbeSigner, ReplicaStorage, ReplicaStorageOptions, ReplicationOptions,
         ShutdownMode, SignedPeerTransport,
     },
+};
+use cellar_runtime::{
+    app::{CellApplication, CompiledApplication},
+    application::cell_name,
+    client::CellClient,
+    descriptors::BuildDescriptor,
+    identity::{CellTarget, Digest},
+    registry::Registry,
 };
 use extenddb_auth::StoredCredential;
 use extenddb_core::{
@@ -157,7 +157,7 @@ pub struct PeerPolicy {
     pub lease_ttl_ms: u64,
     pub lease_bucket: Option<Bucket>,
     pub log: LogOptions,
-    pub application_clock: bdb_cellar_runtime::application::Clock,
+    pub application_clock: cellar_runtime::application::Clock,
     pub shutdown: cellar::sdk::ShutdownPolicy,
 }
 impl From<bool> for PeerPolicy {
@@ -247,7 +247,7 @@ impl Peer {
         config.runtime.max_cell_requests = 16;
         config.runtime.handler_budget = Duration::from_secs(30);
         config.cell_limits = CellLimits::unrestricted();
-        config.cell_limits.sql = bdb_cellar_runtime::sql::host_limits();
+        config.cell_limits.sql = cellar_runtime::sql::host_limits();
         let services = ExternalNodeServices {
             wall_clock: None,
             http_client: None,

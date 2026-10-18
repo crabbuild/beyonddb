@@ -1,7 +1,7 @@
 use super::*;
 use aws_sdk_dynamodb::types::AttributeValue;
-use bdb_cellar_runtime::application::cell_name;
 use cellar::bucket::Bucket;
+use cellar_runtime::application::cell_name;
 use native_peer::*;
 use serde_json::Value;
 use store::FaultStore;

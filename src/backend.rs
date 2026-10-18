@@ -1,6 +1,6 @@
 //! ExtendDB table operations routed to account Cells.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 mod admission;
 mod batch;
 mod data;
@@ -30,9 +30,9 @@ use super::{
     PartitionSpec, RoutePageInput, RoutePageOutcome, TablePlacement, TableRecord, TableSpec,
     TableUpdate, UpdateTable, UpdateTableOutcome, account_target,
 };
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_cellar_runtime::identity::{CellTarget, RequestId, TenantId};
-use bdb_cellar_runtime::{MutationIdentity, partition_for_shard};
+use cellar_runtime::client::{CellClient, InvocationError};
+use cellar_runtime::identity::{CellTarget, RequestId, TenantId};
+use cellar_runtime::{MutationIdentity, partition_for_shard};
 use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     BillingMode, BillingModeSummary, CreateTableInput, DeleteTableInput, DescribeTableInput,
@@ -1010,7 +1010,7 @@ pub(crate) fn mutation_identity() -> Result<MutationIdentity, StorageError> {
 
 pub(crate) fn cell_error<T>(error: InvocationError<T>) -> StorageError {
     match error {
-        InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(reason)) => {
+        InvocationError::NotStarted(cellar_runtime::Error::Capacity(reason)) => {
             StorageError::LimitExceeded(reason.to_owned())
         }
         InvocationError::Ambiguous { .. } | InvocationError::NotStarted(_) => {

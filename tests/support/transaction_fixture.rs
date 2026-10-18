@@ -1,7 +1,7 @@
 //! Two actual ordered data cells for coordinator/participant integration cases.
 use crate::local_node;
-use bdb_cellar_runtime::{client::CellClient, identity::CellTarget};
 use beyonddb::*;
+use cellar_runtime::{client::CellClient, identity::CellTarget};
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item},

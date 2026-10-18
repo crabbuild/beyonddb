@@ -2,12 +2,12 @@ use crate::{
     native_peer::{self, FRONT, Inspection, Peer, SOURCE},
     signed_http::SignedHttp,
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::CellClient,
     identity::{CellTarget, RequestId},
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::{
         CompareOp, Expr, ExpressionMaps, KeyCondition, PathElement, SortKeyCondition, UpdateAction,
@@ -276,7 +276,7 @@ fn local_indexes_follow_mutations_transactions_and_splits() {
     let CoordinatorParticipantTarget::Data { partition_id, epoch, .. } = participant else { unreachable!() };
     let source_spec = client.query::<ReadPartitionState>(&original, None, Json(())).await.unwrap().output.0.unwrap().spec;
     assert_eq!(client.query::<PartitionSplitPoint>(&original, None, Json(())).await.unwrap().output.0, None);
-    assert!(matches!(provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await, Err(StorageError::LimitExceeded(_))), "one LSI collection must remain together");
+    assert!(matches!(provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(keyspace::RangeKey::minimum)).await, Err(StorageError::LimitExceeded(_))), "one LSI collection must remain together");
     assert_eq!(routes(&client, &account, &routed.table_id).await.len(), 2);
     // A second PK in the same ordered source provides a real collection fence.
     let mut neighbor = item("50", None);
@@ -287,7 +287,7 @@ fn local_indexes_follow_mutations_transactions_and_splits() {
     let (first, continuation) = query(&storage, &indexed, true, None, Some(1)).await.unwrap();
     assert_eq!(first, vec![images[0].clone()]);
     let continuation = continuation.unwrap();
-    let plan = provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await.unwrap();
+    let plan = provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(keyspace::RangeKey::minimum)).await.unwrap();
     assert_eq!(plan.source.epoch, epoch);
     assert_eq!(routes(&client, &account, &routed.table_id).await.len(), 3);
     let (left, _) = participant_for_key(&client, routed, &item("2", None)).await;
