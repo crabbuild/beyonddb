@@ -307,19 +307,22 @@ An internal account fixture retains bounded row cleanup; the public fixture
 spans two data cells, verifies retained base/LSI history and a retired directory,
 and recovers both SDK scopes at higher epochs. Stale deletion cannot affect the
 replacement generation, whose signed contents survive another fresh owner.
-Four native reclamation cases keep the 4/5/11-cell resident limits while SDK
+Five native reclamation cases keep the 4/5/11-cell resident limits while SDK
 samples show more owned cells than resident cells. They cover first-transaction
 replay, repeated directory/data restoration, cold participants without account
 activation and durable base/GSI split seals. Completed split replay issues no
 historical-source ingress; signed data and exact index values survive fresh
 owners after local-file deletion. SDK Sticky ownership replaces the old explicit
-owner-release policy. The creation-time metadata/release race remains pending.
+owner-release policy. The creation-time race pauses a real CreateTable retry,
+observes destruction of both original data activations under ordinary SDK
+pressure, then completes the same pending generation and restores the old data.
+Those values and the new table write survive another fresh owner.
 The latest complete fixture run passed 133 focused native tests; its unchanged
 server passed all nine explicitly executed RustFS process cases, zero
 failed/ignored. The later fixture-only discovery port passes all three native
 peer cases, using non-owning snapshots and SDK owner observations so the test
 cannot perform the recovery it is meant to observe. The creation target's five
-cases pass as a separate focused run, as do the two deletion and four reclamation
+cases pass as a separate focused run, as do the two deletion and five reclamation
 cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. These are application transport faults; they do not qualify fleet

@@ -31,7 +31,7 @@ multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
 five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. Four native reclamation cases are also qualified below.
+cases in 26.37 seconds. Five native reclamation cases are also qualified below.
 These are separate focused runs; the complete 133-case run remains the latest
 combined evidence. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
@@ -41,7 +41,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (138 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (134 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -813,7 +813,7 @@ evidence.
 
 ### Native reclamation and cold participant restoration
 
-`tests/cellar_reclamation.rs` ports four residency contracts through SDK ingress.
+`tests/cellar_reclamation.rs` ports five residency contracts through SDK ingress.
 It keeps two caller threads, disabled AWS retries, scoped Residency IAM, the
 original four/five/eleven-cell resident ceilings and public tables with two
 ordered initial ranges. Read-only SDK capacity-lease observations prove that
@@ -847,12 +847,25 @@ stays zero. After local-file deletion, both sources retain their durable seals a
 higher SDK epochs, completed replay still avoids their ingress, and signed base
 and exact GSI values remain intact in serving children.
 
-The four cases pass together in 17.93 seconds, zero failed/ignored,
+The creation-time race keeps the five-cell limit and pauses a real signed
+CreateTable retry before its account lifecycle lookup. A known pre-submission
+install refusal first establishes the unchanged pending two-range generation.
+Both existing data activations are warmed while that lookup waits. Ordinary
+credential traffic then makes Cellar evict them: a test-only application wrapper
+observes both actual Cell objects being destroyed, with zero live handles, and
+retains each wrapper until its inner callback finishes. It observes lifetimes
+without editing ownership, placement or SDK storage. Only then does the test
+release metadata lookup. The retry installs two ranges under the same generation
+ID, both old activations are recreated and signed reads retain their original
+values. A fresh SDK owner after local-file deletion retains the old values and a
+new pending-table write, with higher epochs verified against SDK ownership rows.
+
+All five cases pass together in 26.19 seconds, zero failed/ignored,
 with default parallelism and a SHA-256-verified executable copy. Strict target
-Clippy, formatting and diff checks pass. CI includes this target. Only the four
-covered legacy bodies are retired: the creation-time metadata/release race and
-its shared legacy builder remain pending. Required aggregate gates remain enabled
-and red in `elastic_cells` (27 errors) and `peer_network` (138).
+Clippy, formatting and diff checks pass. CI already includes this target. All five
+covered legacy bodies are retired; their AWS table builder remains for other
+legacy callers and contains no Cellule references. Required aggregate gates
+remain enabled and red in `elastic_cells` (27 errors) and `peer_network` (134).
 Production code, dependency pins and shared runtime fixtures are unchanged;
 earlier complete native, focused ports and nine-process runs remain separate
 evidence.

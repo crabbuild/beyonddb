@@ -17,3 +17,8 @@ mod splits;
 #[allow(dead_code)]
 #[path = "cellar_placement/helpers.rs"]
 mod table_helpers;
+
+#[path = "cellar_reclamation/creation.rs"]
+mod creation;
+#[path = "cellar_reclamation/creation_actor.rs"]
+mod creation_actor;
