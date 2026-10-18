@@ -29,8 +29,9 @@ SHA-256-verified executable copies, with zero failed/ignored cases and normal
 test parallelism (399.78 seconds summed execution time), including public
 multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
-including the new worker-only discovery case. No combined 134-case run is
-claimed. Production code
+including the new worker-only discovery case. The later creation port passes
+five native creation cases in 48.56 seconds. These are separate focused runs;
+no combined 139-case run is claimed. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
 passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
@@ -38,7 +39,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (149 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (142 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -729,6 +730,50 @@ legacy gate. The required all-target check remains red in `elastic_cells`
 shared runtime fixtures are unchanged; the earlier complete 133-case and
 nine-process runs remain separate baseline evidence.
 
+### Native incomplete creation, repair and deletion fences
+
+`tests/cellar_creation.rs` ports all five remaining creation contracts. It keeps
+two seeded data ranges, the original 10/11 resident-cell budgets, two caller
+threads, ten-second concurrent-delete bound, fifteen-second worker bound and
+100 ms capacity cadence. Cellar can evict resident cells, so hard occupancy
+alone need not reject creation. Scoped invocation admission therefore refuses
+installation before SDK submission at the selected original checkpoint; it
+does not infer rollback from an HTTP failure or alter physical ownership.
+
+The first two cases retain the extra filler table, a published two-range GSI
+directory and an unpublished base plan. One deletes the pending generation
+inside base installation after the maintenance worker discovers it; repair
+finishes safely, deletion completes, and a new generation accepts signed writes.
+The other replaces the account owner after directory publication, deletes the
+former local directory and observes native lease/sample departure. Only the
+installed capacity worker completes creation: no CreateTable retry or direct
+provisioning call makes it ACTIVE. The original generation and GSI route remain
+unchanged; base and GSI values survive another fresh owner.
+
+A shared partial-creation setup permits exactly one successful install before
+refusing the second, independently at the GSI and base stages. It verifies the
+real first range's installed contract and restores its same SDK scope at a
+higher epoch. Repair under a four-range server setting preserves each original
+two-range base/GSI plan. Four replaces the obsolete one-range recovery setting
+because public Cellar tables require at least two ranges. Signed data survives
+another owner replacement without replanning the generation.
+
+The incomplete-generation case preserves CREATING and refuses maintenance
+Get/Scan plus public UpdateTable until three capacity steps complete the plan.
+Update then succeeds. The unpublished-directory case runs before and after
+copying an independent index root, on the account side of anchor publication.
+Deletion retires both the never-installed and installed roots; delayed directory
+installation is rejected. A recreated generation has a different ID and serves
+signed writes/reads normally.
+
+All five cases pass together in 48.56 seconds, zero failed/ignored, with normal
+parallelism and a SHA-256-verified executable copy. Strict Clippy passes for the
+new target; formatting and diff checks pass. CI runs that target, and only the
+covered legacy creation module is retired. Required all-target Clippy remains
+red in `elastic_cells` (27 errors) and `peer_network` (142). Production code,
+dependency pins and shared runtime helpers are unchanged; prior complete native,
+peer and nine-process results remain separate evidence.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1116,7 +1161,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -1137,7 +1182,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -1153,6 +1198,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-149 in `peer_network`; the ported `node_log_authority` target is clean.
+142 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.
