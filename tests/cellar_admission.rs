@@ -10,3 +10,11 @@ mod payload;
 #[allow(dead_code)]
 #[path = "support/residency_fixture.rs"]
 mod residency_fixture;
+
+#[path = "cellar_admission/claim.rs"]
+mod claim;
+#[path = "cellar_admission/ownership.rs"]
+mod ownership;
+
+#[path = "cellar_admission/absence.rs"]
+mod absence;

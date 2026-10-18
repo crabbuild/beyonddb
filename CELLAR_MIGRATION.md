@@ -31,7 +31,7 @@ multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
 five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. Five native reclamation cases and two cold-admission cases are also qualified
+cases in 26.37 seconds. Five native reclamation cases and four cold-admission cases are also qualified
 below.
 These are separate focused runs; the complete 133-case run remains the latest
 combined evidence. Production code
@@ -871,16 +871,15 @@ Production code, dependency pins and shared runtime fixtures are unchanged;
 earlier complete native, focused ports and nine-process runs remain separate
 evidence.
 
-### Native cold coordinator publication and replay
+### Native cold coordinator publication, claims and replay
 
-`tests/cellar_admission.rs` ports two signed cold-coordinator contracts with the
-original four caller threads, eight/sixteen-cell resident budgets, disabled AWS
-retries and scoped Residency IAM. Public tables still have two ordered ranges.
-The provider adapter pauses only LTX payload PUTs for the compiled coordinator
-class; ownership CAS, node leases and SDK routing remain untouched. The physical
-scopes observed at the provider match actual SDK factory identities and ownership
-rows. These checks qualify publication concurrency, not a fixed count of SDK
-ownership/catalog reads.
+`tests/cellar_admission.rs` ports four cold-coordinator contracts with the
+original two/four caller threads, eight/sixteen-cell resident budgets, disabled
+AWS retries and scoped Residency IAM. Public tables still have two ordered
+ranges. Payload gates pause LTX PUTs; claim gates delay and forward the SDK's
+original conditional owner PUT with its payload and condition unchanged. Node
+leases and routing remain SDK-owned. Physical scopes observed at the provider
+match actual SDK factory identities and ownership rows.
 
 For concurrent replay, the first request reaches one cold coordinator payload
 publication within the original two-second bound. The second request then reaches
@@ -898,15 +897,33 @@ Both registrations, coordinator scopes and signed values survive another native
 owner after deletion of the prior local directory. Higher epochs are checked
 against the SDK ownership rows through the fixture's normal observations.
 
-Both cases pass together in 12.90 seconds, zero failed/ignored,
+The absent-owner case separates durable application registration from SDK
+physical activation. Ensure publishes discovery without a coordinator owner GET;
+the first actual operation then reads the absent owner exactly once before its
+original conditional creation PUT is released. It does not issue another owner
+GET before that CAS. Empty coordinator state, registration and the original scope
+survive local-file deletion and recovery at a higher SDK epoch.
+
+The competing-owner case holds the actual SDK Create-mode owner PUT after
+absence has been observed while SOURCE is the only node. A real second SDK node
+then creates the same coordinator through ordinary routing and commits a signed
+transaction. The delayed PUT reaches the original conditional provider unchanged
+and receives a clean AlreadyExists/Precondition rejection. That explicit provider
+result establishes failure of the claim; no HTTP result is treated as rollback
+proof. The winner's SDK owner record and coordinator sequence stay unchanged,
+SOURCE never creates a coordinator factory, and fresh reads discover the peer.
+A later value 10 survives replay of the older transaction writing 9. Both former
+local directories are removed before another SDK owner restores the exact seed
+items, registration-backed token replay and a higher coordinator epoch.
+
+All four cases pass together in 16.56 seconds, zero failed/ignored,
 with default parallelism and a SHA-256-verified executable copy. Strict target
-Clippy, formatting and diff checks pass. CI includes the new target, and only
-the two covered legacy bodies are retired. Five other legacy coordinator
-admission/lookup/race cases remain registered. Required all-target Clippy still
-fails in `elastic_cells` (27 errors) and `peer_network` (134); both gates remain
-enabled. Production code, exact dependency pins and shared runtime helpers are
-unchanged. Earlier complete native, focused ports and nine-process results remain
-separate evidence.
+Clippy, formatting and diff checks pass. CI already includes the target. All four
+covered legacy bodies are retired; three other coordinator admission/cache/overlap
+cases remain registered. Required all-target Clippy still fails in `elastic_cells`
+(27 errors) and `peer_network` (134); both gates remain enabled. Production code,
+exact dependency pins and shared runtime helpers are unchanged. Earlier complete
+native, focused ports and nine-process results remain separate evidence.
 
 ## Current state
 
