@@ -20,5 +20,6 @@ mod table_helpers;
 
 #[path = "cellar_reclamation/creation.rs"]
 mod creation;
+#[allow(dead_code)] // Shared SDK activation/pinning helpers also serve admission tests.
 #[path = "cellar_reclamation/creation_actor.rs"]
 mod creation_actor;

@@ -21,6 +21,10 @@ struct Barrier {
     prefix: String,
     armed: AtomicBool,
     reads: AtomicUsize,
+    read_scopes: Mutex<std::collections::BTreeSet<String>>,
+    creates: AtomicUsize,
+    changed: tokio::sync::Notify,
+    applied: AtomicBool,
     scope: Mutex<Option<String>>,
     entered: Semaphore,
     release: CancellationToken,
@@ -31,6 +35,34 @@ pub struct Held(Arc<Barrier>);
 impl Held {
     pub async fn entered(&self) {
         self.0.entered.acquire().await.unwrap().forget();
+    }
+    pub fn creates(&self) -> usize {
+        self.0.creates.load(Ordering::SeqCst)
+    }
+    pub async fn creates_at_least(&self, count: usize) {
+        loop {
+            let changed = self.0.changed.notified();
+            if self.creates() >= count {
+                break;
+            }
+            changed.await;
+        }
+    }
+    pub async fn applied(&self) {
+        self.0.completed.cancelled().await;
+        assert!(
+            self.0.applied.load(Ordering::SeqCst),
+            "accepted SDK claim did not complete at the provider"
+        );
+    }
+    pub async fn read_scopes_at_least(&self, count: usize) {
+        loop {
+            let changed = self.0.changed.notified();
+            if self.0.read_scopes.lock().unwrap().len() >= count {
+                break;
+            }
+            changed.await;
+        }
     }
     pub fn reads(&self) -> usize {
         self.0.reads.load(Ordering::SeqCst)
@@ -62,6 +94,10 @@ impl Control {
             prefix: format!("cells/{module}:"),
             armed: AtomicBool::new(true),
             reads: AtomicUsize::new(0),
+            read_scopes: Mutex::new(std::collections::BTreeSet::new()),
+            creates: AtomicUsize::new(0),
+            changed: tokio::sync::Notify::new(),
+            applied: AtomicBool::new(false),
             scope: Mutex::new(None),
             entered: Semaphore::new(0),
             release: CancellationToken::new(),
@@ -98,10 +134,16 @@ impl ObjectStore for Store {
             .as_ref()
             .and_then(Weak::upgrade)
             .filter(|barrier| {
-                matches!(options.mode, PutMode::Create)
+                if matches!(options.mode, PutMode::Create)
                     && path.as_ref().starts_with(&barrier.prefix)
                     && path.as_ref().ends_with("/own.json")
-                    && barrier.armed.swap(false, Ordering::SeqCst)
+                {
+                    barrier.creates.fetch_add(1, Ordering::SeqCst);
+                    barrier.changed.notify_one();
+                    barrier.armed.swap(false, Ordering::SeqCst)
+                } else {
+                    false
+                }
             });
         if let Some(barrier) = &barrier {
             *barrier.scope.lock().unwrap() = Some(
@@ -117,6 +159,7 @@ impl ObjectStore for Store {
         }
         let result = self.inner.put_opts(path, payload, options).await;
         if let Some(barrier) = barrier {
+            barrier.applied.store(result.is_ok(), Ordering::SeqCst);
             barrier.rejected.store(
                 matches!(
                     &result,
@@ -149,6 +192,15 @@ impl ObjectStore for Store {
             && path.as_ref().ends_with("/own.json")
         {
             barrier.reads.fetch_add(1, Ordering::SeqCst);
+            barrier.read_scopes.lock().unwrap().insert(
+                path.as_ref()
+                    .strip_prefix("cells/")
+                    .unwrap()
+                    .strip_suffix("/own.json")
+                    .unwrap()
+                    .into(),
+            );
+            barrier.changed.notify_one();
         }
         self.inner.get_opts(path, options).await
     }

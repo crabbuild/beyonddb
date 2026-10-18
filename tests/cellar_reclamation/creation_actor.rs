@@ -5,7 +5,7 @@ use bdb_cellar_runtime::{
 };
 use cellar::{bucket::Bucket, sdk::*};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -17,22 +17,71 @@ pub struct Life {
     pub created: usize,
     pub destroyed: usize,
     pub active: usize,
+    pub invoked: usize,
 }
 #[derive(Default)]
 pub struct Tracker(Mutex<HashMap<String, Life>>);
 impl Tracker {
-    pub fn read(&self, target: &CellTarget) -> Life {
+    pub fn maybe(&self, target: &CellTarget) -> Option<Life> {
+        self.0.lock().unwrap().get(&cell_name(target)).cloned()
+    }
+    pub fn active(&self) -> usize {
         self.0
             .lock()
             .unwrap()
-            .get(&cell_name(target))
-            .unwrap()
-            .clone()
+            .values()
+            .map(|life| life.active)
+            .sum()
+    }
+    pub fn read(&self, target: &CellTarget) -> Life {
+        self.maybe(target).unwrap()
     }
 }
+
+/// Retain actual SDK callbacks while keeping the invocation and storage context alive.
+pub struct Pins {
+    names: BTreeSet<String>,
+    entered: Mutex<BTreeSet<String>>,
+    changed: tokio::sync::Notify,
+    release: tokio_util::sync::CancellationToken,
+}
+impl Pins {
+    pub fn new(targets: &[CellTarget]) -> Self {
+        Self {
+            names: targets.iter().map(cell_name).collect(),
+            entered: Mutex::new(BTreeSet::new()),
+            changed: tokio::sync::Notify::new(),
+            release: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+    pub fn guard(&self) -> tokio_util::sync::DropGuard {
+        self.release.clone().drop_guard()
+    }
+    pub fn release(&self) {
+        self.release.cancel();
+    }
+    pub async fn entered(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if *self.entered.lock().unwrap() == self.names {
+                break;
+            }
+            changed.await;
+        }
+    }
+    async fn before(&self, name: &str) {
+        if self.names.contains(name) {
+            self.entered.lock().unwrap().insert(name.into());
+            self.changed.notify_one();
+            self.release.cancelled().await;
+        }
+    }
+}
+
 struct TrackedApplication {
     inner: Arc<dyn Application>,
     track: Arc<Tracker>,
+    pins: Option<Arc<Pins>>,
 }
 impl Application for TrackedApplication {
     fn invoke(self: Arc<Self>, context: Context, invocation: Invocation) -> HandlerFuture<Output> {
@@ -60,6 +109,7 @@ impl Application for TrackedApplication {
             created: 0,
             destroyed: 0,
             active: 0,
+            invoked: 0,
         });
         life.identity = identity.clone();
         life.created += 1;
@@ -68,6 +118,7 @@ impl Application for TrackedApplication {
             inner: cell,
             name,
             track: self.track.clone(),
+            pins: self.pins.clone(),
         }))
     }
 }
@@ -75,12 +126,23 @@ struct TrackedCell {
     inner: Arc<dyn Cell>,
     name: String,
     track: Arc<Tracker>,
+    pins: Option<Arc<Pins>>,
 }
 impl Cell for TrackedCell {
     fn invoke(self: Arc<Self>, context: Context, invocation: Invocation) -> HandlerFuture<Output> {
         // Retain the wrapper for the complete inner callback, so Drop is not
         // confused with a detached handler still using the underlying cell.
         Box::pin(async move {
+            if let Some(pins) = &self.pins {
+                pins.before(&self.name).await;
+            }
+            self.track
+                .0
+                .lock()
+                .unwrap()
+                .get_mut(&self.name)
+                .unwrap()
+                .invoked += 1;
             let result = self.inner.clone().invoke(context, invocation).await;
             drop(self);
             result
@@ -101,6 +163,16 @@ pub async fn start(
     bucket: Bucket,
     host: &tokio::runtime::Handle,
     core: &tokio::runtime::Handle,
+) -> (Node, CellClient, Arc<Tracker>) {
+    start_with_pins(app, path, bucket, host, core, None).await
+}
+pub async fn start_with_pins(
+    app: Arc<CompiledApplication>,
+    path: &Path,
+    bucket: Bucket,
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+    pins: Option<Arc<Pins>>,
 ) -> (Node, CellClient, Arc<Tracker>) {
     let public = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let internal = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -188,6 +260,7 @@ pub async fn start(
             Ok(Arc::new(TrackedApplication {
                 inner: factory.application(Arc::new(native_peer::now_ms))?,
                 track: track.clone(),
+                pins: pins.clone(),
             }) as Arc<dyn Application>)
         })
         .unwrap();

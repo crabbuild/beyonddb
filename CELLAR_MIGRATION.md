@@ -31,8 +31,8 @@ multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
 five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. Five native reclamation cases and five coordinator-admission cases are also qualified
-below.
+cases in 26.37 seconds. Five native reclamation cases and six coordinator-admission cases are also
+qualified below.
 These are separate focused runs; the complete 133-case run remains the latest
 combined evidence. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
@@ -873,8 +873,8 @@ evidence.
 
 ### Native coordinator admission, publication, claims and replay
 
-`tests/cellar_admission.rs` ports five coordinator-admission contracts with the
-original two/four caller threads, eight/sixteen-cell resident budgets, disabled
+`tests/cellar_admission.rs` ports six coordinator-admission contracts with the
+original two/four caller threads, five/eight/sixteen-cell resident budgets, disabled
 AWS retries and scoped Residency IAM. Public tables still have two ordered
 ranges. Payload gates pause LTX PUTs; claim gates delay and forward the SDK's
 original conditional owner PUT with its payload and condition unchanged. Node
@@ -944,15 +944,40 @@ contenders before the claim, then restoring only SOURCE metadata, removes that
 assumption. Factory-count preconditions establish free capacity; neither ownership
 records, resident limits nor the two-/ten-second claim bounds are changed.
 
-All five cases pass together in 21.70 seconds, zero failed/ignored,
-with default parallelism and a SHA-256-verified executable copy. Strict target
-Clippy, formatting and diff checks pass. CI already includes the target. All five
-covered legacy bodies are retired; the pending-slot cancellation and cold catalog
-publication/authority-overlap cases remain registered. Required all-target Clippy
-still fails in `elastic_cells` (27 errors) and `peer_network` (133); both gates
-remain enabled. Production code, exact dependency pins and shared runtime helpers
-are unchanged. Earlier complete native, focused ports and nine-process results
-remain separate evidence.
+The pending-slot case keeps four real SDK callbacks pinned under the original
+five-cell residency limit. The first cold coordinator reaches its original
+Create-mode owner CAS, which remains held at the provider. A second distinct
+coordinator reaches SDK owner lookup within two seconds but cannot issue its
+creation CAS during the original 150 ms window. This positive routing observation
+rules out frontend or CPU queueing as the cause of the apparent reservation.
+
+After the first caller is aborted, the test observes SDK gateway retirement.
+The accepted claim still occupies the last slot: no second CAS has entered and
+no first-coordinator factory exists. Releasing the unchanged first CAS proves its
+actual provider success; only then can the second claim proceed within the
+original two-/ten-second bounds. The cancelled caller never reaches an application
+handler. Exactly five activations remain, and SDK sampled residency is at most
+five. Both registrations, empty coordinators and exact signed seed values survive
+local-file deletion and another SDK owner; the second scope has a higher epoch.
+
+This explicitly adapts Cellule's physical cancellation policy. Cellar may finish
+an already accepted ownership CAS after its caller disappears and retain dormant
+ownership. Caller cancellation therefore does not prove that the ownership write
+was rolled back. The test accepts that SDK-owned record while requiring zero
+application invocation, bounded residency and progress only after the accepted
+claim settles. It does not fabricate ownership or change SDK cancellation.
+
+All six admission cases pass together in 26.27 seconds, zero failed/ignored,
+with default parallelism and a SHA-256-verified executable copy. Because the
+activation/pinning observer is shared with reclamation, all five reclamation
+cases were rebuilt and also pass in 26.29 seconds with the same execution checks.
+Strict Clippy for both targets, formatting and diff checks pass. CI already
+includes both targets. Six covered legacy admission bodies are retired; only the
+cold catalog publication/authority-overlap case remains in that legacy module.
+Required all-target Clippy still fails in `elastic_cells` (27 errors) and
+`peer_network` (133); both gates remain enabled. Production code and exact
+dependency pins are unchanged. Earlier complete native, focused ports and
+nine-process results remain separate evidence.
 
 ## Current state
 
@@ -1378,6 +1403,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-142 in `peer_network`; the ported `node_log_authority` target is clean.
+133 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

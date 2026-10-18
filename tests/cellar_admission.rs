@@ -23,3 +23,9 @@ mod absence;
 mod hot;
 #[path = "cellar_admission/reads.rs"]
 mod reads;
+
+#[allow(dead_code)]
+#[path = "cellar_reclamation/creation_actor.rs"]
+mod pinned_actor;
+#[path = "cellar_admission/reservation.rs"]
+mod reservation;

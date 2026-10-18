@@ -317,7 +317,7 @@ owner-release policy. The creation-time race pauses a real CreateTable retry,
 observes destruction of both original data activations under ordinary SDK
 pressure, then completes the same pending generation and restores the old data.
 Those values and the new table write survive another fresh owner.
-Five native coordinator-admission cases cover publication, hot reads and SDK owner claims.
+Six native coordinator-admission cases cover publication, hot reads and SDK owner claims.
 Two hold actual coordinator LTX payload PUTs.
 Concurrent replay shares one held cold publication after both requests reach
 SDK ingress; independent coordinator scopes overlap before release. Account
@@ -333,6 +333,14 @@ timed claim, keeping membership startup outside that operation window. Registere
 admission issues four canonical SDK queries with no hot managed-cell provider
 GETs or account mutations. Fresh provisioners still issue that query; fresh SDK
 owners recover the same registration and coordinator state at higher epochs.
+The pending-slot case pins four SDK callbacks under a five-cell limit. Two
+coordinators reach SDK owner lookup, but the second creation CAS stays blocked
+while the first accepted CAS is held, including after its caller is cancelled.
+Once the first CAS settles at the provider, the queued claim progresses. The
+cancelled caller invokes no application handler; Cellar may retain dormant
+ownership from its accepted claim. Cancellation alone does not establish rollback.
+Registration and exact values survive another fresh owner. The shared activation
+observer is also checked by a fresh run of all five reclamation cases.
 No ownership record or CAS payload is fabricated.
 The latest complete fixture run passed 133 focused native tests; its unchanged
 server passed all nine explicitly executed RustFS process cases, zero
@@ -340,7 +348,7 @@ failed/ignored. The later fixture-only discovery port passes all three native
 peer cases, using non-owning snapshots and SDK owner observations so the test
 cannot perform the recovery it is meant to observe. The creation target's five
 cases pass as a separate focused run, as do the two deletion, five reclamation
-and five coordinator-admission cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
+and six coordinator-admission cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. The caller/provider faults qualify their stated local contracts;
 they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the

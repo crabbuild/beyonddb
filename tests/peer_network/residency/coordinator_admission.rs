@@ -2,98 +2,12 @@
 // cellar_admission. Remaining admission contracts below await native ports.
 use super::forward_cache::CountedAuthority;
 use super::*;
-use beyonddb::{
-    CoordinatorProvisioner, ReadCoordinatorRegistration, RegisterCoordinatorShardInput,
-};
+use beyonddb::{ReadCoordinatorRegistration, RegisterCoordinatorShardInput};
 
 const ACCOUNT: &str = "123456789012";
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pending_cold_admission_reserves_the_last_slot_and_cancellation_releases_it() {
-    let store = Arc::new(CountedAuthority::default());
-    let fixture = Fixture::with_store_capacity_and_peer_cache(1, store.clone(), 5, true).await;
-    assert_eq!(fixture.node.runtime().stats().active_cells(), 4);
-    let first = b"slot-first".to_vec();
-    let first_target = beyonddb::coordinator_target(ACCOUNT, &first).unwrap();
-    let second = (0..100)
-        .map(|index| format!("slot-second-{index}").into_bytes())
-        .find(|key| {
-            beyonddb::coordinator_target(ACCOUNT, key)
-                .unwrap()
-                .cell_id()
-                .as_bytes()[0]
-                % 64
-                != first_target.cell_id().as_bytes()[0] % 64
-        })
-        .unwrap();
-    let second_target = beyonddb::coordinator_target(ACCOUNT, &second).unwrap();
-    let entered = Arc::new(tokio::sync::Semaphore::new(0));
-    let release = Arc::new(tokio::sync::Semaphore::new(0));
-    *store.creation_gate.lock().unwrap() = Some(super::forward_cache::CreationGate {
-        paths: [&first_target, &second_target]
-            .into_iter()
-            .map(|target| fixture.layout.control_path(target.cell_id().as_bytes()))
-            .collect(),
-        entered: entered.clone(),
-        release: release.clone(),
-    });
-    let spawn = |key: Vec<u8>| {
-        let provisioner = fixture.provisioner.clone();
-        let client = fixture.client.clone();
-        tokio::spawn(async move { provisioner.ensure(&client, ACCOUNT, &key).await })
-    };
-    let first_job = spawn(first);
-    tokio::time::timeout(std::time::Duration::from_secs(2), entered.acquire())
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
-    let second_job = spawn(second);
-    let blocked = tokio::time::timeout(std::time::Duration::from_millis(150), async {
-        entered.acquire().await.unwrap().forget();
-    })
-    .await
-    .is_err();
-    first_job.abort();
-    assert!(first_job.await.unwrap_err().is_cancelled());
-    if blocked {
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
-    }
-    release.add_permits(2);
-    tokio::time::timeout(std::time::Duration::from_secs(10), second_job)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(
-        blocked,
-        "a second cold claim bypassed the pending last-slot reservation"
-    );
-    let authority = CellAuthority::new(fixture.layout.clone());
-    assert!(
-        authority
-            .load(first_target.cell_id())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        authority
-            .load(second_target.cell_id())
-            .await
-            .unwrap()
-            .unwrap()
-            .value()
-            .root
-            .is_some()
-    );
-    assert!(fixture.node.runtime().stats().active_cells() <= 5);
-    fixture.shutdown().await;
-}
+// Native reservation covers last-slot admission through the SDK owner CAS.
+// An accepted SDK claim may finish after caller cancellation, with no handler invocation.
 
 // Native durable_registration warms undiscoverable SDK coordinators, requires
 // their account publication, and verifies every row after fresh-owner restore.
