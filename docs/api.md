@@ -111,7 +111,7 @@ These gaps require more than a server configuration change. In particular, the c
 
 The source gates are in [table creation/update](../src/backend.rs),
 [backup methods](../src/backend/remaining.rs), and
-[server wiring](../src/server.rs). For ExtendDB's own standalone feature set,
+[server wiring](../src/cellar/server.rs). For ExtendDB's own standalone feature set,
 see its [differences from DynamoDB](https://github.com/ExtendDB/extenddb/blob/main/docs/differences-from-dynamodb.md).
 
 ## How to qualify a new API claim

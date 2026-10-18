@@ -48,7 +48,8 @@ confirms that only those two targets were removed.
 
 All 24 retained native executables match the SHA-256 values from the 155-test
 run; the process executable and server match the nine-case process run. This
-cleanup changes no production code or retained test behavior. Retired coverage,
+test/source cleanup changes no compiled implementation or retained test behavior.
+Retired coverage,
 including the physical SQLite FULL fault, is explicitly unqualified; its source
 revision and test inventory are recorded in
 [retired Cellule tests](docs/retired-cellule-tests.md). The historical sections
@@ -1353,47 +1354,43 @@ is retained through participant errors so unrelated work can complete.
 The replacement adapter exposes authoritative SDK ingress and has no legacy
 replica-read-policy override.
 
-## Remaining implementation
+## Migration delivery and follow-up
 
-This list retains the broader qualification backlog. The user's 2026-10-18
-request retires the unported test targets listed in the coverage inventory;
-restoring those tests is future work, not a current CI gate.
+The embedded SDK migration is implemented in the `bdb-cellar` worktree on
+`beyonddb-cellar` and is submitted as PR #16:
 
-1. The adapter runs the root domain suite and signed SDK fixture. Reservations
-   use bounded physical BLOB chunks; large-image writes verify RETURNING rowid,
-   and rows_affected uses SQLite changes() rather than trigger-inclusive billing.
-   The host installs bounded SQL limits for legal escaped DynamoDB values.
-   Broader capacity/fault qualification remains.
-2. Command/client imports and compiled application registration now use the
-   adapter. Keep domain identities and key semantics while qualifying behavior.
-   Ordered routing/storage bounds have been changed together. Qualify the full
-   behavior matrix; do not mix encoding-v1 ranges with old HASH directories.
-3. The new host/provisioner use Cellar's SDK node, namespaces, ownership and
-   replication. Qualify lifecycle, replace coordinator recovery, and remove
-   obsolete source after equivalent coverage is ported. A bounded coordinator
-   discovery/expiry worker and stream-retention fixture pass real SDK/restart
-   unit checks. A fixed-shard inventory persists cell discovery before
-   installation, including retired sources.
-4. Done: removed Cellule dependencies from the production manifest, joined the
-   adapter/keyspace crates to the workspace and regenerated the root lockfile.
-   Obsolete nested lockfiles have been removed. Cellar is pinned once in
-   workspace dependencies as the exact crates.io release described above.
-5. Port the existing behavior fixtures to the new host. Verify CRUD, queries,
-   scans, batches, transactions, indexes, streams and TTL through ExtendDB and
-   signed AWS SDK requests. Runtime-specific legacy fixtures require a Cellar
-   equivalent rather than a mechanical dependency rename.
-6. Run process replacement, node-fencing, split, transaction-decision and index
-   recovery cases against bucket-backed Cellar before declaring completion.
-7. Update contributor guidance, startup configuration, CI and operational docs
-   to describe the actual Cellar server and its qualified capability boundary.
+- The workspace uses exact crates.io Cellar 0.1.0 and the reviewed ExtendDB
+  revision. No Cellule dependency or dependency patch remains.
+- `src/lib.rs` selects `src/cellar/server.rs`, `src/cellar/provision.rs` and
+  `src/cellar/inventory.rs`. SDK execution, placement, peer transport, fencing
+  and durability replace the old host. Domain coordinators, participant intents,
+  recovery workers, inventory and stream retention run through SDK ingress.
+- Public tables use 2–256 ordered data ranges, four by default. Range routing,
+  splits and continuation semantics are qualified by the native fixtures above.
+- The retained native suite and bucket-backed process matrix qualify the
+  implemented behavior at their recorded workloads and failure boundaries.
+  General all-target build, strict Clippy and test compilation pass.
+- Contributor guidance, executable configuration, CI and source maps describe
+  the SDK server. Old Cellule storage layouts require explicit migration into
+  a fresh `cellar-ordered-v1` root/prefix.
 
-The selected native targets retain GSI backfill/transfer, multipart upload
-replacement, reservation, shutdown, transaction and ordered range contracts.
-Unported Cellule-only suites were removed at the user's request; they are not
-claimed as passing native coverage. Their source remains available at the
-revision recorded in [the retirement inventory](docs/retired-cellule-tests.md).
-The physical SQLite FULL contract and the other retired fault cases can be
-ported individually when restoring that coverage.
+The final source audit removes 20 unused files from the former `src/server.rs`
+and `src/provision.rs` implementations and their exclusive submodules. Current
+all-target compiler dep-info excludes every removed file. The active shared
+`src/provision/capacity.rs`, `directory.rs` and `global_indexes.rs` modules remain.
+The removed source is recoverable from commit
+`2626154faf785cad66c49ecee0a1770cbd631c12`. Attribution and legacy-format
+compatibility notes remain where relevant. This cleanup changes no compiled
+implementation, target registration or retained test behavior.
+
+Further qualification is separate from the SDK replacement:
+
+- The user retired the two unported Cellule suites on 2026-10-18. Their physical
+  SQLite FULL and other legacy faults remain unqualified; restoration can use
+  [the retired source/test inventory](docs/retired-cellule-tests.md).
+- The complete upstream protocol matrix, fleet-scale load and fault campaigns,
+  and upgrade compatibility require additional evidence. Existing local cases
+  do not establish those broader claims.
 
 The executable configuration and lifecycle are described in
 [the Cellar server guide](docs/cellar-server.md). CI retains general all-target

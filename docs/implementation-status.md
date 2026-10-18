@@ -621,7 +621,7 @@ engine does not dispatch PartiQL or Global Tables operations. Its import/export
 handlers use local filesystem extensions rather than the DynamoDB S3 workflow
 ([ImportTable](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ImportTable.html),
 [ExportTableToPointInTime](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExportTableToPointInTime.html)).
-BeyondDB supplies empty import/export path lists in `src/server.rs`, so those
+BeyondDB supplies empty import/export path lists in `src/cellar/server.rs`, so those
 handlers reject requests before file access. Enabling filesystem paths would
 not establish DynamoDB import/export compatibility. These operations need
 upstream protocol support and Cell-backed orchestration, followed by signed SDK

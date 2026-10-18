@@ -179,7 +179,7 @@ Use these entry points to follow a diagram into the implementation:
 
 | Boundary | Entry point |
 | --- | --- |
-| Public server composition | [`src/server.rs`](../src/server.rs) and [`src/bin/beyonddb.rs`](../src/bin/beyonddb.rs) |
+| Public server composition | [`src/cellar/server.rs`](../src/cellar/server.rs) and [`src/bin/beyonddb.rs`](../src/bin/beyonddb.rs) |
 | Table and item adapter | [`src/backend.rs`](../src/backend.rs) and [`src/backend/data.rs`](../src/backend/data.rs) |
 | Cell routing and ownership | [`src/routing.rs`](../src/routing.rs), [`src/directory.rs`](../src/directory.rs) |
 | Transaction driver and coordinator | [`src/backend/transaction.rs`](../src/backend/transaction.rs), [`src/transaction_coordinator.rs`](../src/transaction_coordinator.rs) |

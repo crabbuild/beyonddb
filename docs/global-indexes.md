@@ -196,16 +196,16 @@ qualification.
 
 | Boundary | Source |
 | --- | --- |
-| API metadata and provisioning | `src/backend.rs`, `src/table.rs`, `src/provision.rs` |
+| API metadata and provisioning | `src/backend.rs`, `src/table.rs`, `src/cellar/provision.rs` |
 | Base mutation and transaction apply | `src/items.rs`, `src/items/transaction.rs`, `src/partition.rs`, `src/partition/transaction.rs` |
 | Durable source journal | `src/global_index/outbox.rs`, `src/global_index_outbox_schema.sql`, `src/item_storage.rs` |
 | Routed replay and acknowledgement | `src/backend/global_index.rs` |
-| Serving owner recovery | `src/provision.rs` → existing `recover_discovered_owner`, NodeDirectory proof, and runtime authority CAS |
+| Serving owner recovery | Cellar SDK routing, owner fencing and restoration; `src/cellar/provision.rs` orchestrates domain ranges |
 | Versioned index storage and reads | `src/global_index.rs`, `src/global_index/read.rs`, `src/global_index_schema.sql` |
 | Index directory | `src/global_index/routing.rs`, `src/directory.rs`, `src/directory/`, `src/directory/schema.sql`; fixed-size account anchors in `src/schema.sql` |
-| Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/server/peer_receiver.rs` |
+| Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/cellar/server.rs`; SDK peer transport |
 | Focused recovery fixture | `tests/elastic_cells/global_indexes.rs` |
-| Signed peer-owner recovery | `tests/peer_network/global_indexes.rs`, `tests/peer_network.rs` |
+| Retired Cellule peer-owner recovery | [Removed coverage and source revision](retired-cellule-tests.md); no current gate |
 | Signed SDK process fixture | `tests/server_binary/global_indexes.rs` |
 
 The focused fixture interrupts a key move after the old index entry is removed,

@@ -21,8 +21,10 @@ Cellar. The executable passes local signed SDK/restart checks. Table ownership
 now uses ordered `(PK, SK)` ranges across multiple cells, with a real serving
 router/split fixture. Nine bucket-backed process cases and SDK handoff to a
 second node pass. Historical Cellule results below are not Cellar qualification.
-Broader API/index checks, legacy fixture migration and fleet fault matrices
-remain unfinished.
+The user retired the unported Cellule-only test targets; their
+[coverage inventory](docs/retired-cellule-tests.md) records the gaps and source
+revision. All-target build and strict Clippy gates remain enabled and pass.
+Broader API/index and fleet fault qualification remains future work.
 See [migration status](CELLAR_MIGRATION.md) and the
 [ordered range plan](docs/ordered-cell-partitioning.md).
 
