@@ -10,7 +10,6 @@ mod follower_durability;
 mod forward_cache;
 mod index_splits;
 mod live_owner_failover;
-mod ownership_race;
 mod placement;
 mod prepare_capacity;
 mod pressure;

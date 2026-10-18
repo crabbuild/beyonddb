@@ -13,6 +13,8 @@ mod coordinator_discovery;
 mod credential_failover;
 #[path = "support/native_peer.rs"]
 mod native_peer;
+#[path = "cellar_peer/ownership_race.rs"]
+mod ownership_race;
 
 use bdb_cellar_runtime::application::cell_name;
 use beyonddb::{account_target, credential_target};

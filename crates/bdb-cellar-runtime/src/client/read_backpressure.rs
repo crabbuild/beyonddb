@@ -3,6 +3,7 @@ use super::{Invocation, InvocationTransport};
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
 use http::{Request, StatusCode};
+use http_body::Body;
 use http_body_util::{BodyExt, Full};
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -38,10 +39,13 @@ impl InvocationTransport for ReadBackpressure {
                     *attempt.headers_mut() = request.headers().clone();
                     *attempt.extensions_mut() = request.extensions().clone();
                     let response = self.inner.call(invocation, attempt).await;
-                    if !matches!(
-                        response.status(),
-                        StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
-                    ) {
+                    let (response, route_failed) = sdk_read_route_failure(response).await;
+                    if !route_failed
+                        && !matches!(
+                            response.status(),
+                            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
+                        )
+                    {
                         return response;
                     }
                     let delay = response
@@ -77,6 +81,41 @@ impl InvocationTransport for ReadBackpressure {
     }
 }
 
+/// Cellar 0.1.0 reports failed owner resolution as a small SDK-generated 500.
+/// It is a retry hint for a read, never evidence that a mutation was unstarted.
+/// Leave every other response (including streamed or unbounded 500s) intact.
+async fn sdk_read_route_failure(response: IngressResponse) -> (IngressResponse, bool) {
+    const ROUTE_FAILED: &[u8] = b"Worker failed: route failed: ResolveFailed";
+    if response.status() != StatusCode::INTERNAL_SERVER_ERROR
+        || response.body().size_hint().exact() != Some(ROUTE_FAILED.len() as u64)
+    {
+        return (response, false);
+    }
+    let (parts, body) = response.into_parts();
+    // Enforce the size even if a provider supplies an inconsistent hint.
+    match http_body_util::Limited::new(body, ROUTE_FAILED.len())
+        .collect()
+        .await
+    {
+        Ok(collected) => {
+            let bytes = collected.to_bytes();
+            let route_failed = bytes.as_ref() == ROUTE_FAILED;
+            let body = Full::new(bytes)
+                .map_err(|never| -> std::io::Error { match never {} })
+                .boxed_unsync();
+            (http::Response::from_parts(parts, body), route_failed)
+        }
+        Err(error) => {
+            let body = Full::new(Bytes::from(format!(
+                "SDK error response could not be read: {error}"
+            )))
+            .map_err(|never| -> std::io::Error { match never {} })
+            .boxed_unsync();
+            (http::Response::from_parts(parts, body), false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +129,7 @@ mod tests {
         calls: AtomicUsize,
         refuse: usize,
         status: StatusCode,
+        body: &'static [u8],
     }
     impl InvocationTransport for Replies {
         fn call<'a>(
@@ -107,7 +147,7 @@ mod tests {
                 );
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 let mut response = http::Response::new(
-                    Full::new(Bytes::new())
+                    Full::new(Bytes::from_static(self.body))
                         .map_err(|never| -> std::io::Error { match never {} })
                         .boxed_unsync(),
                 );
@@ -158,6 +198,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 refuse: 2,
                 status,
+                body: b"",
             });
             let paced = ReadBackpressure::new(inner.clone(), Duration::from_secs(1));
             let response = paced.call(&invocation(false), request()).await;
@@ -176,6 +217,57 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn sdk_owner_resolution_failure_is_retried_only_for_reads() {
+        for mutation in [false, true] {
+            let inner = Arc::new(Replies {
+                calls: AtomicUsize::new(0),
+                refuse: 1,
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: b"Worker failed: route failed: ResolveFailed",
+            });
+            let paced = ReadBackpressure::new(inner.clone(), Duration::from_secs(1));
+            let response = paced.call(&invocation(mutation), request()).await;
+            assert_eq!(
+                inner.calls.load(Ordering::SeqCst),
+                if mutation { 1 } else { 2 }
+            );
+            assert_eq!(
+                response.status(),
+                if mutation {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                } else {
+                    StatusCode::OK
+                }
+            );
+        }
+        // Equal-size application errors must not become SDK routing hints.
+        let body = b"Worker failed: route failed: ApplicationXX";
+        assert_eq!(
+            body.len(),
+            b"Worker failed: route failed: ResolveFailed".len()
+        );
+        let inner = Arc::new(Replies {
+            calls: AtomicUsize::new(0),
+            refuse: 1,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body,
+        });
+        let paced = ReadBackpressure::new(inner.clone(), Duration::from_secs(1));
+        let response = paced.call(&invocation(false), request()).await;
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref(),
+            body
+        );
+    }
+    #[tokio::test]
     async fn mutations_are_never_retried_by_the_read_policy() {
         for status in [
             StatusCode::SERVICE_UNAVAILABLE,
@@ -185,6 +277,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 refuse: 2,
                 status,
+                body: b"",
             });
             let paced = ReadBackpressure::new(inner.clone(), Duration::from_secs(1));
             assert_eq!(
@@ -200,6 +293,7 @@ mod tests {
             calls: AtomicUsize::new(0),
             refuse: usize::MAX,
             status: StatusCode::SERVICE_UNAVAILABLE,
+            body: b"",
         });
         let paced = ReadBackpressure::new(inner.clone(), Duration::from_millis(25));
         let response = tokio::time::timeout(

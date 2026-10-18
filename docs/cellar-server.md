@@ -158,8 +158,11 @@ values and advances native owner epochs. Authentication fails closed during a
 credential-owner cut while healthy local data remains readable, then recovers
 after expiry. Unknown keys create no credential cells; revocation remains fresh.
 
-The public frontend paces pure SDK queries on HTTP 429/503 within a 30-second
-backpressure window. This permits bursts through native per-cell admission
+The public frontend paces pure SDK queries on HTTP 429/503 and Cellar 0.1.0
+owner-resolution failures within a 30-second backpressure window. Only the exact
+bounded `Worker failed: route failed: ResolveFailed` 500 body is recognized;
+other 500s retain their original failure. The dispatch wrapper preserves the
+SDK body size hint while retaining its permits through completion. This permits bursts through native per-cell admission
 without caching credential, authorization or item values. Commands keep their
 single-attempt transport contract, including transaction read-image capture;
 HTTP status still does not prove a mutation was unstarted. Separate policy
@@ -342,13 +345,20 @@ ownership from its accepted claim. Cancellation alone does not establish rollbac
 Registration and exact values survive another fresh owner. The shared activation
 observer is also checked by a fresh run of all five reclamation cases.
 No ownership record or CAS payload is fabricated.
-The latest complete fixture run passed 133 focused native tests; its unchanged
-server passed all nine explicitly executed RustFS process cases, zero
-failed/ignored. The later fixture-only discovery port passes all three native
-peer cases, using non-owning snapshots and SDK owner observations so the test
-cannot perform the recovery it is meant to observe. The creation target's five
-cases pass as a separate focused run, as do the two deletion, five reclamation
-and six coordinator-admission cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
+Two native ownership-race cases also retain the original two caller threads,
+eight-cell limits, two data ranges and ten-second bounds. They hold actual SDK
+owner lookup results or conditional PUTs while another SDK wins, and drain a live
+owner after a lookup. The signed reads preserve exact items and the winner's
+fence; later values survive another owner after local-file deletion. Cellar's
+public handoff supplies the release/durability proof, and a departing SDK may
+transfer directly to its successor. No fixture rewrites owner or lease records.
+The latest complete fixture run passed 155 focused native tests across 24
+SHA-256-verified executables with normal parallelism, zero failed/ignored. This
+includes all native discovery, creation, deletion, reclamation and admission
+ports and the stale-owner/competing-claim regressions. All nine explicitly
+executed RustFS process cases also pass on the rebuilt server, zero failed/ignored,
+with its SHA-256 unchanged throughout the run. See the current fingerprint and qualification boundaries
+in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. The caller/provider faults qualify their stated local contracts;
 they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the

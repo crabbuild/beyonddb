@@ -6,14 +6,16 @@ use bdb_cellar_runtime::{
 };
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body::{Body, Frame, SizeHint};
+use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use std::{
     collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Weak},
+    task::{Context, Poll},
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 pub(super) struct Dispatch {
     inner: Arc<dyn InvocationTransport>,
@@ -27,6 +29,32 @@ impl Dispatch {
             capacity: Arc::new(Semaphore::new(128)),
             targets: Mutex::new(HashMap::new()),
         }
+    }
+}
+// Keep the original body contract visible to read pacing. A stream adapter
+// erases its exact size hint, hiding the SDK's bounded routing-error envelope.
+struct HeldBody {
+    inner: UnsyncBoxBody<Bytes, std::io::Error>,
+    permits: Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)>,
+}
+impl Body for HeldBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let result = Pin::new(&mut self.inner).poll_frame(cx);
+        if matches!(result, Poll::Ready(None)) {
+            self.permits.take();
+        }
+        result
+    }
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
     }
 }
 fn unavailable() -> IngressResponse {
@@ -68,15 +96,14 @@ impl InvocationTransport for Dispatch {
             // status or retry a mutation from a native HTTP response code.
             let response = self.inner.call(invocation, request).await;
             let (parts, body) = response.into_parts();
-            let stream = futures_util::stream::unfold(
-                (body, permit, capacity),
-                |(mut body, permit, capacity)| async move {
-                    body.frame()
-                        .await
-                        .map(|frame| (frame, (body, permit, capacity)))
-                },
-            );
-            http::Response::from_parts(parts, StreamBody::new(stream).boxed_unsync())
+            http::Response::from_parts(
+                parts,
+                HeldBody {
+                    inner: body,
+                    permits: Some((permit, capacity)),
+                }
+                .boxed_unsync(),
+            )
         })
     }
 }
@@ -148,6 +175,10 @@ mod tests {
         for _ in 0..8 {
             held.push(dispatch.call(&input, request()).await);
         }
+        assert_eq!(
+            held[0].body().size_hint().exact(),
+            Some(b"unchanged".len() as u64)
+        );
         let queued = {
             let dispatch = dispatch.clone();
             tokio::spawn(async move { dispatch.call(&invocation(0), request()).await })

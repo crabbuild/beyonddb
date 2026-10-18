@@ -24,26 +24,26 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Current registry qualification
 
-The latest complete native run passed **133 focused tests** across twenty
+The latest complete native run passed **155 focused tests** across twenty-four
 SHA-256-verified executable copies, with zero failed/ignored cases and normal
-test parallelism (399.78 seconds summed execution time), including public
-multi-cell placement and coordinator-registration publication. The subsequent
-fixture-only discovery port passes all three native peer cases in 32.42 seconds,
-including the new worker-only discovery case. The later creation port passes
-five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. Five native reclamation cases and six coordinator-admission cases are also
-qualified below.
-These are separate focused runs; the complete 133-case run remains the latest
-combined evidence. Production code
-and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
-passes all nine explicitly executed RustFS process
-cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
-`a155fc7641550013b2fbba695bfa2d05713211f13c83721c22d382adf0e8c79b` throughout that run.
-The process executable copy also matched SHA-256 and ran serially with CI's
-`--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
-formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (133 errors).
-Qualification remains incomplete; both gates stay enabled.
+test parallelism (545.47 seconds summed execution time). It includes all
+native discovery, creation, deletion, reclamation and admission ports, plus the
+SDK stale-owner/competing-claim regressions and read-retry unit coverage below.
+Strict Clippy passes for workspace libraries/binaries and every selected
+native/process integration target. Formatting and diff checks pass.
+
+The rebuilt server SHA-256 is
+`89dcbdc0a98c273bb909a5e2bd4cb267f53543fa030b96221f28975169fefedc`.
+All nine explicitly executed RustFS process cases pass, zero failed/ignored,
+in 300.16 seconds. The process executable copy matches SHA-256 and
+uses CI's `--ignored --test-threads=1 --nocapture` flags. The server fingerprint
+stayed unchanged throughout that run. Earlier process results below belong to
+their recorded older builds.
+
+The required all-target gate remains red in retained legacy `elastic_cells`
+(27 errors) and `peer_network` (128 errors). Qualification remains incomplete;
+both gates stay enabled. The historical sections below retain the evidence and
+policy adaptations at their respective checkpoints.
 
 ### Earlier registry baseline
 
@@ -98,7 +98,8 @@ The port first exposed a fixture-only ingress budget of 32 against 50 callers;
 the fixture now matches the executable's 128 ingress/stateless permits and
 16 per-cell requests. With ingress corrected, account metadata queries still
 reproduced native per-cell HTTP 503 under the burst. The public frontend now
-paces only read-only invocations on HTTP 429/503 within a 30-second admission
+paces only read-only invocations on HTTP 429/503 and the exact bounded Cellar
+0.1.0 `ResolveFailed` 500 response within a 30-second admission
 budget, honoring numeric Retry-After and bounded backoff. It caches no read
 values. Commands, including transaction read-image capture, retain one
 transport attempt and ambiguous-outcome handling. Unit checks preserve this
@@ -979,6 +980,56 @@ Required all-target Clippy still fails in `elastic_cells` (27 errors) and
 dependency pins are unchanged. Earlier complete native, focused ports and
 nine-process results remain separate evidence.
 
+### Native stale-owner lookup and competing claims
+
+`tests/cellar_peer/ownership_race.rs` replaces the two legacy ownership-race
+bodies with actual SDK owners. Both keep two caller threads, two ordered data
+ranges, an eight-cell resident limit, disabled AWS retries and the original
+ten-second entry/completion bounds. Scoped IAM and exact signed item comparisons
+cover both seeded ranges.
+
+The competing-claim case runs twice. A sole donor first performs the SDK's public
+handoff, including its final durability proof and conditional owner release.
+Both contenders are ready before the race. The source pauses either the actual
+released-owner GET result or the original Update-mode ownership PUT. Its captured
+ETag matches the released SDK record. A real peer then claims and restores that
+same data scope through SDK ingress, at a higher epoch. Releasing the original
+conditional PUT produces a clean provider rejection. The signed read returns the
+exact item; the source never creates a data-cell factory, and the winner's owner
+record and command sequence remain unchanged by the read. A later ordinary write
+changes the value to 2. Both exact items survive deletion of both contenders'
+local files and recovery on another SDK owner at a still higher epoch.
+
+The handoff case holds an actual lookup result naming the original live owner,
+then drains that owner through the same public SDK lifecycle. The donor must lose
+authority; Cellar may release its record or directly transfer it to a successor.
+The opaque network proxy closes with its stopped upstream, rather than continuing
+to accept connections that it cannot serve. Releasing the unchanged stale lookup
+still permits the signed read to complete within ten seconds. Both exact values
+survive a further fresh owner after removal of the prior local directory.
+No fixture writes ownership, leases or catalogs.
+
+That case exposed a production read-path gap: Cellar 0.1.0 can report owner
+resolution failure as `HTTP 500` with the exact small body
+`Worker failed: route failed: ResolveFailed`. The existing read-only pacing now
+recognizes that bounded response, retaining the original 30-second maximum wait.
+Other 500s are not retried. Mutations bypass this policy and retain one transport
+attempt; neither the status nor body establishes rollback. Unit coverage includes
+an equal-size unrelated 500 and a mutation carrying the same SDK error body.
+
+The gateway's body wrapper now forwards the original size hint and end-of-stream
+state while holding target/global dispatch permits through completion. This keeps
+the SDK error recognizable without collecting arbitrary streamed responses or
+weakening the eight-per-target/128-global dispatch bounds. `http-body` is already
+locked at 1.1.0 and becomes a direct dependency of the adapter and executable;
+Cellar remains exactly registry 0.1.0 and ExtendDB's revision is unchanged.
+
+All five peer cases pass together in 73.04 seconds with normal parallelism and a
+SHA-256-verified executable copy, including the real `ResolveFailed` response in
+the handoff case. The two covered legacy bodies and their obsolete provider
+wrapper are retired. The broader qualification results for this production change
+are recorded in the current registry section above.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1398,11 +1449,11 @@ cargo test --test cellar_process --locked -- --ignored --nocapture --test-thread
 
 The full legacy all-target suite still needs its Cellule host fixtures ported.
 These results do not establish fleet capacity or complete DynamoDB compatibility.
-The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
+The 2026-10-18 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-133 in `peer_network`; the ported `node_log_authority` target is clean.
+128 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.
