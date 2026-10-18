@@ -1,8 +1,8 @@
 use crate::native_peer::{self, FRONT, Http, Inspection, Peer, PeerPolicy, SOURCE};
 use crate::residency_fixture::runtimes;
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use beyonddb::*;
+use cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use extenddb_core::types::{AttributeValue, Item};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 fn identity() -> MutationIdentity {

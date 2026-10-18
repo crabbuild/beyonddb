@@ -1,7 +1,7 @@
 //! Canonical ordered primary keys shared by routing and local BLOB indexes.
 use crate::{Error, Result};
-use bdb_keyspace::{Component, KeyKind, KeySchema, KeySpan, RangeKey};
 use extenddb_core::types::{AttributeValue, Item, KeySchemaElement, KeyType};
+use keyspace::{Component, KeyKind, KeySchema, KeySpan, RangeKey};
 
 pub(crate) fn component(value: &AttributeValue) -> Result<Component<'_>> {
     match value {
@@ -116,7 +116,7 @@ pub(crate) fn query_span(
     predicate: Option<&crate::SortPredicate>,
 ) -> Result<KeySpan> {
     use crate::{SortComparison as Op, SortPredicate as P};
-    use bdb_keyspace::SortCondition as S;
+    use keyspace::SortCondition as S;
     let Some(predicate) = predicate else {
         return partition_span(item, schema);
     };

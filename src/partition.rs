@@ -1,6 +1,6 @@
 //! Independently owned item range in one SQL Cell.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 mod indexes;
 pub(crate) mod key;
 pub(crate) mod query;
@@ -21,8 +21,8 @@ pub use update_batch::*;
 
 use std::sync::OnceLock;
 
-use bdb_cellar_runtime::identity::Digest;
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::identity::Digest;
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -41,7 +41,7 @@ use key::index_key;
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        bdb_cellar_runtime::capacity::SCHEMA,
+        cellar_runtime::capacity::SCHEMA,
         crate::participant::SCHEMA,
         crate::secondary_index::SCHEMA,
         crate::global_index::outbox::SCHEMA,
@@ -53,7 +53,7 @@ pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: DATA_NAMESPACE,
     name: DATA_MODULE,
-    role: bdb_cellar_runtime::descriptors::CatalogRole::Sql,
+    role: cellar_runtime::descriptors::CatalogRole::Sql,
     shards: 1,
     effect_targets: &[],
     dead_letter: None,
@@ -148,7 +148,7 @@ const fn no_return_operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct DataModule;
 
-impl bdb_cellar_runtime::registry::CellModule for DataModule {
+impl cellar_runtime::registry::CellModule for DataModule {
     const NAME: &'static str = DATA_MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -442,7 +442,7 @@ impl PartitionSpec {
     }
 
     fn valid(&self) -> bool {
-        self.table.key_encoding_version == bdb_keyspace::KEY_ENCODING_VERSION
+        self.table.key_encoding_version == keyspace::KEY_ENCODING_VERSION
             && (self.table.local_secondary_indexes.is_empty()
                 || (self
                     .lower

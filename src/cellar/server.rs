@@ -6,10 +6,10 @@ mod transactions;
 use crate::{
     Beyonddb, CellCatalogStore, CellCredentialStore, CellInitialPartitionProvisioner, CellStorage,
 };
-use bdb_cellar_runtime::{
+use cellar::sdk::{ExternalNodeServices, Node, NodeConfig, NodeOutcome, ShutdownMode};
+use cellar_runtime::{
     app::CellApplication, client::CellClient, descriptors::BuildDescriptor, identity::Digest,
 };
-use cellar::sdk::{ExternalNodeServices, Node, NodeConfig, NodeOutcome, ShutdownMode};
 use extenddb_auth::{AuthCacheRegistry, BuiltinAuthProvider};
 use extenddb_core::limits::LimitsConfig;
 use extenddb_server::{AppState, AuthzCacheConfig, CachedAuthzStore, CachedTableKeyInfoStore};
@@ -258,7 +258,7 @@ impl CellarServer {
         mut config: CellarServerConfig,
         services: ExternalNodeServices,
     ) -> anyhow::Result<Self> {
-        config.node.cell_limits.sql = bdb_cellar_runtime::sql::host_limits();
+        config.node.cell_limits.sql = cellar_runtime::sql::host_limits();
         let application = Arc::new(Beyonddb::compile(BuildDescriptor {
             source_revision: env!("CARGO_PKG_VERSION").into(),
             cargo_lock_digest: Digest::from_bytes(

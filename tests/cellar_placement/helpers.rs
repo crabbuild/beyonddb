@@ -48,7 +48,7 @@ pub(super) async fn target(
     fixture: &Fixture,
     table: &TableRecord,
     id: &str,
-) -> bdb_cellar_runtime::identity::CellTarget {
+) -> cellar_runtime::identity::CellTarget {
     let key = ordered_data_key(
         &table.id,
         &extenddb_core::types::Item::from([(

@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult};
 use serde::{Deserialize, Serialize};
 
 use super::participant::{PreparePartitionTransactionInput, prepare_partition};

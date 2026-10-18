@@ -1,8 +1,8 @@
 use crate::residency_fixture::{Fixture, SdkItem, runtimes};
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
 use aws_sdk_dynamodb::types::{Put, TransactWriteItem};
-use bdb_cellar_runtime::identity::CellTarget;
 use beyonddb::*;
+use cellar_runtime::identity::CellTarget;
 use extenddb_storage::MetadataEngine;
 
 const ACCOUNT: &str = "123456789012";
@@ -126,7 +126,7 @@ fn sdk_range_usage_survives_mutation_replay_split_and_owner_restore() {
                 source_range
                     .lower
                     .clone()
-                    .unwrap_or_else(bdb_keyspace::RangeKey::minimum),
+                    .unwrap_or_else(keyspace::RangeKey::minimum),
             )
             .await
             .unwrap();

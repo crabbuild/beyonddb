@@ -4,13 +4,13 @@ use crate::{
     residency_fixture::{ACCOUNT, Fixture},
 };
 use aws_sdk_dynamodb::types::{AttributeValue as V, Put, TransactWriteItem};
-use bdb_cellar_runtime::{
-    client::{Invocation, InvocationTransport},
-    identity::CellTarget,
-};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{Invocation, InvocationTransport},
+    identity::CellTarget,
+};
 use http_body_util::Full;
 use std::{
     future::Future,

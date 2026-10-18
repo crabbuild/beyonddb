@@ -2,7 +2,7 @@
 //! Shares the real compiled gateway and Cellar host with the adapter test.
 
 use super::*;
-use bdb_keyspace::{
+use keyspace::{
     CellRange, Component as C, Directory, KeyKind, KeySchema, KeySpan, RangeKey, SortCondition,
 };
 use serde::{Deserialize, Serialize};
@@ -62,8 +62,8 @@ impl CellModule for RangeModule {
     }
 }
 
-fn invalid() -> bdb_cellar_runtime::Error {
-    bdb_cellar_runtime::Error::Command("invalid or stale range request")
+fn invalid() -> cellar_runtime::Error {
+    cellar_runtime::Error::Command("invalid or stale range request")
 }
 
 struct Install;

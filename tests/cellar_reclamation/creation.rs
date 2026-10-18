@@ -5,13 +5,13 @@ use crate::{
     table_helpers,
 };
 use aws_sdk_dynamodb::types::AttributeValue as V;
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar::bucket::Bucket;
+use cellar_runtime::{
     client::{Invocation, InvocationAdmission},
     identity::{CellTarget, NamespaceId},
     registry::{Command, Query},
 };
-use beyonddb::*;
-use cellar::bucket::Bucket;
 use std::{
     future::Future,
     pin::Pin,
@@ -38,7 +38,7 @@ impl InvocationAdmission for Admission {
     fn check<'a>(
         &'a self,
         invocation: &'a Invocation<'a>,
-    ) -> Pin<Box<dyn Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = cellar_runtime::Result<()>> + Send + 'a>> {
         Box::pin(async move {
             if self.deny_install.load(Ordering::SeqCst)
                 && invocation.target.namespace() == self.data
@@ -46,7 +46,7 @@ impl InvocationAdmission for Admission {
                 && invocation.operation == InstallPartition::ID
             {
                 self.refused.fetch_add(1, Ordering::SeqCst);
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "creation install withheld before SDK submission",
                 ));
             }
@@ -62,7 +62,7 @@ impl InvocationAdmission for Admission {
         })
     }
 }
-async fn record(client: &bdb_cellar_runtime::client::CellClient, name: &str) -> TableRecord {
+async fn record(client: &cellar_runtime::client::CellClient, name: &str) -> TableRecord {
     client
         .query::<DescribeTable>(&account_target(ACCOUNT).unwrap(), None, Json(name.into()))
         .await

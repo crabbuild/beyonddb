@@ -4,8 +4,8 @@ use crate::{
     table_helpers,
 };
 use aws_sdk_dynamodb::types::AttributeValue as V;
-use bdb_cellar_runtime::client::InvocationError;
 use beyonddb::*;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::types::{AttributeValue, DescribeTableInput, Item, TableKeyInfo, TableStatus};
 use extenddb_storage::{DataEngine, TableEngine, error::StorageError};
 
@@ -92,7 +92,7 @@ fn sdk_delete_fences_unpublished_directory_installers() {
                 .into_iter()
                 .map(|part| RoutePagePartition {
                     partition_id: part.partition_id,
-                    lower: part.lower.unwrap_or_else(bdb_keyspace::RangeKey::minimum),
+                    lower: part.lower.unwrap_or_else(keyspace::RangeKey::minimum),
                     upper: part.upper,
                     epoch: part.epoch,
                 })

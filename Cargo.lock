@@ -721,39 +721,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bdb-cellar-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bdb-keyspace",
- "blake3",
- "bytes",
- "cellar-main",
- "getrandom 0.3.4",
- "http 1.5.0",
- "http-body 1.1.0",
- "http-body-util",
- "reqwest",
- "serde",
- "serde_json",
- "sqlparser",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "bdb-keyspace"
-version = "0.1.0"
-dependencies = [
- "bigdecimal",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "beyonddb"
 version = "0.1.0"
 dependencies = [
@@ -764,12 +731,11 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-dynamodb",
  "axum",
- "bdb-cellar-runtime",
- "bdb-keyspace",
  "bigdecimal",
  "blake3",
  "bytes",
  "cellar-main",
+ "cellar-runtime",
  "ed25519-dalek",
  "extenddb-auth",
  "extenddb-core",
@@ -782,6 +748,7 @@ dependencies = [
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
+ "keyspace",
  "object_store",
  "prost",
  "reqwest",
@@ -1052,6 +1019,29 @@ dependencies = [
  "url",
  "urlpattern",
  "x25519-dalek",
+]
+
+[[package]]
+name = "cellar-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "bytes",
+ "cellar-main",
+ "getrandom 0.3.4",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "keyspace",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlparser",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2597,6 +2587,16 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "keyspace"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -1,11 +1,11 @@
 //! Publication must enforce multi-cell placement independently of the router.
 use super::*;
 use crate::test_support::{mutation, start, stop};
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
 };
+use keyspace::RangeKey;
 use std::sync::{Arc, atomic::AtomicI64};
 
 #[test]

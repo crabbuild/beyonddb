@@ -44,6 +44,37 @@ parallelism: 12 coalescing cases in 32.87 seconds and 24 transaction cases in
 30.09 seconds, zero failed/ignored. Strict workspace all-target Clippy,
 formatting and diff checks pass. Linux CI must validate this profile change.
 
+### Prepare publication amplification
+
+PR #17's Linux qualification still timed out in the two 32-transaction
+coalescing contracts after dependency optimization. The batching policy bounded
+encoded request bytes and accepted up to 16 prepares per publication, while
+each tiny two-item participant allocated about 8.5 MiB of physical apply
+reservations. A small request batch could therefore capture roughly 136 MiB
+of reservations under the unchanged 10-second SDK durability deadline.
+
+An observer now decodes actual outbound prepare commands in those existing
+signed SDK contracts. Before the fix it records a width of 16 and fails the
+new amplification assertion. The application batcher now forms batches of at
+most two prepares. The existing command still accepts its version-1 limit of
+16 inputs, preserving wire/replay compatibility. This increases publication
+counts for a burst while retaining sharing. Reservation sizes, request counts,
+SDK deadlines, mutation attempt rules and lost-reply/restart checks are intact.
+Qualification runs the coalescing target in a separate early step, preserving
+the full matrix without executing that target twice. Its independent multi-node
+fixtures run with `--test-threads=1` to isolate their physical stores on the
+small CI runner. Each fixture retains its concurrent clients, ownership limits,
+and unchanged durability deadlines; other native targets retain normal test
+parallelism. A parallel local run with the new cap passed both reported prepare
+contracts (49 commands each) but reproduced the deadline in the separate wide
+read fixture, so dependency optimization and batch bounding alone do not isolate
+that fixture's resource demand. A subsequent Linux Rust run reproduced the
+mixed-participant large-payload deadline while the transaction target still ran
+independent fixtures in parallel. Both CI workflows therefore isolate the
+`cellar_transactions` target too. The coalescing and transaction targets each
+run once per qualification workflow; remaining native targets retain normal
+parallelism.
+
 ### Local registry baseline at `9789f50`
 
 The latest complete native run passed **155 focused tests** across twenty-four
@@ -1065,7 +1096,7 @@ are recorded in the current registry section above.
 
 ## Current state
 
-The new `crates/bdb-cellar-runtime` crate implements compiled command/query
+The new `crates/cellar-runtime` crate implements compiled command/query
 registration, canonical logical targets, bounded codecs, typed parameterized
 SQL, per-cell command receipts and a Cellar application/gateway. Its client
 submits through `Node::start_external`'s `IngressHandle`, consumes the complete
@@ -1097,7 +1128,7 @@ qualify object-store durability, hard-kill recovery or a fleet.
 The serving source now uses ordered `(PK, SK)` ranges and requires multiple data
 cells for every table. The executable design and file map are in
 [ordered cell partitioning](docs/ordered-cell-partitioning.md).
-`crates/bdb-keyspace` implements encoding, query spans, validated multi-cell
+`crates/keyspace` implements encoding, query spans, validated multi-cell
 directories, split CAS and topology-independent resume. Its nine focused tests
 and clippy check pass. The three-cell SDK fixture also passes, including ordered
 reads, range/epoch rejection and restart. The root serving-router fixture also
@@ -1432,12 +1463,12 @@ export RUSTC_WRAPPER=
 export CARGO_BUILD_JOBS=4
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
-cargo fmt --manifest-path crates/bdb-keyspace/Cargo.toml -- --check
-cargo test --manifest-path crates/bdb-keyspace/Cargo.toml --locked
-cargo clippy --manifest-path crates/bdb-keyspace/Cargo.toml --all-targets --locked -- -D warnings
-cargo fmt --manifest-path crates/bdb-cellar-runtime/Cargo.toml -- --check
-cargo test --manifest-path crates/bdb-cellar-runtime/Cargo.toml --locked
-cargo clippy --manifest-path crates/bdb-cellar-runtime/Cargo.toml --all-targets --locked -- -D warnings
+cargo fmt --manifest-path crates/keyspace/Cargo.toml -- --check
+cargo test --manifest-path crates/keyspace/Cargo.toml --locked
+cargo clippy --manifest-path crates/keyspace/Cargo.toml --all-targets --locked -- -D warnings
+cargo fmt --manifest-path crates/cellar-runtime/Cargo.toml -- --check
+cargo test --manifest-path crates/cellar-runtime/Cargo.toml --locked
+cargo clippy --manifest-path crates/cellar-runtime/Cargo.toml --all-targets --locked -- -D warnings
 ```
 
 The preceding complete focused run passed 68 tests: nine adapter units, two embedded

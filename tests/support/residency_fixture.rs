@@ -1,9 +1,9 @@
 //! Domain contracts across native SDK owner replacement.
 use crate::native_peer::{self, Http, Inspection, Observations, Peer, PeerPolicy};
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::{app::CompiledApplication, client::CellClient};
 use beyonddb::*;
 use cellar::bucket::Bucket;
+use cellar_runtime::{app::CompiledApplication, client::CellClient};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -28,7 +28,7 @@ pub struct Fixture {
     pub client: CellClient,
     pub provisioner: Arc<CellInitialPartitionProvisioner>,
     pub sdk: aws_sdk_dynamodb::Client,
-    pub data: Vec<(bdb_cellar_runtime::identity::CellTarget, SdkItem)>,
+    pub data: Vec<(cellar_runtime::identity::CellTarget, SdkItem)>,
 }
 
 impl Fixture {
@@ -245,7 +245,7 @@ impl Fixture {
     #[allow(dead_code)] // Placement audits additional data and index scopes.
     pub async fn cell_identity(
         &self,
-        target: &bdb_cellar_runtime::identity::CellTarget,
+        target: &cellar_runtime::identity::CellTarget,
     ) -> cellar::sdk::CellIdentity {
         let name = format!("residency-owner-{}", self.generation);
         let identity = native_peer::identity(&self.observed, &name, target).unwrap();

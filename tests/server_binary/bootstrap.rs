@@ -50,8 +50,8 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .and_then(|description| description.table_arn())
         .unwrap();
     assert!(created.table_description().unwrap().table_id().is_some());
-    let schema = bdb_keyspace::KeySchema {
-        partition: bdb_keyspace::KeyKind::String,
+    let schema = keyspace::KeySchema {
+        partition: keyspace::KeyKind::String,
         sort: None,
     };
     let fences: Vec<_> = [64_u8, 128, 192]
@@ -59,7 +59,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .map(|n| {
             schema
                 .encode(
-                    bdb_keyspace::Component::String(&char::from(n).to_string()),
+                    keyspace::Component::String(&char::from(n).to_string()),
                     None,
                 )
                 .unwrap()
@@ -67,7 +67,7 @@ async fn bootstrap_sdk_write_survives_unclean_server_restart() {
         .collect();
     let range = |id: &str| {
         let key = schema
-            .encode(bdb_keyspace::Component::String(id), None)
+            .encode(keyspace::Component::String(id), None)
             .unwrap();
         fences.iter().take_while(|fence| &key >= *fence).count()
     };

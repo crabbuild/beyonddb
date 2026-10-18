@@ -1,10 +1,10 @@
 //! Native admission retains application fences; ordered keys permit SK splits.
 use crate::native_peer::{self, Peer, SOURCE};
-use bdb_cellar_runtime::identity::{ApplicationId, CellTarget, NamespaceId};
-use bdb_keyspace::{Component, KeyKind, KeySchema};
 use beyonddb::*;
+use cellar_runtime::identity::{ApplicationId, CellTarget, NamespaceId};
 use extenddb_core::types::{AttributeValue, Item, KeySchemaElement, KeyType};
 use extenddb_storage::error::StorageError;
+use keyspace::{Component, KeyKind, KeySchema};
 use std::sync::{Arc, Mutex};
 
 #[test]

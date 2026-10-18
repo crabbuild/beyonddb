@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use bdb_cellar_runtime::app::CellType;
-use bdb_cellar_runtime::descriptors::CatalogRole;
-use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId};
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::app::CellType;
+use cellar_runtime::descriptors::CatalogRole;
+use cellar_runtime::identity::{CellTarget, Digest, NamespaceId};
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, RegistryBuilder,
 };
@@ -104,7 +104,7 @@ const fn operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct CoordinatorModule;
 
-impl bdb_cellar_runtime::registry::CellModule for CoordinatorModule {
+impl cellar_runtime::registry::CellModule for CoordinatorModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {

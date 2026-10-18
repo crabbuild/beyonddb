@@ -10,7 +10,12 @@ use std::{
 };
 
 use anyhow::Context as _;
-use bdb_cellar_runtime::{
+use cellar::sdk::{
+    ActorIdentity, ActorOptions, ActorPolicy, CellLimits, ExternalNodeServices, Node, NodeConfig,
+    NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner, ShutdownMode,
+    primitives::sql::Value as SqlValue,
+};
+use cellar_runtime::{
     Result,
     client::{CellClient, InvocationError, MutationIdentity},
     descriptors::*,
@@ -20,11 +25,6 @@ use bdb_cellar_runtime::{
         RegistryBuilder,
     },
     sql::{SqlBatch, SqlStatement},
-};
-use cellar::sdk::{
-    ActorIdentity, ActorOptions, ActorPolicy, CellLimits, ExternalNodeServices, Node, NodeConfig,
-    NodeOutcome, OwnershipOnEvict, PeerAuth, PeerProbeSigner, ShutdownMode,
-    primitives::sql::Value as SqlValue,
 };
 
 const MODULE: &str = "BdbTest";
@@ -148,9 +148,7 @@ impl Command for Fail {
         input: Vec<u8>,
     ) -> Result<CommandResult<Vec<u8>>> {
         put(context, &input)?;
-        Err(bdb_cellar_runtime::Error::Command(
-            "deliberate command failure",
-        ))
+        Err(cellar_runtime::Error::Command("deliberate command failure"))
     }
 }
 
@@ -171,7 +169,7 @@ impl Query for Read {
         };
         match row.as_slice() {
             [SqlValue::Blob(value), SqlValue::Integer(i64::MAX)] => Ok(Some(value.clone())),
-            _ => Err(bdb_cellar_runtime::Error::Command(
+            _ => Err(cellar_runtime::Error::Command(
                 "SQL value lost type or precision",
             )),
         }

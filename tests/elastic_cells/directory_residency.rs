@@ -3,8 +3,8 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application, mutation, ranges},
 };
-use bdb_cellar_runtime::client::InvocationError;
 use beyonddb::*;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item},

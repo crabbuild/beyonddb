@@ -4,9 +4,9 @@ use crate::{
     native_peer::{self, Http, Inspection, Peer, PeerPolicy},
     pinned_actor,
 };
-use bdb_cellar_runtime::identity::CellTarget;
 use beyonddb::*;
 use cellar::bucket::Bucket;
+use cellar_runtime::identity::CellTarget;
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
     time::Duration,
@@ -29,7 +29,7 @@ fn pending() -> Json<ReadPendingCrossCellTransactionsInput> {
         limit: 1,
     })
 }
-async fn registered(client: &bdb_cellar_runtime::client::CellClient, target: &CellTarget) {
+async fn registered(client: &cellar_runtime::client::CellClient, target: &CellTarget) {
     assert!(
         client
             .query::<ReadCoordinatorRegistration>(

@@ -3,8 +3,8 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application},
 };
-use bdb_cellar_runtime::client::CellClient;
 use beyonddb::*;
+use cellar_runtime::client::CellClient;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item, TableStatus},
@@ -232,7 +232,7 @@ fn create_table_retries_two_data_cells_before_reporting_active() {
                 route.lower,
                 part.lower
                     .clone()
-                    .unwrap_or_else(bdb_keyspace::RangeKey::minimum)
+                    .unwrap_or_else(keyspace::RangeKey::minimum)
             );
             assert_eq!(route.upper, part.upper);
             assert_eq!(route.epoch, part.epoch);

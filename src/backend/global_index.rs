@@ -1,10 +1,10 @@
 //! Replay durable base changes into independently owned index ranges.
 
-use bdb_cellar_runtime::client::InvocationError;
-use bdb_cellar_runtime::identity::CellTarget;
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::InvocationError;
+use cellar_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, extract_key};
 use extenddb_storage::error::StorageError;
+use keyspace::RangeKey;
 
 use super::{CellStorage, cell_error, mutation_identity, target};
 use crate::global_index::outbox::{IndexChange, IndexChangeDelivery};

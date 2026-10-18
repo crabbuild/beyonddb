@@ -64,10 +64,7 @@ fn sdk_cell_models_select_and_restore_multiple_ordered_cells() {
                     .len(),
                 4
             );
-            assert_eq!(
-                plan.first().unwrap().lower,
-                bdb_keyspace::RangeKey::minimum()
-            );
+            assert_eq!(plan.first().unwrap().lower, keyspace::RangeKey::minimum());
             assert!(plan.last().unwrap().upper.is_none());
             for pair in plan.windows(2) {
                 assert_eq!(pair[0].upper, Some(pair[1].lower.clone()));
@@ -87,7 +84,7 @@ fn sdk_cell_models_select_and_restore_multiple_ordered_cells() {
                 assert_eq!(state.spec.partition_id, range.partition_id);
                 assert_eq!(
                     state.spec.lower,
-                    (range.lower != bdb_keyspace::RangeKey::minimum()).then(|| range.lower.clone())
+                    (range.lower != keyspace::RangeKey::minimum()).then(|| range.lower.clone())
                 );
                 assert_eq!(state.spec.upper, range.upper);
                 let identity = fixture.cell_identity(&target).await;

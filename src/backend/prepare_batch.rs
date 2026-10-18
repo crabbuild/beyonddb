@@ -7,14 +7,14 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use bdb_cellar_runtime::client::{CellClient, Committed, InvocationError, Receipt};
-use bdb_cellar_runtime::identity::{CellTarget, RequestId};
+use cellar_runtime::client::{CellClient, Committed, InvocationError, Receipt};
+use cellar_runtime::identity::{CellTarget, RequestId};
 use extenddb_storage::error::StorageError;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
 use super::transaction_transport::PhaseError;
 use super::{cell_error, mutation_identity};
-use crate::partition::{MAX_PREPARES, PREPARE_BATCH_BYTES};
+use crate::partition::PREPARE_BATCH_BYTES;
 use crate::{
     Json, ParticipantTransactionState, PreparePartitionBatchOutcome, PreparePartitionTransaction,
     PreparePartitionTransactionBatch, PreparePartitionTransactionBounded,
@@ -24,6 +24,12 @@ use crate::{
 
 type Prepared = Result<(PrepareTransactionOutcome, Receipt), PhaseError>;
 const WINDOW: Duration = Duration::from_millis(2);
+// Request bytes do not bound the physical WAL work: even a tiny two-item
+// participant reserves about 8.5 MiB for its later apply. Sixteen such prepares
+// in one publication can exhaust the SDK durability deadline on a small node.
+// Retain sharing, but cap the amplification of each newly formed publication.
+// The command's existing 16-input wire limit and replay semantics stay intact.
+const COALESCED_PREPARES: usize = 2;
 
 struct Pending {
     input: PreparePartitionTransactionInput,
@@ -111,7 +117,7 @@ impl PrepareBatcher {
 
     async fn flush(self: Arc<Self>, slot: Arc<Slot>) {
         loop {
-            if slot.queued.lock().await.len() < MAX_PREPARES {
+            if slot.queued.lock().await.len() < COALESCED_PREPARES {
                 tokio::time::sleep(WINDOW).await;
             }
             let pending = {
@@ -123,7 +129,7 @@ impl PrepareBatcher {
                 }
                 let mut selected = Vec::new();
                 let mut bytes = 2;
-                while selected.len() < MAX_PREPARES {
+                while selected.len() < COALESCED_PREPARES {
                     let Some(candidate) = queue.front() else {
                         break;
                     };
@@ -188,7 +194,7 @@ impl PrepareBatcher {
                         let _ = pending.reply.send(result);
                     }
                 }
-                Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(reason))) => {
+                Err(InvocationError::NotStarted(cellar_runtime::Error::Capacity(reason))) => {
                     // The complete batch is proven not to have started. Its
                     // combined capture/resolution reservation may exceed the
                     // budget even when each participant fits independently.
@@ -236,7 +242,7 @@ impl PrepareBatcher {
             if committed.output.0 == PrepareTransactionOutcome::WideRequired)
         {
             // Different command digests require different mutation identities.
-            let identity = bdb_cellar_runtime::MutationIdentity {
+            let identity = cellar_runtime::MutationIdentity {
                 request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
                 ..identity
             };

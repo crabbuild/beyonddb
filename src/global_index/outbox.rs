@@ -1,6 +1,6 @@
 //! A base mutation and its index work publish through the same Cell command.
 
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, OperationDescriptor, Query, QueryContext,
 };
 use extenddb_core::types::Item;

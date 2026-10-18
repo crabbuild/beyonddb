@@ -1,6 +1,6 @@
 //! Durable data Cell participant intents for cross-Cell transactions.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::super::{

@@ -93,21 +93,20 @@ pub async fn items(fixture: &Fixture) {
 
 // Completed split replay must not issue ingress against historical sources.
 pub struct ForbidSources {
-    pub targets: Vec<bdb_cellar_runtime::identity::CellTarget>,
+    pub targets: Vec<cellar_runtime::identity::CellTarget>,
     pub refused: std::sync::atomic::AtomicUsize,
 }
-impl bdb_cellar_runtime::client::InvocationAdmission for ForbidSources {
+impl cellar_runtime::client::InvocationAdmission for ForbidSources {
     fn check<'a>(
         &'a self,
-        invocation: &'a bdb_cellar_runtime::client::Invocation<'a>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = bdb_cellar_runtime::Result<()>> + Send + 'a>,
-    > {
+        invocation: &'a cellar_runtime::client::Invocation<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = cellar_runtime::Result<()>> + Send + 'a>>
+    {
         Box::pin(async move {
             if self.targets.contains(&invocation.target) {
                 self.refused
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                return Err(bdb_cellar_runtime::Error::Capacity(
+                return Err(cellar_runtime::Error::Capacity(
                     "historical source ingress forbidden",
                 ));
             }

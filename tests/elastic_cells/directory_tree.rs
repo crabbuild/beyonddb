@@ -3,8 +3,8 @@ use crate::{
     directory_fault::BlockedDirectory,
     directory_fixture::{ACCOUNT, application, mutation, ranges},
 };
-use bdb_cellar_runtime::client::InvocationError;
 use beyonddb::*;
+use cellar_runtime::client::InvocationError;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -100,7 +100,7 @@ async fn interrupted_split(
             None,
             Json(DirectoryPageInput {
                 reverse: false,
-                hash: bdb_keyspace::RangeKey::minimum(),
+                hash: keyspace::RangeKey::minimum(),
                 expected_version: Some(1),
             }),
         )
@@ -253,7 +253,7 @@ async fn interrupted_split(
                 None,
                 Json(DirectoryPageInput {
                     reverse: false,
-                    hash: bdb_keyspace::RangeKey::minimum(),
+                    hash: keyspace::RangeKey::minimum(),
                     expected_version: Some(1)
                 })
             )
@@ -455,7 +455,7 @@ async fn interrupted_split(
                 None,
                 Json(DirectoryPageInput {
                     reverse: false,
-                    hash: bdb_keyspace::RangeKey::minimum(),
+                    hash: keyspace::RangeKey::minimum(),
                     expected_version: None,
                 })
             )
@@ -672,7 +672,7 @@ fn change(source: &RoutePagePartition, id: u128) -> DirectoryChange {
         .find_map(|suffix| {
             let mut bytes = source.lower.to_vec();
             bytes.push(suffix);
-            let key = bdb_keyspace::RangeKey::new(bytes).unwrap();
+            let key = keyspace::RangeKey::new(bytes).unwrap();
             (key > source.lower && source.upper.as_ref().is_none_or(|upper| &key < upper))
                 .then_some(key)
         })

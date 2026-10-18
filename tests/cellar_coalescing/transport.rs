@@ -1,6 +1,6 @@
-use bdb_cellar_runtime::client::{Invocation, InvocationTransport};
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::client::{Invocation, InvocationTransport};
 use http_body_util::{BodyExt, Full};
 use std::{
     future::Future,
@@ -16,7 +16,8 @@ pub struct Observe {
     pub queries: Arc<AtomicU64>,
     pub drop_batch: bool,
     pub dropped: Arc<AtomicBool>,
-    pub data_namespace: bdb_cellar_runtime::identity::NamespaceId,
+    pub data_namespace: cellar_runtime::identity::NamespaceId,
+    pub batch_width: Arc<AtomicU64>,
 }
 impl InvocationTransport for Observe {
     fn call<'a>(
@@ -25,14 +26,22 @@ impl InvocationTransport for Observe {
         request: http::Request<Full<Bytes>>,
     ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
         Box::pin(async move {
-            let response = self.inner.call(invocation, request).await;
             let coordinator = beyonddb::coordinator_target("123456789012", b"namespace").unwrap();
             let query = invocation.target.namespace() == coordinator.namespace()
                 && invocation.mutation.is_none();
             let batch = invocation.target.namespace() == self.data_namespace
                 && invocation.mutation.is_some()
                 && invocation.operation
-                    == <beyonddb::PreparePartitionTransactionBatch as bdb_cellar_runtime::registry::Command>::ID;
+                    == <beyonddb::PreparePartitionTransactionBatch as cellar_runtime::registry::Command>::ID;
+            if batch {
+                let input = cellar_runtime::codec::decode_wire::<
+                    beyonddb::Json<Vec<beyonddb::PreparePartitionTransactionInput>>,
+                >(invocation.input, 32 * 1024)
+                .unwrap();
+                self.batch_width
+                    .fetch_max(input.0.len() as u64, Ordering::SeqCst);
+            }
+            let response = self.inner.call(invocation, request).await;
             if response.status().is_success() && (query || (self.drop_batch && batch)) {
                 let (parts, body) = response.into_parts();
                 // Observe or lose the reply only after the real SDK gate proves

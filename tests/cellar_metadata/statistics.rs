@@ -4,16 +4,16 @@ use aws_sdk_dynamodb::types::{
     AttributeDefinition, BillingMode, GlobalSecondaryIndex, KeySchemaElement, KeyType,
     LocalSecondaryIndex, Projection, ProjectionType, ScalarAttributeType,
 };
-use bdb_cellar_runtime::{
-    client::{CellClient, Invocation, InvocationTransport},
-    identity::CellTarget,
-};
-use bdb_keyspace::RangeKey;
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{CellClient, Invocation, InvocationTransport},
+    identity::CellTarget,
+};
 use extenddb_storage::MetadataEngine;
 use http_body_util::Full;
+use keyspace::RangeKey;
 use std::{
     collections::HashMap,
     future::Future,

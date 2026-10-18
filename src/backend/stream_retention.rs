@@ -1,6 +1,6 @@
 //! Stream retention orchestration over local owners and tenant catalogs.
 
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 
 use super::{CellStorage, cell_error, mutation_identity, target};

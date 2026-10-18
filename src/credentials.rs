@@ -4,11 +4,11 @@ use std::{sync::OnceLock, time::Duration};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use bdb_cellar_runtime::app::CellType;
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_cellar_runtime::descriptors::CatalogRole;
-use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use bdb_cellar_runtime::registry::{
+use cellar_runtime::app::CellType;
+use cellar_runtime::client::{CellClient, InvocationError};
+use cellar_runtime::descriptors::CatalogRole;
+use cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -53,7 +53,7 @@ const fn operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct CredentialModule;
 
-impl bdb_cellar_runtime::registry::CellModule for CredentialModule {
+impl cellar_runtime::registry::CellModule for CredentialModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {

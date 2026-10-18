@@ -3,7 +3,7 @@
 
 use crate::backend::{cell_error, mutation_identity};
 use crate::{Error, Json, Result, SqlValue, table::statement};
-use bdb_cellar_runtime::{
+use cellar_runtime::{
     app::CellType,
     client::CellClient,
     descriptors::CatalogRole,
@@ -22,8 +22,8 @@ const NS: NamespaceId = NamespaceId::from_bytes([0x48; 16]);
 pub(crate) const SHARDS: u32 = 256;
 const SCHEMA: &str =
     "CREATE TABLE bdb_managed_cells (cell BLOB PRIMARY KEY, record BLOB NOT NULL) WITHOUT ROWID;";
-static COMMANDS: [bdb_cellar_runtime::registry::OperationDescriptor; 1] = [crate::operation(1)];
-static QUERIES: [bdb_cellar_runtime::registry::OperationDescriptor; 2] =
+static COMMANDS: [cellar_runtime::registry::OperationDescriptor; 1] = [crate::operation(1)];
+static QUERIES: [cellar_runtime::registry::OperationDescriptor; 2] =
     [crate::operation(1), crate::operation(2)];
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: NS,

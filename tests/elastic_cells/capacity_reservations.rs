@@ -4,12 +4,12 @@ use crate::{
     native_peer::{self, FRONT, Inspection, Peer, SOURCE},
     transaction_fixture,
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     MutationIdentity,
     client::{CellClient, Committed, InvocationError},
     identity::{CellTarget, RequestId},
 };
-use beyonddb::*;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item},

@@ -2,8 +2,8 @@ use crate::{
     native_peer::{self, FRONT, Inspection, Peer, PeerPolicy, SOURCE},
     transaction_fixture,
 };
-use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use beyonddb::*;
+use cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item},

@@ -149,9 +149,8 @@ impl CellStorage {
             }
             let mut next = None;
             for range in ranges {
-                let owned =
-                    bdb_keyspace::KeySpan::new(Some(range.lower.clone()), range.upper.clone())
-                        .map_err(|_| StorageError::Internal("invalid directory range".into()))?;
+                let owned = keyspace::KeySpan::new(Some(range.lower.clone()), range.upper.clone())
+                    .map_err(|_| StorageError::Internal("invalid directory range".into()))?;
                 if owned.intersection(&span).is_none() {
                     return Ok((items, None));
                 }

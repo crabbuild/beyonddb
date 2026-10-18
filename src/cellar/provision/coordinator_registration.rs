@@ -6,8 +6,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use bdb_cellar_runtime::client::CellClient;
-use bdb_cellar_runtime::identity::{CellId, CellTarget};
+use cellar_runtime::client::CellClient;
+use cellar_runtime::identity::{CellId, CellTarget};
 use extenddb_storage::error::StorageError;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 

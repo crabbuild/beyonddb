@@ -1,7 +1,7 @@
 use crate::residency_fixture::{Fixture, runtimes};
 use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
-use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use beyonddb::*;
+use cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
 use extenddb_core::expression::{CompareOp, Expr, ExpressionMaps, PathElement, UpdateAction};
 use extenddb_core::types::{AttributeValue, Item};
 use extenddb_storage::StreamEngine;

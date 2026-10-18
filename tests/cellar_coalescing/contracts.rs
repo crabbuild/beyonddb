@@ -30,7 +30,8 @@ async fn instrument(
     queries: Arc<AtomicU64>,
     drop_batch: bool,
     dropped: Arc<AtomicBool>,
-) {
+) -> Arc<AtomicU64> {
+    let batch_width = Arc::new(AtomicU64::new(0));
     let data_namespace = fixture.data[0].0.namespace();
     let client = fixture.client.map_transport(|inner| {
         Arc::new(transport::Observe {
@@ -39,9 +40,11 @@ async fn instrument(
             drop_batch,
             dropped,
             data_namespace,
+            batch_width: batch_width.clone(),
         })
     });
     fixture.use_client(client).await;
+    batch_width
 }
 async fn sequence(fixture: &Fixture) -> u64 {
     fixture
@@ -179,7 +182,7 @@ async fn transaction_prepares(
     let mut fixture = Fixture::with_coordinators(host, core, 1, 128, 8, &tokens).await;
     let queries = Arc::new(AtomicU64::new(0));
     let dropped = Arc::new(AtomicBool::new(false));
-    instrument(&mut fixture, queries, drop_reply, dropped.clone()).await;
+    let batch_width = instrument(&mut fixture, queries, drop_reply, dropped.clone()).await;
     let mut sdk = fixture.sdk.clone();
     sdk.get_item()
         .table_name("Residency")
@@ -226,6 +229,15 @@ async fn transaction_prepares(
     }
     let count = sequence(&fixture).await - before;
     eprintln!("32 signed transaction writes used {count} durable data commands");
+    let width = batch_width.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        width >= 2,
+        "the workload must exercise actual prepare batching"
+    );
+    assert!(
+        width <= 2,
+        "prepare publication aggregated {width} physical reservations; limit the amplification"
+    );
     fixture.replace().await;
     sdk = fixture.sdk.clone();
     for index in 0..32 {

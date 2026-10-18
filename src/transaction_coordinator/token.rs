@@ -1,6 +1,6 @@
 //! Token lookup before routing a repeated transaction request.
 
-use bdb_cellar_runtime::registry::{Query, QueryContext};
+use cellar_runtime::registry::{Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::{CoordinatorDecision, MODULE, TOKEN_LIFETIME_MS, coordinator_target, read_decision};

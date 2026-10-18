@@ -1,11 +1,11 @@
 use crate::{local_node, transaction_fixture};
-use bdb_cellar_runtime::{
-    client::{Invocation, InvocationTransport},
-    identity::NamespaceId,
-};
 use beyonddb::*;
 use bytes::Bytes;
 use cellar::sdk::IngressResponse;
+use cellar_runtime::{
+    client::{Invocation, InvocationTransport},
+    identity::NamespaceId,
+};
 use http_body_util::Full;
 use std::{
     future::Future,

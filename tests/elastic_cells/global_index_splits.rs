@@ -3,12 +3,12 @@ use crate::{
     native_peer::{self, Inspection, Observations, Peer, SOURCE},
     signed_http::SignedHttp,
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     app::CompiledApplication,
     client::{CellClient, InvocationError},
     identity::CellTarget,
 };
-use beyonddb::*;
 use extenddb_core::types::{AttributeValue, Item};
 use extenddb_storage::TableEngine;
 use std::{

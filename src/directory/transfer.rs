@@ -3,8 +3,8 @@
 use crate::table::statement;
 use crate::{Error, Json, Result, RoutePagePartition, SqlBatch, SqlResultSet, SqlValue};
 use crate::{GlobalIndexPartitionSpec, GlobalIndexSplitPlan, PartitionSpec, SplitPlan};
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 /// Address a range participant within the directory leaf selected by its logical bound.

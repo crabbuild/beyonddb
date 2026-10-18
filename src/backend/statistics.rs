@@ -1,10 +1,10 @@
 //! Bounded sampling and publication of table and index statistics.
 
-use bdb_keyspace::RangeKey;
+use keyspace::RangeKey;
 use std::{collections::VecDeque, time::Duration};
 
 use crate::server::TaskGroup;
-use bdb_cellar_runtime::client::InvocationError;
+use cellar_runtime::client::InvocationError;
 use extenddb_core::types::{TableDescription, TableStatus};
 use extenddb_storage::error::StorageError;
 

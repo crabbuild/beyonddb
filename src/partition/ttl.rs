@@ -1,7 +1,7 @@
 //! Indexed expiry candidates and resumable TTL backfill within one data Cell.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
-use bdb_cellar_runtime::sql::SqlResultSet;
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use cellar_runtime::sql::SqlResultSet;
 use extenddb_core::types::{AttributeValue, Item};
 use serde::{Deserialize, Serialize};
 

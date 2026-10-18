@@ -1,6 +1,6 @@
 //! Routing a published table across independently owned data Cells.
 
-use bdb_cellar_runtime::identity::CellTarget;
+use cellar_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo, extract_key, item_size_bytes};
 use extenddb_storage::error::StorageError;
 

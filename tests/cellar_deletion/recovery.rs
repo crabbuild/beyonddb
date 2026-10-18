@@ -4,8 +4,8 @@ use crate::{
     table_helpers,
 };
 use aws_sdk_dynamodb::types::{AttributeValue as V, TableStatus};
-use bdb_cellar_runtime::client::InvocationError;
 use beyonddb::*;
+use cellar_runtime::client::InvocationError;
 use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,

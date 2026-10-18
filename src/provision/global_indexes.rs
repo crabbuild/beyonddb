@@ -1,8 +1,8 @@
 //! Recoverable index range transfer and directory cutover through routed Cells.
 
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::{BoxedFuture, error::StorageError};
+use keyspace::RangeKey;
 
 use super::{CellInitialPartitionProvisioner, provision_error};
 use crate::backend::{cell_error, mutation_identity};
@@ -20,7 +20,7 @@ fn changed() -> StorageError {
 }
 
 fn committed(
-    result: Result<bdb_cellar_runtime::client::Committed<Json<bool>>, InvocationError<Json<bool>>>,
+    result: Result<cellar_runtime::client::Committed<Json<bool>>, InvocationError<Json<bool>>>,
 ) -> Result<(), StorageError> {
     match result {
         Ok(result) if result.output.0 => Ok(()),

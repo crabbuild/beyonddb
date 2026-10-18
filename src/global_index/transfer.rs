@@ -1,8 +1,8 @@
 //! Fenced transfer of projection versions, images, and deletion tombstones.
 
-use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
+use keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 use super::{

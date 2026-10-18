@@ -3,17 +3,17 @@ use crate::{
     cellar_node,
     directory_fixture::{ACCOUNT, application, mutation, ranges},
 };
-use bdb_cellar_runtime::{
+use beyonddb::*;
+use cellar_runtime::{
     client::{CellClient, InvocationError},
     identity::CellTarget,
 };
-use bdb_keyspace::{Component, KeyKind, KeySchema, RangeKey};
-use beyonddb::*;
 use extenddb_core::{
     expression::ExpressionMaps,
     types::{AttributeValue, Item, StreamEventName, TableStatus},
 };
 use extenddb_storage::{DataEngine, MetadataEngine, TableEngine, error::StorageError};
+use keyspace::{Component, KeyKind, KeySchema, RangeKey};
 use std::sync::Arc;
 
 fn input(name: &str) -> extenddb_core::types::CreateTableInput {

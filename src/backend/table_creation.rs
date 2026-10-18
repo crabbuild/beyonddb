@@ -1,8 +1,8 @@
 //! Complete cataloged table creation through the same request and recovery path.
 
-use bdb_cellar_runtime::client::{CellClient, InvocationError};
-use bdb_keyspace::RangeKey;
+use cellar_runtime::client::{CellClient, InvocationError};
 use extenddb_storage::error::StorageError;
+use keyspace::RangeKey;
 
 use super::{InitialPartitionProvisioner, cell_error, mutation_identity};
 use crate::{
