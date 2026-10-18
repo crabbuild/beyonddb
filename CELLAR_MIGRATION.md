@@ -40,10 +40,20 @@ uses CI's `--ignored --test-threads=1 --nocapture` flags. The server fingerprint
 stayed unchanged throughout that run. Earlier process results below belong to
 their recorded older builds.
 
-The required all-target gate remains red in retained legacy `elastic_cells`
-(27 errors) and `peer_network` (128 errors). Qualification remains incomplete;
-both gates stay enabled. The historical sections below retain the evidence and
-policy adaptations at their respective checkpoints.
+At the user's request on 2026-10-18, the unported `elastic_cells` and
+`peer_network` targets, their exclusive fixture files and their CI invocations
+were removed. General all-target build and strict Clippy checks remain enabled
+and now pass. The complete surviving test build also passes. Cargo metadata
+confirms that only those two targets were removed.
+
+All 24 retained native executables match the SHA-256 values from the 155-test
+run; the process executable and server match the nine-case process run. This
+cleanup changes no production code or retained test behavior. Retired coverage,
+including the physical SQLite FULL fault, is explicitly unqualified; its source
+revision and test inventory are recorded in
+[retired Cellule tests](docs/retired-cellule-tests.md). The historical sections
+below retain evidence and policy adaptations at their respective checkpoints;
+earlier statements about red legacy gates describe those older checkpoints.
 
 ### Earlier registry baseline
 
@@ -1345,6 +1355,10 @@ replica-read-policy override.
 
 ## Remaining implementation
 
+This list retains the broader qualification backlog. The user's 2026-10-18
+request retires the unported test targets listed in the coverage inventory;
+restoring those tests is future work, not a current CI gate.
+
 1. The adapter runs the root domain suite and signed SDK fixture. Reservations
    use bounded physical BLOB chunks; large-image writes verify RETURNING rowid,
    and rows_affected uses SQLite changes() rather than trigger-inclusive billing.
@@ -1373,19 +1387,17 @@ replica-read-policy override.
 7. Update contributor guidance, startup configuration, CI and operational docs
    to describe the actual Cellar server and its qualified capability boundary.
 
-The remaining `elastic_cells` setup contains the forced SQLite-full
-upload case. Its large data-range fixture now executes through native Cellar.
-The three reservation contracts moved to `cellar_capacity`; the physical-failure
-case still needs a native equivalent.
-GSI backfill/transfer, multipart upload replacement and native shutdown now run
-in the selected native targets. Ported contracts execute once through their
-focused native targets. `peer_network` retains its separate physical and
-residency fixtures. Passing the selected native
-targets does not complete either aggregate suite.
+The selected native targets retain GSI backfill/transfer, multipart upload
+replacement, reservation, shutdown, transaction and ordered range contracts.
+Unported Cellule-only suites were removed at the user's request; they are not
+claimed as passing native coverage. Their source remains available at the
+revision recorded in [the retirement inventory](docs/retired-cellule-tests.md).
+The physical SQLite FULL contract and the other retired fault cases can be
+ported individually when restoring that coverage.
 
-The new executable configuration and lifecycle are described in
-[the Cellar server guide](docs/cellar-server.md). Legacy all-target fixtures are
-not disabled; their remaining Cellule setup must be replaced with SDK fixtures.
+The executable configuration and lifecycle are described in
+[the Cellar server guide](docs/cellar-server.md). CI retains general all-target
+build and strict Clippy checks, the native Cellar suite and the process suites.
 
 ## Checks
 
@@ -1447,13 +1459,12 @@ Run the separate bucket-backed process target explicitly:
 cargo test --test cellar_process --locked -- --ignored --nocapture --test-threads=1
 ```
 
-The full legacy all-target suite still needs its Cellule host fixtures ported.
-These results do not establish fleet capacity or complete DynamoDB compatibility.
-The 2026-10-18 `cargo clippy --workspace --all-targets --locked -- -D warnings`
-run exits 101 in legacy Cellule fixtures. Unported fixture roots are
-`elastic_cells` and `peer_network`;
-they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 27 errors in `elastic_cells` and
-128 in `peer_network`; the ported `node_log_authority` target is clean.
-The selected Cellar targets above pass. No CI checks or legacy fixtures have
-been disabled to hide this failure.
+The 2026-10-18 cleanup removes the two unported Cellule test targets at the
+user's request. `cargo check --workspace --all-targets --locked`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+`cargo test --workspace --all-targets --locked --no-run` all pass. Formatting
+and diff checks also pass. Retained native/process executable hashes match
+the successful runs recorded above, so those tests were preserved unchanged.
+
+Removed coverage is listed in [the retirement inventory](docs/retired-cellule-tests.md).
+These results do not establish fleet capacity or full DynamoDB compatibility.

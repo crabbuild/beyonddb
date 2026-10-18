@@ -60,10 +60,7 @@ jobs:
             --test embedded --test ranges \
             -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-peer.log" || result=$?
-          RUST_MIN_STACK=16777216 cargo test --locked --test elastic_cells \
-            -- --include-ignored --test-threads=1 --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/native.log" || result=$?
-          cargo test --locked --no-fail-fast --test peer_network --test server_binary \
+          cargo test --locked --test server_binary \
             -- --include-ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/sdk.log" || result=$?
           exit "$result"

@@ -362,8 +362,9 @@ in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. The caller/provider faults qualify their stated local contracts;
 they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the
-specific follower recovery evidence described above. Port the remaining legacy
-application fixtures and finish the ordered API/index and fault matrices before
-claiming the requested migration complete. Existing CI's all-target checks must
-remain enabled; incompatible legacy fixtures are work to port, not tests to
-silence.
+specific follower recovery evidence described above. The two unported Cellule
+test targets were removed at the user's request. All-target build and strict
+Clippy gates remain enabled and pass; native and process coverage is retained.
+The removed contracts remain unqualified and are listed with their source
+revision in [the retirement inventory](retired-cellule-tests.md). Further API,
+index and fleet fault qualification remains separate from this SDK migration.

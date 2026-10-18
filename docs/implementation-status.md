@@ -666,8 +666,8 @@ The cases below describe focused evidence, not blanket API support. The [API mat
 | Fixture | Evidence it supplies | Important limit |
 | --- | --- | --- |
 | `tests/account_cell.rs` | Account Cell commands, rollback, replay, and restoration from a published root | Local fixture behavior does not prove the public protocol. |
-| `tests/elastic_cells.rs` | Routed data Cells, splits, transactions, indexes, and owner recovery | Focused ranges and failures do not establish fleet-scale behavior. |
-| `tests/peer_network.rs` | Authenticated two-node transport, signed requests, and fenced replacement | A two-node fixture does not establish unattended fleet recovery. |
+| Native `cellar_transactions`, `cellar_directories`, `cellar_indexes` and `cellar_serving` targets | Ordered cells, transactions, splits, indexes and owner restoration | Focused ranges and failures do not establish fleet-scale behavior. |
+| `tests/cellar_peer.rs` | SDK peer transport, signed requests, stale-owner recovery and fenced replacement | A small peer fixture does not establish unattended fleet recovery. |
 | `tests/server_binary.rs` | Signed SDK/CLI requests through a running process and hard-restart checks | Process tests are ignored by ordinary `cargo test`. |
 | `scripts/qualify-upstream.py` | Unchanged ExtendDB Python client tests against a compiled BeyondDB server | Passing selected files does not prove the whole protocol suite. |
 
@@ -725,6 +725,12 @@ query index extend unreleased initial SQL schemas; upgrading roots written by
 earlier binaries is unqualified.
 
 ### Native Cell and signed SDK fixtures
+
+The descriptions below retain historical Cellule fixture details. The unported
+`elastic_cells` and `peer_network` targets were removed on 2026-10-18 at the
+user's request; [their source and coverage inventory](retired-cellule-tests.md)
+records what is no longer gated. Current native Cellar results are recorded in
+[the migration report](../CELLAR_MIGRATION.md).
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,
