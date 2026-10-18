@@ -24,7 +24,7 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 93 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+The complete focused run at `7a7b5d5` passed 93 tests on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
 nine directory cases, two domain cases, six index cases, two native peer
 cases, one signed local SDK case, 24 transaction cases and eight native
@@ -36,8 +36,8 @@ Strict Clippy passes for workspace libraries/binaries and all selected migrated
 integration/process targets. Production build `11432e7`, including the frontend
 read policy and idle-index worker fix, passed all nine explicitly executed
 RustFS process cases in 464.15 seconds, with zero failures or ignored cases.
-The subsequent backfill/transfer and multipart-upload ports change only tests
-and documentation; the server executable still matches that process build's
+The subsequent backfill/transfer, multipart-upload and shutdown ports change
+only tests and documentation; the server executable still matches that process build's
 SHA-256.
 They cover the broad signed
 SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards
@@ -85,7 +85,7 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in two retained legacy roots: 60 errors in
+All-target Clippy still exits 101 in two retained legacy roots: 56 errors in
 `elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
@@ -218,6 +218,42 @@ absent, and ordinary writes to those keys succeed. The coordinator retains
 ABORT with both participants resolved; actual SDK scopes/epochs prove
 replacement of all three cells. Signed AWS reads with retries disabled verify
 that the later ordinary rows contain no aborted payload.
+
+### Native shutdown and same-node recovery
+
+Four `node_sessions` cases now run with the eight native lease/log cases in
+`tests/node_log_authority.rs`. They replace Cellule's application-owned
+session retirement and facility hooks with observed SDK shutdown proofs:
+
+- A complete Preserve stop seals the folded log and writes a certificate for
+  its exact node/generation. The same directory restarts with a new generation
+  before the former lease expires, and signed consistent reads retain rows in
+  both independently installed ordered data ranges.
+- A real signed write stays pending while its native follower is unavailable
+  and both bucket payload paths are withheld. A three-second shutdown budget
+  reports incomplete drain, emits no clean certificate and closes ingress.
+  The write remains ambiguous. Ordinary expiry/recovery retains acknowledged
+  rows and allows a later write to the same key.
+- An accepted native heartbeat CAS remains pending in a provider-owned SDK
+  execution domain after the old node closes. Releasing the exact captured
+  payload/options produces a real committed renewal, but the stop did not
+  claim a clean reload. The stopped node does not resume publishing; expiry
+  and same-node recovery retain the acknowledged rows under a new generation.
+- Stalled ordinary storage reads (including log inventory) and stalled lease
+  writes each exercise the same bounded shutdown. The fault must actually be
+  entered, no clean certificate may exist, and recovery verifies both ranges.
+
+Every incomplete stop's report is checked against the actual local certificate
+and rejected ingress. Provider tasks are explicitly released/joined, and their
+separate SDK domains are closed. Faults never synthesize authority records.
+The fixture now accepts an explicit native shutdown policy; all other native
+peer tests retain the SDK's default policy. No production code, dependency or
+server binary changed in this port. The earlier 93-case complete run remains
+separate evidence rather than being presented as a new 97-case rerun.
+The combined lease/log/shutdown target passed all twelve cases in 46.97
+seconds, with zero failed or ignored cases and default test parallelism. Its
+rebuilt executable was copied to the internal SSD after verifying SHA-256
+equality. Selected strict Clippy and formatting also pass.
 
 ## Current state
 
@@ -563,9 +599,8 @@ replica-read-policy override.
    to describe the actual Cellar server and its qualified capability boundary.
 
 The remaining `elastic_cells` setup still covers SQLite-full and reservation
-behavior, native session shutdown, and its large root fixture. GSI
-backfill/transfer and multipart upload replacement now run in the selected
-native targets. Its previously ported modules also remain included there
+behavior and its large root fixture. GSI backfill/transfer, multipart upload
+replacement and native shutdown now run in the selected native targets. Its previously ported modules also remain included there
 until that root is migrated. `peer_network` retains
 its separate physical and residency fixtures. Passing the selected native
 targets does not complete either aggregate suite.
@@ -640,7 +675,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 60 errors in `elastic_cells` and
+The latest registry-release rerun reported 56 errors in `elastic_cells` and
 60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

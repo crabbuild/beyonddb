@@ -156,6 +156,7 @@ pub struct PeerPolicy {
     pub lease_bucket: Option<Bucket>,
     pub log: LogOptions,
     pub application_clock: bdb_cellar_runtime::application::Clock,
+    pub shutdown: cellar::sdk::ShutdownPolicy,
 }
 impl From<bool> for PeerPolicy {
     fn from(route_cache: bool) -> Self {
@@ -166,6 +167,7 @@ impl From<bool> for PeerPolicy {
             lease_bucket: None,
             log: LogOptions::default(),
             application_clock: Arc::new(now_ms),
+            shutdown: Default::default(),
         }
     }
 }
@@ -225,6 +227,7 @@ impl Peer {
             path.into(),
         );
         config.maintenance.rebalance = false;
+        config.shutdown = policy.shutdown;
         // Match the executable so these cases exercise its real backpressure.
         config.runtime.max_stateless_requests = Some(128);
         config.runtime.max_cell_requests = 16;

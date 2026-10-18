@@ -172,6 +172,13 @@ closed ingress after fencing. An expired unavailable follower cannot prove a
 new write while both bundle and LTX publication are withheld; that same signed
 request completes when publication resumes. The fixtures never edit authority
 records or require epoch rotation from TTL expiry alone.
+Four additional native shutdown cases verify immediate certified same-node
+restart, incomplete drain with unpublished signed work, a real provider CAS
+that commits after the node closes, and bounded read/write storage stalls.
+A clean report must match the actual local certificate; incomplete stops
+cannot grant one and must close ingress. After ordinary expiry, signed reads
+retain acknowledged rows in both data ranges. The tests do not retain
+Cellule's separate application-owned session retirement API.
 Six `tests/cellar_indexes.rs` cases retain local/global index mutation,
 transaction, split, replay and restart contracts. LSI splits keep PK collections
 together and retain logical query cursors. GSI replay preserves large chunked

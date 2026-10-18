@@ -197,3 +197,8 @@ fn lease_write_outage_fences_the_native_node_and_closes_ingress() {
         fixture.inspection.close().await;
     });
 }
+
+#[path = "node_log_authority/lifecycle_store.rs"]
+mod lifecycle_store;
+#[path = "elastic_cells/node_sessions.rs"]
+mod node_sessions;
