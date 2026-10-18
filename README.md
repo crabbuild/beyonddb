@@ -191,7 +191,9 @@ cargo test --workspace --locked
 ```
 
 Workstations with the mounted Workspace volume should use a checkout-specific
-`CARGO_TARGET_DIR` beneath `$HOME/Workspace/crabbuild-target`. Process tests are
+`CARGO_TARGET_DIR` beneath `$HOME/Workspace/crabbuild-target`. The multi-node coalescing fixtures can need CPU/I/O isolation on small machines;
+run them with `cargo test --locked --test cellar_coalescing -- --test-threads=1`.
+Each fixture retains its concurrent client workload. Process tests are
 ignored by default and require Docker, OpenSSL and the AWS CLI:
 
 ```sh

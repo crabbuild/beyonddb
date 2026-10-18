@@ -44,6 +44,32 @@ parallelism: 12 coalescing cases in 32.87 seconds and 24 transaction cases in
 30.09 seconds, zero failed/ignored. Strict workspace all-target Clippy,
 formatting and diff checks pass. Linux CI must validate this profile change.
 
+### Prepare publication amplification
+
+PR #17's Linux qualification still timed out in the two 32-transaction
+coalescing contracts after dependency optimization. The batching policy bounded
+encoded request bytes and accepted up to 16 prepares per publication, while
+each tiny two-item participant allocated about 8.5 MiB of physical apply
+reservations. A small request batch could therefore capture roughly 136 MiB
+of reservations under the unchanged 10-second SDK durability deadline.
+
+An observer now decodes actual outbound prepare commands in those existing
+signed SDK contracts. Before the fix it records a width of 16 and fails the
+new amplification assertion. The application batcher now forms batches of at
+most two prepares. The existing command still accepts its version-1 limit of
+16 inputs, preserving wire/replay compatibility. This increases publication
+counts for a burst while retaining sharing. Reservation sizes, request counts,
+SDK deadlines, mutation attempt rules and lost-reply/restart checks are intact.
+Qualification runs the coalescing target in a separate early step, preserving
+the full matrix without executing that target twice. Its independent multi-node
+fixtures run with `--test-threads=1` to isolate their physical stores on the
+small CI runner. Each fixture retains its concurrent clients, ownership limits,
+and unchanged durability deadlines; other native targets retain normal test
+parallelism. A parallel local run with the new cap passed both reported prepare
+contracts (49 commands each) but reproduced the deadline in the separate wide
+read fixture, so dependency optimization and batch bounding alone do not isolate
+that fixture's resource demand.
+
 ### Local registry baseline at `9789f50`
 
 The latest complete native run passed **155 focused tests** across twenty-four
