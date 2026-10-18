@@ -24,22 +24,23 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 100 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+All 103 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
 nine directory cases, two domain cases, six index cases, two native peer
 cases, one signed local SDK case, 24 transaction cases, twelve native
-lease/log/shutdown cases and three reservation-pressure cases. The fourteen
+lease/log/shutdown cases, three reservation-pressure cases and three serving
+cases. The fifteen
 rebuilt executables were checked for SHA-256 equality before running from the
 internal SSD, with normal test parallelism and zero failed or ignored cases.
-The capacity target passed in 134.84 seconds and the index target in 44.51
-seconds during this complete run, including the typed prepare-capacity fix.
+The capacity target passed in 129.27 seconds and the index target in 42.87
+seconds during this complete run, including ordered Query completion.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. The rebuilt production server, including typed
-prepare-capacity rejection, passed all nine explicitly executed RustFS process
-cases in 506.80 seconds, with zero failures or ignored cases. Its SHA-256 is
-`c651b2c21a736d31191830442473974019f58ab34bdfb73a2389084bf8d73fe3`.
-The earlier `11432e7` build independently passed those nine cases in 464.15
-seconds before this production change.
+integration/process targets. The rebuilt production server, including ordered
+Query completion, passed all nine explicitly executed RustFS process cases in
+481.24 seconds, with zero failures or ignored cases. Its SHA-256 is
+`a480b6e40e4eb41b9a443e6a8e95e89bfeabd0c61879dee45ce1df7381f99fc0`.
+The preceding `03c4a9b` capacity build passed those nine cases separately in
+506.80 seconds.
 They cover the broad signed SDK/restart scenario, measured capacity and peer
 identity, 70 coordinator shards beyond residency, native follower recovery
 with bundle and LTX publication withheld, GSI recovery, large transactional
@@ -85,7 +86,7 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in two retained legacy roots: 56 errors in
+All-target Clippy still exits 101 in two retained legacy roots: 65 errors in
 `elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
@@ -300,6 +301,59 @@ selected native qualification command includes the new capacity target.
 The standalone three-case run passed in 144.96 seconds; the subsequent full
 100-case run includes the same capacity cases with normal parallelism and all
 original workload sizes and native deadlines. Selected strict Clippy passes.
+
+### Native public serving and ordered Query completion
+
+`tests/cellar_serving.rs` carries the former large numeric serving contract
+through real SDK nodes. Public tables start in two ordered ranges. Automatic
+and explicit splits grow the directory to three and four ranges, and one PK's
+numeric SK siblings reach different actual cells. The original negative,
+fractional and normalized numeric keys, forward/reverse pages, transaction
+read/write barriers and token replay across split publication remain covered.
+Bounded capacity cursors visit every range before advancing to another table.
+
+Signed AWS calls enter a separate native peer with retries disabled, and an
+observed socket proves remote transport. The contract retains missing-policy
+and forbidden-resource denials, user/role permission boundaries, malformed
+boundary refusal, immediate policy removal, wrong-secret refusal and durable
+credential revocation. Credential lookups count fresh cell-value invocations;
+Cellar owns routing/catalog caching. A complete SDK snapshot retains the
+ciphertext inspection. After both owners stop, their local directories are
+removed; native lease/sample expiry precedes restoration of policies,
+boundaries, revoked/decryptable credentials, NewTable and numeric values.
+Observed SDK scopes remain stable and physical owner epochs advance.
+
+The port reproduced a redundant final Query continuation: the data owner
+proved exhaustion and its range covered the rest of the requested span, but
+the merger returned immediately on filling the item budget. Query now uses
+that owner proof and existing range bounds to return a terminal page at an
+exact limit, in either direction. It performs no lookahead RPC; a range that
+does not finish the span still returns the logical continuation. The regression
+checks local exhaustion and span coverage before the global result, then
+checks exact forward and reverse limits.
+
+Logical application/namespace/partition validation is exposed by the
+provisioner before SDK admission. It is the existing validation factored into
+an I/O-free check, and grants no physical authority. Foreign applications,
+foreign namespaces and malformed partitions are rejected. The old assertion
+that SK siblings must always have one owner is replaced by ordered positions
+inside one PK Query span and the live split proof above. Cellar continues to
+own peer authentication and physical routing.
+
+Shared read-barrier contracts now live in `tests/support/read_barriers.rs`;
+the existing standalone visibility test executes once. Its one-PK scan wrapper
+retains its expectations, while this serving fixture explicitly checks full
+PK/SK pairs for the additional groups after its cursor. Ported child modules,
+legacy loopback-peer setup and the four application lease-publisher scenarios
+are retired from the aggregate root only after their native equivalents pass.
+The twelve native lease/log/shutdown cases cover those lifecycle concerns.
+Qualification CI explicitly executes every migrated native target, as well as
+retaining the legacy aggregate gates. The old data-range scenario and physical
+SQLite FULL fixture are still present and require their remaining ports.
+The full 103-case rerun executes all three serving cases once, in 21.18
+seconds, and retains all 24 transaction and twelve lease/log/shutdown cases.
+The rebuilt server separately passes all nine RustFS process cases as recorded
+in the registry qualification above.
 
 ## Current state
 
@@ -688,7 +742,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -709,7 +763,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -724,7 +778,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 56 errors in `elastic_cells` and
+The latest registry-release rerun reported 65 errors in `elastic_cells` and
 60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

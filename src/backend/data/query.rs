@@ -155,6 +155,14 @@ impl CellStorage {
                 if owned.intersection(&span).is_none() {
                     return Ok((items, None));
                 }
+                let reaches_span_end = if input.forward {
+                    range
+                        .upper
+                        .as_ref()
+                        .is_none_or(|bound| span.upper().is_some_and(|upper| bound >= upper))
+                } else {
+                    span.lower().is_some_and(|lower| &range.lower <= lower)
+                };
                 let owner = if global.is_some() {
                     crate::global_index_target(&key_info.account_id, id, &range.partition_id)
                 } else {
@@ -217,7 +225,16 @@ impl CellStorage {
                         input.exclusive_start_key = last.clone();
                         items.push(item);
                         if items.len() >= maximum {
-                            return Ok((items, last));
+                            // The owner can prove exhaustion even when this
+                            // item exactly fills the response budget. Static
+                            // range bounds establish whether the Query span
+                            // ends here; no lookahead RPC is needed.
+                            let cursor = if continuation.is_none() && reaches_span_end {
+                                None
+                            } else {
+                                last
+                            };
+                            return Ok((items, cursor));
                         }
                     }
                     let Some(continuation) = continuation else {

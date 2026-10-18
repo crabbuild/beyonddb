@@ -55,11 +55,10 @@ impl CellInitialPartitionProvisioner {
     }
     // Installation commands activate through the SDK. This only checks compiled
     // topology before handing back the ingress client; it claims no owner proof.
-    async fn provision_range(
-        &self,
-        target: &CellTarget,
-        client: &CellClient,
-    ) -> Result<CellClient, StorageError> {
+    /// Validate the application's logical target before SDK admission.
+    /// Ownership and transport authentication remain Cellar's responsibility;
+    /// this check performs no I/O and grants no execution authority.
+    pub fn validate_target(&self, target: &CellTarget) -> Result<(), StorageError> {
         let kind = self
             .application
             .cell_types()
@@ -71,6 +70,15 @@ impl CellInitialPartitionProvisioner {
                 "invalid BeyondDB cell target".into(),
             ));
         }
+        Ok(())
+    }
+
+    async fn provision_range(
+        &self,
+        target: &CellTarget,
+        client: &CellClient,
+    ) -> Result<CellClient, StorageError> {
+        self.validate_target(target)?;
         crate::inventory::register(client, target).await?;
         Ok(client.clone())
     }

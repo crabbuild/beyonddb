@@ -71,3 +71,6 @@ mod recovery_admission;
 mod native_peer;
 #[path = "elastic_cells/transaction_transport.rs"]
 mod transaction_transport;
+
+#[path = "support/read_barriers.rs"]
+mod read_barriers;

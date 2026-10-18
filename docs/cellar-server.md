@@ -210,6 +210,15 @@ sizes are retained. Complete SDK snapshots audit rollback and cleanup; signed
 reads and exact rejected receipts survive fresh-owner recovery. Submitted SQL
 or transport errors remain ambiguous. A forced physical SQLite FULL upload is
 still unqualified on the public SDK and remains a separate migration gate.
+The native serving target retains the large ordered numeric/IAM contract:
+two initial ranges grow through automatic and explicit splits, one PK spans
+actual cells, token replay survives the new routes, and signed calls cross a
+separate native peer. Policy boundaries, revocation and encrypted credential
+state survive deletion of both owners' directories. Exact-limit Query pages
+now retain the owner's exhaustion proof when its range finishes the requested
+span, avoiding a redundant terminal page without another cell RPC. Logical
+target validation is available before admission; native authority stays in
+the SDK. CI executes these contracts alongside the other migrated suites.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count
