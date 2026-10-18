@@ -19,3 +19,6 @@ mod transaction_fixture;
 
 #[path = "elastic_cells/target_admission.rs"]
 mod target_admission;
+
+#[path = "elastic_cells/data_contract.rs"]
+mod data_contract;

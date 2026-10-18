@@ -86,7 +86,7 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in two retained legacy roots: 65 errors in
+All-target Clippy still exits 101 in two retained legacy roots: 27 errors in
 `elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
@@ -348,12 +348,60 @@ legacy loopback-peer setup and the four application lease-publisher scenarios
 are retired from the aggregate root only after their native equivalents pass.
 The twelve native lease/log/shutdown cases cover those lifecycle concerns.
 Qualification CI explicitly executes every migrated native target, as well as
-retaining the legacy aggregate gates. The old data-range scenario and physical
-SQLite FULL fixture are still present and require their remaining ports.
+retaining the legacy aggregate gates. The data-range scenario is now ported
+as described below; the physical SQLite FULL fixture still needs a native
+equivalent.
 The full 103-case rerun executes all three serving cases once, in 21.18
 seconds, and retains all 24 transaction and twelve lease/log/shutdown cases.
 The rebuilt server separately passes all nine RustFS process cases as recorded
 in the registry qualification above.
+
+### Native data-range cutover and recovery
+
+The former large root data-range scenario now runs in
+`tests/elastic_cells/data_contract.rs`, registered by `cellar_serving`.
+Two installed ranges use canonical ordered string boundaries, and the two
+retained left rows straddle the later split boundary. The contract preserves
+route activation checks, transaction participant ordering and decision fences,
+prepared-intent visibility, token replay, failed atomic writes, Scan cursors,
+conditional updates and deletes, and wrong-range/stale-epoch rejection.
+
+Split checks retain durable pending-plan replay/conflict, in-flight intent
+fencing, source sealing and export pagination, incomplete/conflicting/duplicate
+imports, resumable publication, child stream lineage and late-copy refusal.
+Both opened children must have empty journals before subsequent writes;
+imports cannot manufacture stream events. After Preserve shutdown, complete
+non-owning SDK snapshots audit all four data journals against their observed
+logical counts.
+
+The source node's local directory is deleted. Another real SDK node waits
+for observed native lease/sample departure, then restores account, directory,
+coordinator, retired source, unsplit range and both children. Each of these
+seven observed SDK factories must reuse its prior scope at a higher owner epoch. Pending BEGINs
+remain discoverable before explicit fenced recovery; token cleanup, a durable
+ABORT, a prepared child intent and a committed retired-source tombstone all
+retain their original assertions. Domain replay uses explicit transaction and
+transfer keys with fresh transport envelopes. No fixture writes physical
+ownership or authority records.
+
+The standalone scenario passed in 20.71 seconds. All four native serving
+cases then passed together in 21.14 seconds with default test parallelism.
+Its legacy aggregate copy was retired only after the native pass; `elastic_cells` now retains the
+separate physical SQLite FULL upload case and its old bootstrap. All-target
+Clippy still fails in that retained root (27 errors) and `peer_network`
+(60 errors); selected native strict Clippy passes. No aggregate gate is disabled.
+
+The complete focused rerun passes **104 tests, zero failed and zero ignored**
+across fifteen executable copies verified against their mounted artifacts by
+SHA-256. Each program uses normal test parallelism. The four serving cases
+pass in 21.14 seconds, capacity's three cases in 122.53 seconds, all 24
+transaction cases in 51.82 seconds and all twelve lease/log/shutdown cases in
+45.72 seconds. The server SHA-256 is unchanged from the preceding nine-case
+RustFS process qualification:
+`a480b6e40e4eb41b9a443e6a8e95e89bfeabd0c61879dee45ce1df7381f99fc0`.
+This port changes fixture code and documentation; the production build retains
+that recorded process evidence. Formatting and selected strict Clippy pass;
+all-target Clippy continues to expose the two retained legacy roots above.
 
 ## Current state
 
@@ -698,14 +746,14 @@ replica-read-policy override.
 7. Update contributor guidance, startup configuration, CI and operational docs
    to describe the actual Cellar server and its qualified capability boundary.
 
-The remaining `elastic_cells` setup still contains the forced SQLite-full
-upload case and its large root fixture. The three reservation contracts moved
-to `cellar_capacity`; the physical-failure case still needs a native equivalent.
+The remaining `elastic_cells` setup contains the forced SQLite-full
+upload case. Its large data-range fixture now executes through native Cellar.
+The three reservation contracts moved to `cellar_capacity`; the physical-failure
+case still needs a native equivalent.
 GSI backfill/transfer, multipart upload replacement and native shutdown now run
-in the selected native targets. Its previously ported modules also remain
-included there
-until that root is migrated. `peer_network` retains
-its separate physical and residency fixtures. Passing the selected native
+in the selected native targets. Ported contracts execute once through their
+focused native targets. `peer_network` retains its separate physical and
+residency fixtures. Passing the selected native
 targets does not complete either aggregate suite.
 
 The new executable configuration and lifecycle are described in
@@ -778,7 +826,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 65 errors in `elastic_cells` and
+The latest registry-release rerun reported 27 errors in `elastic_cells` and
 60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

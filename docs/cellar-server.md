@@ -219,6 +219,15 @@ now retain the owner's exhaustion proof when its range finishes the requested
 span, avoiding a redundant terminal page without another cell RPC. Logical
 target validation is available before admission; native authority stays in
 the SDK. CI executes these contracts alongside the other migrated suites.
+The data-range contract also retains activation fencing, durable transaction
+visibility, sealed export/import, resumable split publication and child stream
+lineage. Ordered fixture rows occupy both children. Complete non-owning SDK
+snapshots audit all four data journals after shutdown. Deleting the old local
+directory and observing native lease/sample expiry precede another node's
+restoration of all seven state scopes at higher ownership epochs, including
+the retired source and prepared child intent. Unfinished BEGINs remain pending
+until explicit fenced recovery. The physical SQLite FULL upload fixture still
+requires its separate SDK equivalent.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count
