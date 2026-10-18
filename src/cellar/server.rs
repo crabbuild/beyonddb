@@ -366,6 +366,7 @@ pub fn build_http_state_with_cache(
     server_addr: String,
     cache_enabled: bool,
 ) -> Result<AppState, StorageError> {
+    let client = client.with_read_backpressure(Duration::from_secs(30));
     let storage: Arc<dyn StorageEngine> = Arc::new(
         CellStorage::new(client.clone(), region)
             .with_transaction_coordinators(provisioner.clone())

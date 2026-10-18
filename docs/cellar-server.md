@@ -150,6 +150,20 @@ past failed records and shards, retry without overwriting newer values, and
 deferred discovery beyond the initial pending boundary. A server regression
 checks failure before maintenance starts and successful retry. These use an
 explicit caller policy before SDK submission, not physical network faults.
+`tests/cellar_peer.rs` adds actual native peer sockets behind an opaque TCP
+cut. With SDK route caching both disabled and enabled, signed requests retain
+numeric pagination, two-range reads and 50 concurrent increments without AWS
+client retries. Removing the old directory before lease-expiry recovery retains
+values and advances native owner epochs. Authentication fails closed during a
+credential-owner cut while healthy local data remains readable, then recovers
+after expiry. Unknown keys create no credential cells; revocation remains fresh.
+
+The public frontend paces pure SDK queries on HTTP 429/503 within a 30-second
+backpressure window. This permits bursts through native per-cell admission
+without caching credential, authorization or item values. Commands keep their
+single-attempt transport contract, including transaction read-image capture;
+HTTP status still does not prove a mutation was unstarted. Separate policy
+checks cover read retry hints, deadline failure and mutation non-retry.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

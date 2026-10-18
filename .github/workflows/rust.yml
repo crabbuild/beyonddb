@@ -31,5 +31,5 @@ jobs:
       - name: Cellar libraries and domain fixtures
         run: >-
           cargo test --workspace --lib --test account_cell --test cellar_sdk
-          --test cellar_transactions --test cellar_domain --test cellar_directories
+          --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer
           --test embedded --test ranges --locked

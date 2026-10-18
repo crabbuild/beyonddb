@@ -1,6 +1,8 @@
 //! Typed client over Cellar's bounded, invocation-owned ingress.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
+mod read_backpressure;
 
 use bytes::Bytes;
 use cellar::sdk::{IngressHandle, IngressResponse};
@@ -122,6 +124,19 @@ impl CellClient {
             admission: self.admission.clone(),
             registry: self.registry.clone(),
         }
+    }
+
+    /// Pace read-only invocations through transient SDK admission pressure.
+    /// Commands always retain their single-attempt ambiguous-outcome contract.
+    /// No credential, policy or item values are cached by this policy.
+    /// The caller must provide a Tokio time driver.
+    pub fn with_read_backpressure(&self, maximum_wait: Duration) -> Self {
+        self.map_transport(|inner| {
+            Arc::new(read_backpressure::ReadBackpressure::new(
+                inner,
+                maximum_wait,
+            ))
+        })
     }
 
     /// Apply local admission before submission. SDK ingress and response

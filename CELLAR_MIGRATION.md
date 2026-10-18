@@ -24,24 +24,61 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 72 focused tests pass on crates.io `0.1.0`: nine adapter units, two embedded
+All 77 focused tests pass on crates.io `0.1.0`: twelve adapter units, two embedded
 fixtures, nine keyspace cases, 17 root units, one account fixture, nine directory
-cases, two domain cases, one signed local SDK case and 22 transaction cases.
-The ten rebuilt focused test executables were checked for SHA-256 equality
-before running from the internal SSD, with unchanged parallelism, assertions
+cases, two domain cases, two native peer cases, one signed local SDK case and
+22 transaction cases. The eleven rebuilt focused test executables were checked
+for SHA-256 equality before running from the internal SSD, with unchanged parallelism, assertions
 and deadlines.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. All nine explicitly executed RustFS process cases
-also pass on this registry build in 520 seconds, with zero failures or ignored
-cases. They cover the broad signed SDK/restart scenario, measured capacity and
-peer identity, 70 coordinator shards beyond residency, native follower recovery
+integration/process targets. The same registry build, including the frontend
+read policy, passed all nine explicitly executed RustFS process cases in
+450.73 seconds, with zero failures or ignored cases. They cover the broad signed
+SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards beyond residency, native follower recovery
 with bundle and LTX publication withheld, GSI recovery, large transactional
 reads, metadata caching, LSI pagination and retained Streams after hard restart.
 The process test executable was also copied and checked for SHA-256 equality;
 it ran serially with the same flags used by qualification CI.
 
+### Native peer qualification and read backpressure
+
+`tests/cellar_peer.rs` adds two real-SDK socket cases, each with idle route
+caching disabled and enabled. Public signed requests enter a different node
+from the observed credential/account/data owner. The fixture forwards opaque
+native peer traffic through a TCP proxy; cutting it closes existing streams
+and refuses new ones. It observes actual SDK cell identities through a
+transparent application factory and reads native owner records; it never
+installs or edits ownership/lease records.
+
+One case preserves the existing 50 concurrent AWS SDK increments with client
+retries disabled, two independently owned ordered data ranges, and numeric
+forward/reverse Query pagination. After SDK Preserve shutdown, deletion of the
+old local directory and observed lease/sample expiry, another node recovers
+the same scopes at higher physical epochs with all values intact. The
+credential case keeps account and selected data reachable on the frontend,
+proves that a failed credential-owner connection cannot grant takeover while
+its lease is live, then recovers authentication after expiry without the old
+directory. Unknown keys create no credential scopes or factories, and durable
+revocation remains visible. Frontend value caches stay disabled in both modes.
+
+The port first exposed a fixture-only ingress budget of 32 against 50 callers;
+the fixture now matches the executable's 128 ingress/stateless permits and
+16 per-cell requests. With ingress corrected, account metadata queries still
+reproduced native per-cell HTTP 503 under the burst. The public frontend now
+paces only read-only invocations on HTTP 429/503 within a 30-second admission
+budget, honoring numeric Retry-After and bounded backoff. It caches no read
+values. Commands, including transaction read-image capture, retain one
+transport attempt and ambiguous-outcome handling. Unit checks preserve this
+boundary, non-backpressure errors and deadline failure. The original native
+50-writer scenario and the cleaned two-case suite pass under the actual limits.
+
+Tokio time is now a normal adapter dependency as well as an existing dev
+dependency; no package versions or lockfile entries changed. Temporary probes
+were removed. The full nine-process run also passed after this frontend policy
+change, as recorded in the registry qualification above.
+
 All-target Clippy still exits 101 in the retained legacy roots: 65 errors in
-`elastic_cells`, 12 in `node_log_authority` and 180 in `peer_network`. These
+`elastic_cells`, 12 in `node_log_authority` and 60 in `peer_network`. These
 fixtures still depend on Cellule APIs; no gates were disabled.
 
 ## Current state
@@ -421,7 +458,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -442,7 +479,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -458,6 +495,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells`, `node_log_authority` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The registry-release rerun reported 65 errors in `elastic_cells`, 12 in
-`node_log_authority` and 180 in `peer_network`.
+`node_log_authority` and 60 in `peer_network`.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

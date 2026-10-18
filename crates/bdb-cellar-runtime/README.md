@@ -22,6 +22,12 @@ receipt. Rejected commands roll back their application savepoint and retain
 their committed rejection. A response is decoded only after Cellar's complete
 gated body is consumed; submitted transport or proof failures remain ambiguous.
 
+The public frontend opts into `with_read_backpressure`: pure queries pace
+HTTP 429/503 within a caller-supplied budget, honoring numeric Retry-After and
+bounded backoff. The policy needs the caller's Tokio time driver and caches no
+values. Commands always remain single-attempt, including commands used by
+transactional reads. A status code never establishes non-execution of a write.
+
 The crate is a member of the BeyondDB workspace and shares its pinned Cellar
 dependency and root lockfile. See the repository's
 [migration status](../../CELLAR_MIGRATION.md) for outstanding work and checks.
