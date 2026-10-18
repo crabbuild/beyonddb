@@ -24,10 +24,13 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Current registry qualification
 
-The current native suite passes all **133 focused tests** across twenty
+The latest complete native run passed **133 focused tests** across twenty
 SHA-256-verified executable copies, with zero failed/ignored cases and normal
 test parallelism (399.78 seconds summed execution time), including public
-multi-cell placement and coordinator-registration publication. Production code
+multi-cell placement and coordinator-registration publication. The subsequent
+fixture-only discovery port passes all three native peer cases in 32.42 seconds,
+including the new worker-only discovery case. No combined 134-case run is
+claimed. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
 passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
@@ -35,7 +38,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (153 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (149 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -686,6 +689,46 @@ Production code and dependency pins are unchanged. The server SHA-256 still
 matches its recorded nine-case RustFS process qualification; these fixture
 changes do not claim another process run.
 
+### Native discovery after account-owner departure
+
+The new `cellar_peer` discovery case starts a worker before the account's
+coordinator index contains any shard. Its own successful empty-index response
+must complete before registration. SOURCE is the only SDK node during physical
+setup, so actual SDK factories establish the remote account/coordinator
+placement without editing authority. The source/worker retain 8/16 resident-cell
+budgets and two caller threads; the table has two distinct ordered data cells.
+
+The same 250 ms recovery cadence discovers the newly registered shard while
+its owner remains live. Native recovery can safely route fresh BEGINs, so
+participant preflight admission is withheld to retain a real abandoned BEGIN
+until owner departure. A non-owning complete SDK snapshot proves BEGIN with two
+unresolved participants. Both real owner rows remain on SOURCE during the
+original 750 ms live-owner observation, and actual peer sockets are exercised.
+
+After cutting the opaque network, the source stops through native SDK drain
+proof. Its local directory is deleted, and the observer waits for native
+lease/sample departure. Releasing participant admission lets only the running
+worker recover the account index, discover the shard and complete COMMIT with
+two resolved participants. The original 15-second recovery deadline remains.
+The completion poll uses SDK factory observations, ownership reads and complete
+replica snapshots; it issues no routed query, admission or explicit recovery
+call that could mask missing worker discovery. Both scopes retain identity at
+higher SDK epochs. Only after that proof do routed status and signed AWS reads
+verify the decision and both exact original items.
+
+The standalone discovery case passes in 17.89 seconds. All three native peer
+cases pass together in 32.42 seconds, zero failed/ignored, with normal test
+parallelism and a SHA-256-verified executable copy; strict Clippy passes for the
+changed target. Formatting and diff checks pass. The covered legacy discovery
+module is retired. The old resident-but-unregistered admission body is also
+retired: native durable_registration already warms four actual undiscoverable
+coordinator scopes, requires account publication and checks every row after
+fresh-owner recovery. Other admission/cache/resource contracts remain in the
+legacy gate. The required all-target check remains red in `elastic_cells`
+(27 errors) and `peer_network` (149). Production code, dependency pins and
+shared runtime fixtures are unchanged; the earlier complete 133-case and
+nine-process runs remain separate baseline evidence.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1110,6 +1153,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-153 in `peer_network`; the ported `node_log_authority` target is clean.
+149 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

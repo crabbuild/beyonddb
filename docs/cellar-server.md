@@ -295,8 +295,11 @@ discovery rows survive native owner replacement without admitting BEGIN.
 Four-way publication coalesces below four durable account commands. Scope and
 batch rejection leave no partial row, while the maximal account/batch encoding
 survives restore. These cases use the SDK's publication and ownership proofs.
-The current fixture suite passes 133 focused native tests and all nine explicitly
-executed RustFS process cases, zero failed/ignored. See the current fingerprint
+The latest complete fixture run passed 133 focused native tests; its unchanged
+server passed all nine explicitly executed RustFS process cases, zero
+failed/ignored. The later fixture-only discovery port passes all three native
+peer cases, using non-owning snapshots and SDK owner observations so the test
+cannot perform the recovery it is meant to observe. See the current fingerprint
 and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. These are application transport faults; they do not qualify fleet

@@ -1,8 +1,14 @@
 //! Signed requests over actual Cellar peer sockets and fenced owner recovery.
+include!("support/transaction_transport.rs");
+include!("support/ordered_routes.rs");
 #[path = "peer_network/account_query.rs"]
 mod account_query;
+#[path = "support/capacity_snapshot.rs"]
+mod capacity_snapshot;
 #[path = "peer_network/concurrency.rs"]
 mod concurrency;
+#[path = "cellar_peer/coordinator_discovery.rs"]
+mod coordinator_discovery;
 #[path = "peer_network/residency/credential_failover.rs"]
 mod credential_failover;
 #[path = "support/native_peer.rs"]

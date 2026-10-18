@@ -410,46 +410,8 @@ async fn registered_resident_coordinator_admission_skips_provider_io_but_restore
     fixture.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resident_coordinator_without_acknowledged_registration_is_not_cached() {
-    let fixture = Fixture::with_capacity(1, 8).await;
-    let key = b"unregistered-resident";
-    let coordinator = beyonddb::coordinator_target(ACCOUNT, key).unwrap();
-    fixture
-        .provisioner
-        .recover_owned_coordinator(ACCOUNT, key, &fixture.directory)
-        .await
-        .unwrap();
-    let input = RegisterCoordinatorShardInput {
-        account_id: ACCOUNT.into(),
-        shard: u32::from_be_bytes(coordinator.partition().try_into().unwrap()),
-    };
-    let account = account_target(ACCOUNT).unwrap();
-    assert!(
-        !fixture
-            .client
-            .query::<ReadCoordinatorRegistration>(&account, None, Json(input.clone()))
-            .await
-            .unwrap()
-            .output
-            .0
-    );
-    fixture
-        .provisioner
-        .ensure(&fixture.client, ACCOUNT, key)
-        .await
-        .unwrap();
-    assert!(
-        fixture
-            .client
-            .query::<ReadCoordinatorRegistration>(&account, None, Json(input))
-            .await
-            .unwrap()
-            .output
-            .0
-    );
-    fixture.shutdown().await;
-}
+// Native durable_registration warms undiscoverable SDK coordinators, requires
+// their account publication, and verifies every row after fresh-owner restore.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_coordinator_authority_is_not_read_twice_before_creation_cas() {
