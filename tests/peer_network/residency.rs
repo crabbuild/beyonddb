@@ -15,7 +15,6 @@ mod index_splits;
 mod live_owner_failover;
 mod ownership_race;
 mod placement;
-mod prepare_batch;
 mod prepare_capacity;
 mod pressure;
 mod provisioning;
@@ -24,7 +23,6 @@ mod reclamation;
 mod recovery;
 mod saved_images;
 mod splits;
-mod update_batch;
 
 use crate::*;
 use cellule_runtime::cell::actor::CellHandle;

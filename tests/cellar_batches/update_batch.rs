@@ -1,28 +1,31 @@
-use super::provisioning::{create, sdk_without_retries, table_id};
-use super::*;
-use beyonddb::{
-    BatchedPartitionUpdate, PartitionUpdateBatch, PartitionUpdateBatchOutcome,
-    PartitionUpdateInput, PartitionUpdateOutcome,
-};
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::identity::RequestId;
+use crate::residency_fixture::{Fixture, runtimes};
+use aws_sdk_dynamodb::types::AttributeValue as AwsAttributeValue;
+use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
+use beyonddb::*;
 use extenddb_core::expression::{CompareOp, Expr, ExpressionMaps, PathElement, UpdateAction};
+use extenddb_core::types::{AttributeValue, Item};
 use extenddb_storage::StreamEngine;
-
+use std::collections::HashMap;
 const ACCOUNT: &str = "123456789012";
-
-fn identity() -> cellule_runtime::MutationIdentity {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-    cellule_runtime::MutationIdentity {
+fn identity() -> MutationIdentity {
+    let now = crate::native_peer::now_ms();
+    MutationIdentity {
         request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
         issued_at_ms: now,
         expires_at_ms: now + 60_000,
     }
 }
-
+async fn table_id(fixture: &Fixture, name: &str) -> String {
+    fixture
+        .client
+        .query::<DescribeTable>(&account_target(ACCOUNT).unwrap(), None, Json(name.into()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap()
+        .id
+}
 fn add(table: &str, epoch: u64, key: &str, condition: bool) -> BatchedPartitionUpdate {
     let path = vec![PathElement::Attribute("value".into())];
     let actions = [UpdateAction::Add {
@@ -74,12 +77,19 @@ async fn records(fixture: &Fixture, arn: &str) -> Vec<extenddb_core::types::Stre
         .0
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
-    let fixture = Fixture::with_capacity(1, 16).await;
-    let sdk = sdk_without_retries(&fixture);
+#[test]
+fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+    let mut fixture = Fixture::new(host.handle(), core.handle(), 1, 16).await;
+    let mut sdk = fixture.sdk.clone();
     let table = "ResidencyReturnedStream";
-    let arn = create(&sdk, table, false)
+    let arn = sdk.create_table().table_name(table)
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .key_schema(aws_sdk_dynamodb::types::KeySchemaElement::builder().attribute_name("id")
+            .key_type(aws_sdk_dynamodb::types::KeyType::Hash).build().unwrap())
+        .attribute_definitions(aws_sdk_dynamodb::types::AttributeDefinition::builder().attribute_name("id")
+            .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S).build().unwrap())
         .stream_specification(
             aws_sdk_dynamodb::types::StreamSpecification::builder()
                 .stream_enabled(true)
@@ -95,7 +105,10 @@ async fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
         .latest_stream_arn
         .unwrap();
     let id = table_id(&fixture, table).await;
-    let range = super::cell_models::ranges(&fixture, table).await.remove(0);
+    let route = crate::single_leaf_route(&fixture.client, &account_target(ACCOUNT).unwrap(), &id)
+        .await.unwrap();
+    assert_eq!(route.partitions.len(), 2);
+    let range = route.partitions[0].clone();
     let target = beyonddb::data_target(ACCOUNT, &id, &range.partition_id).unwrap();
     sdk.put_item()
         .table_name(table)
@@ -163,7 +176,7 @@ async fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
     assert_ne!(before[1].event_id, before[2].event_id);
     fixture
         .client
-        .command::<PartitionUpdateBatch>(&target, request, Json(updates))
+        .command::<PartitionUpdateBatch>(&target, request, Json(updates.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -171,19 +184,11 @@ async fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
         3,
         "receipt replay must not repeat stream intent"
     );
-    fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
-        .await
-        .unwrap()
-        .drain()
-        .await
-        .unwrap();
-    fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
-        .await
-        .unwrap();
+    fixture.replace().await;
+    sdk = fixture.sdk.clone();
+    let recovered_replay = fixture.client.command::<PartitionUpdateBatch>(
+        &target, request, Json(updates)).await.unwrap();
+    assert_eq!(recovered_replay.receipt, result.receipt);
     for (key, value) in [("first", "1"), ("condition", "0"), ("second", "1")] {
         let item = sdk
             .get_item()
@@ -261,63 +266,58 @@ async fn returned_update_batch_isolates_conditions_and_keeps_stream_ordinals() {
     );
     assert_eq!(records(&fixture, &arn).await.len(), 5);
     fixture.shutdown().await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sdk_returned_update_compacts_large_escaped_old_and_new_images() {
-    let fixture = Fixture::with_capacity(1, 16).await;
-    let sdk = sdk_without_retries(&fixture);
-    let padding = "\0".repeat(390_000);
-    sdk.put_item()
-        .table_name("Residency")
-        .item("id", AwsAttributeValue::S("escaped".into()))
-        .item("value", AwsAttributeValue::N("0".into()))
-        .item("padding", AwsAttributeValue::S(padding.clone()))
-        .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
-        .send()
-        .await
-        .unwrap();
-    let result = sdk
-        .update_item()
-        .table_name("Residency")
-        .key("id", AwsAttributeValue::S("escaped".into()))
-        .update_expression("ADD #value :one")
-        .expression_attribute_names("#value", "value")
-        .expression_attribute_values(":one", AwsAttributeValue::N("1".into()))
-        .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
-        .send()
-        .await
-        .unwrap();
-    let old = result.attributes.unwrap();
-    assert_eq!(old["value"], AwsAttributeValue::N("0".into()));
-    assert_eq!(old["padding"], AwsAttributeValue::S(padding.clone()));
-    let id = table_id(&fixture, "Residency").await;
-    let range = super::cell_models::ranges(&fixture, "Residency")
-        .await
-        .remove(0);
-    fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
-        .await
-        .unwrap()
-        .drain()
-        .await
-        .unwrap();
-    fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &id, &range.partition_id)
-        .await
-        .unwrap();
-    let new = sdk
-        .get_item()
-        .table_name("Residency")
-        .key("id", AwsAttributeValue::S("escaped".into()))
-        .send()
-        .await
-        .unwrap()
-        .item
-        .unwrap();
-    assert_eq!(new["value"], AwsAttributeValue::N("1".into()));
-    assert_eq!(new["padding"], AwsAttributeValue::S(padding));
-    fixture.shutdown().await;
+#[test]
+fn sdk_returned_update_compacts_large_escaped_old_and_new_images() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let mut fixture = Fixture::new(host.handle(), core.handle(), 1, 16).await;
+        let mut sdk = fixture.sdk.clone();
+        let padding = "\0".repeat(390_000);
+        sdk.put_item()
+            .table_name("Residency")
+            .item("id", AwsAttributeValue::S("escaped".into()))
+            .item("value", AwsAttributeValue::N("0".into()))
+            .item("padding", AwsAttributeValue::S(padding.clone()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .unwrap();
+        let result = sdk
+            .update_item()
+            .table_name("Residency")
+            .key("id", AwsAttributeValue::S("escaped".into()))
+            .update_expression("ADD #value :one")
+            .expression_attribute_names("#value", "value")
+            .expression_attribute_values(":one", AwsAttributeValue::N("1".into()))
+            .return_values(aws_sdk_dynamodb::types::ReturnValue::AllOld)
+            .send()
+            .await
+            .unwrap();
+        let old = result.attributes.unwrap();
+        assert_eq!(old["value"], AwsAttributeValue::N("0".into()));
+        assert_eq!(old["padding"], AwsAttributeValue::S(padding.clone()));
+        let id = table_id(&fixture, "Residency").await;
+        let route =
+            crate::single_leaf_route(&fixture.client, &account_target(ACCOUNT).unwrap(), &id)
+                .await
+                .unwrap();
+        assert_eq!(route.partitions.len(), 2);
+        fixture.replace().await;
+        sdk = fixture.sdk.clone();
+        let new = sdk
+            .get_item()
+            .table_name("Residency")
+            .key("id", AwsAttributeValue::S("escaped".into()))
+            .send()
+            .await
+            .unwrap()
+            .item
+            .unwrap();
+        assert_eq!(new["value"], AwsAttributeValue::N("1".into()));
+        assert_eq!(new["padding"], AwsAttributeValue::S(padding));
+        fixture.shutdown().await;
+    });
 }

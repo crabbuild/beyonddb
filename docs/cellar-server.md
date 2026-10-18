@@ -236,6 +236,13 @@ same account scope at higher epochs after local-file deletion and observed
 native lease/sample departure. Real base/GSI splits during sampling reject
 stale statistics before publication. Public tables retain two initial ordered
 ranges; a second observed key is inserted before splitting a one-item source.
+Three `tests/cellar_batches.rs` cases preserve per-child returned-update
+conditions, stream ordinals, exact receipt replay and the 390,000-NUL escaped
+image case. A real SDK peer forwards prepare batches, then recovers prepared
+intents and their shared receipt after the original owner loses its lease.
+Another owner retains independent COMMIT/ABORT states. Each handoff removes
+the former local directory and verifies the same data scope at a higher epoch;
+signed reads and ordinary writes prove final visibility and released locks.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

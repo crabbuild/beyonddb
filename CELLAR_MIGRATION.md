@@ -88,7 +88,7 @@ were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
 All-target Clippy still exits 101 in two retained legacy roots: 27 errors in
-`elastic_cells` and 59 in `peer_network`. The native `node_log_authority` target
+`elastic_cells` and 55 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
 ### Native lease and folded-log qualification
@@ -390,8 +390,8 @@ The standalone scenario passed in 20.71 seconds. All four native serving
 cases then passed together in 21.14 seconds with default test parallelism.
 Its legacy aggregate copy was retired only after the native pass;
 `elastic_cells` now retains the separate physical SQLite FULL upload case and its old bootstrap. All-target
-Clippy still fails in that retained root (27 errors) and `peer_network`
-(60 errors); selected native strict Clippy passes. No aggregate gate is disabled.
+At that checkpoint, all-target Clippy failed in that retained root (27 errors)
+and `peer_network` (60 errors); selected native strict Clippy passed. No aggregate gate is disabled.
 
 That data-range focused rerun passed **104 tests, zero failed and zero ignored**
 across fifteen executable copies verified against their mounted artifacts by
@@ -439,14 +439,53 @@ retired after their five native equivalents pass. Qualification CI includes
 this target and keeps both unfinished legacy aggregate gates.
 The final scoped-policy build passes all five metadata cases together in
 34.19 seconds, with default test parallelism and zero failed/ignored cases.
-Selected strict Clippy passes. All-target Clippy retains 27 errors in
-`elastic_cells` and 59 in `peer_network`; no aggregate gate is disabled.
+Selected strict Clippy passed. At that checkpoint, all-target Clippy retained
+27 errors in `elastic_cells` and 59 in `peer_network`; no gate was disabled.
 The complete native rerun passes **109 tests, zero failed and zero ignored**
 across sixteen SHA-256-verified executable copies. Metadata passes in
 34.19 seconds, all 24 transaction cases in 52.43 seconds and all twelve
 lease/log/shutdown cases in 55.56 seconds. All programs use default test
 parallelism. The production server retains the unchanged hash and nine-case
 RustFS process evidence above; this port changes fixtures, CI and documentation.
+
+### Native update and prepare batches
+
+`tests/cellar_batches.rs` ports the two returned-update cases and the prepare
+batch contract. Tables retain two initial ordered ranges. The update fixtures
+keep the original sixteen-cell resident budget; the prepare path keeps a
+sixteen-cell source and eight-cell peer. All AWS clients disable retries.
+
+Returned updates preserve per-child condition outcomes and old images, unique
+stream ordinals, three records after receipt replay and five after the later
+fallback. An oversized compact result rolls back both its ADD and stream
+intent before the individual path applies ADD once. The 140,000-character
+stored padding and 390,000 NUL characters remain unchanged. The escaped-image
+case retains its full old/new values through a fresh owner after deletion of
+the old local directory. Exact update-batch receipt replay is now also checked
+after replacement.
+
+Prepare commands first cross real SDK peer sockets to the observed source;
+the frontend creates no local factory for that data scope. Conflicting and
+duplicate child prepares roll back all staged intents and locks. Successful
+children share one durable receipt, while a new command over existing intents
+requests individual handling without erasing them. After source shutdown,
+local-file deletion and observed native lease/sample departure, the peer
+recovers both prepared intents and the exact original receipt at a higher
+owner epoch. One intent commits and the other aborts. A second fresh owner
+recovers both terminal states at another higher epoch, then signed reads and
+ordinary writes confirm value visibility and lock release. No fixture installs
+or edits physical owner or authority records.
+
+The two covered legacy modules are retired after their native cases pass.
+Qualification CI runs the batch target alongside the existing native targets
+and retains both unfinished aggregate gates. This fixture-only port leaves the
+production binary and shared helpers unchanged; the preceding 109-case and
+nine-process runs remain separate baseline evidence.
+The final three-case run passes in 29.00 seconds, zero failed and zero
+ignored, with default test parallelism. Its executable copy was verified
+against the mounted build artifact by SHA-256. Formatting and selected strict
+Clippy pass. The required all-target Clippy gate still reports the unported
+`elastic_cells` physical FULL root (27 errors) and `peer_network` (55 errors).
 
 ## Current state
 
@@ -835,7 +874,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -856,7 +895,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -872,6 +911,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-59 in `peer_network`; the ported `node_log_authority` target is clean.
+55 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.
