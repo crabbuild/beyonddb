@@ -228,6 +228,14 @@ restoration of all seven state scopes at higher ownership epochs, including
 the retired source and prepared child intent. Unfinished BEGINs remain pending
 until explicit fenced recovery. The physical SQLite FULL upload fixture still
 requires its separate SDK equivalent.
+Five `tests/cellar_metadata.rs` cases retain table-class change history and
+limits, deletion protection, capacity and logical byte counters, compacted
+transaction replay and sparse LSI/GSI statistics. They run under 8/11/16-cell
+resident budgets with signed SDK retries disabled. Fresh owners recover the
+same account scope at higher epochs after local-file deletion and observed
+native lease/sample departure. Real base/GSI splits during sampling reject
+stale statistics before publication. Public tables retain two initial ordered
+ranges; a second observed key is inserted before splitting a one-item source.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

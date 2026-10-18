@@ -152,6 +152,7 @@ impl Drop for Network {
 /// Explicit native host policy shared by peer and log integration fixtures.
 pub struct PeerPolicy {
     pub route_cache: bool,
+    pub max_resident: usize,
     pub fleet_durability: bool,
     pub lease_ttl_ms: u64,
     pub lease_bucket: Option<Bucket>,
@@ -163,6 +164,7 @@ impl From<bool> for PeerPolicy {
     fn from(route_cache: bool) -> Self {
         Self {
             route_cache,
+            max_resident: 32,
             fleet_durability: false,
             lease_ttl_ms: 10_000,
             lease_bucket: None,
@@ -215,7 +217,7 @@ impl Peer {
             },
             ActorOptions {
                 core: ActorPolicy {
-                    max_resident: 32,
+                    max_resident: policy.max_resident,
                     max_cached_routes: if policy.route_cache { 128 } else { 0 },
                     max_activations: 8,
                     max_evictions: 4,

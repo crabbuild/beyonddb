@@ -24,16 +24,17 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 103 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+All 109 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
 nine directory cases, two domain cases, six index cases, two native peer
 cases, one signed local SDK case, 24 transaction cases, twelve native
-lease/log/shutdown cases, three reservation-pressure cases and three serving
-cases. The fifteen
-rebuilt executables were checked for SHA-256 equality before running from the
-internal SSD, with normal test parallelism and zero failed or ignored cases.
-The capacity target passed in 129.27 seconds and the index target in 42.87
-seconds during this complete run, including ordered Query completion.
+lease/log/shutdown cases, three reservation-pressure cases, four serving
+cases and five metadata cases. The sixteen rebuilt executables were checked
+for SHA-256 equality before running from the internal SSD, with normal test
+parallelism and zero failed or ignored cases. The capacity target passed in
+118.21 seconds, index in 33.65 seconds and metadata in 34.19 seconds during
+this complete run. The new metadata target retains the table-class, usage,
+compacted replay and sparse-statistics contracts on actual native SDK owners.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
 integration/process targets. The rebuilt production server, including ordered
 Query completion, passed all nine explicitly executed RustFS process cases in
@@ -87,7 +88,7 @@ were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
 All-target Clippy still exits 101 in two retained legacy roots: 27 errors in
-`elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
+`elastic_cells` and 59 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
 ### Native lease and folded-log qualification
@@ -377,7 +378,8 @@ logical counts.
 The source node's local directory is deleted. Another real SDK node waits
 for observed native lease/sample departure, then restores account, directory,
 coordinator, retired source, unsplit range and both children. Each of these
-seven observed SDK factories must reuse its prior scope at a higher owner epoch. Pending BEGINs
+seven observed SDK factories must reuse its prior scope at a higher owner epoch.
+Pending BEGINs
 remain discoverable before explicit fenced recovery; token cleanup, a durable
 ABORT, a prepared child intent and a committed retired-source tombstone all
 retain their original assertions. Domain replay uses explicit transaction and
@@ -386,12 +388,12 @@ ownership or authority records.
 
 The standalone scenario passed in 20.71 seconds. All four native serving
 cases then passed together in 21.14 seconds with default test parallelism.
-Its legacy aggregate copy was retired only after the native pass; `elastic_cells` now retains the
-separate physical SQLite FULL upload case and its old bootstrap. All-target
+Its legacy aggregate copy was retired only after the native pass;
+`elastic_cells` now retains the separate physical SQLite FULL upload case and its old bootstrap. All-target
 Clippy still fails in that retained root (27 errors) and `peer_network`
 (60 errors); selected native strict Clippy passes. No aggregate gate is disabled.
 
-The complete focused rerun passes **104 tests, zero failed and zero ignored**
+That data-range focused rerun passed **104 tests, zero failed and zero ignored**
 across fifteen executable copies verified against their mounted artifacts by
 SHA-256. Each program uses normal test parallelism. The four serving cases
 pass in 21.14 seconds, capacity's three cases in 122.53 seconds, all 24
@@ -402,6 +404,49 @@ RustFS process qualification:
 This port changes fixture code and documentation; the production build retains
 that recorded process evidence. Formatting and selected strict Clippy pass;
 all-target Clippy continues to expose the two retained legacy roots above.
+
+### Native table settings, usage and statistics
+
+`tests/cellar_metadata.rs` ports five peer-residency domain contracts. Its
+fixture uses caller-owned host/core runtimes and actual SDK nodes, preserving
+8/11/16 resident-cell budgets. Public tables always start with two ordered
+data ranges, even when only one range initially has an item. Splitting a
+one-item source now adds a second real key before requesting an observed-key
+split. The original 300,000-byte update image and transaction payloads remain.
+Signed AWS requests use the existing Residency resource policy with retries
+disabled. Every replacement deletes the old local directory, observes native
+lease/sample departure and proves the account's original SDK scope returns at
+a higher ownership epoch. Fixtures never create authority records.
+
+The table-class case retains invalid-update atomicity, deletion protection,
+class timestamps, two allowed changes, later refusal and same-class replay
+through three fresh owners. A split after the first class change retains the
+older immutable range contract, and all seeded rows survive every replacement.
+The usage case retains failed-delete rollback, transaction-token replay,
+chunk-spanning images, sealed-source counters, serving-child totals and final
+zero counts. Stored JSON/key capacity bytes remain distinct from independently
+calculated DynamoDB logical sizes. Compacted replay on a fresh owner preserves
+a later write while returning the original transaction success.
+
+Sparse LSI/GSI statistics retain binary/list byte totals, the installed
+background sampler, source/child exclusion, deletion and attribute removal,
+durable samples and zero statistics on table recreation. A transport decorator
+completes a real base or GSI split immediately before the sampled owner read
+reaches SDK ingress, then forwards the actual request/reply. Both races reject
+the stale sample before publication; a later sample converges. Maintenance
+loops retain their bounded task-group shutdown. The three old modules are
+retired after their five native equivalents pass. Qualification CI includes
+this target and keeps both unfinished legacy aggregate gates.
+The final scoped-policy build passes all five metadata cases together in
+34.19 seconds, with default test parallelism and zero failed/ignored cases.
+Selected strict Clippy passes. All-target Clippy retains 27 errors in
+`elastic_cells` and 59 in `peer_network`; no aggregate gate is disabled.
+The complete native rerun passes **109 tests, zero failed and zero ignored**
+across sixteen SHA-256-verified executable copies. Metadata passes in
+34.19 seconds, all 24 transaction cases in 52.43 seconds and all twelve
+lease/log/shutdown cases in 55.56 seconds. All programs use default test
+parallelism. The production server retains the unchanged hash and nine-case
+RustFS process evidence above; this port changes fixtures, CI and documentation.
 
 ## Current state
 
@@ -790,7 +835,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -811,7 +856,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -827,6 +872,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-60 in `peer_network`; the ported `node_log_authority` target is clean.
+59 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

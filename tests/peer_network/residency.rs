@@ -24,10 +24,7 @@ mod reclamation;
 mod recovery;
 mod saved_images;
 mod splits;
-mod statistics;
-mod table_class;
 mod update_batch;
-mod usage;
 
 use crate::*;
 use cellule_runtime::cell::actor::CellHandle;
