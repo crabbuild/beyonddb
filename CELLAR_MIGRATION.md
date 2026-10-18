@@ -22,7 +22,29 @@ Earlier qualification below used Git revision
 `fa62847f496eefe393ce66e4bee6c477b712a832`. Registry-release qualification is
 recorded separately; those earlier results remain evidence for that Git build.
 
-### Current registry qualification
+### Linux CI failure follow-up
+
+At `9789f50`, the Linux Rust job failed in
+`account_participant::mixed_participants_preserve_locks_and_finish_after_owner_restart`.
+Signed SDK qualification also failed in three coalescing contracts: both
+32-transaction prepare cases and the wide fresh-read case. The logs report
+10-second LTX durability timeouts before HTTP 500/503 responses. The earlier
+local green runs below do not establish Linux CI success.
+
+The original coalescing target passes locally again (12 cases, 41.16 seconds),
+as does the isolated mixed-participant case (28.46 seconds). A native stack
+sample during the mixed-participant workload includes unoptimized JSON escape
+loops, byte scanning, WebSocket masking and hashing. The development/test
+profile now also optimizes `serde_json`, `memchr`, `fastwebsockets`, `blake3`
+and bundled `libsqlite3-sys` at level 2. Debug assertions remain enabled;
+release settings, SDK sources, physical reservations, test workloads and all
+runtime deadlines are unchanged. The existing failing contracts remain the
+regressions. After the profile change, both complete targets pass with normal
+parallelism: 12 coalescing cases in 32.87 seconds and 24 transaction cases in
+30.09 seconds, zero failed/ignored. Strict workspace all-target Clippy,
+formatting and diff checks pass. Linux CI must validate this profile change.
+
+### Local registry baseline at `9789f50`
 
 The latest complete native run passed **155 focused tests** across twenty-four
 SHA-256-verified executable copies, with zero failed/ignored cases and normal

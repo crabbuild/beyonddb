@@ -91,3 +91,18 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.lz4_flex]
 opt-level = 2
+
+# Large signed transaction fixtures also serialize, hash and forward multi-MiB
+# images. Unoptimized byte loops can starve the SDK's unchanged durability gate
+# on small CI runners. Keep assertions enabled and optimize these dependencies
+# for both development and tests, just like the LTX codec above.
+[profile.dev.package.serde_json]
+opt-level = 2
+[profile.dev.package.memchr]
+opt-level = 2
+[profile.dev.package.fastwebsockets]
+opt-level = 2
+[profile.dev.package.blake3]
+opt-level = 2
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
