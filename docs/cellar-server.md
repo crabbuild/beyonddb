@@ -317,13 +317,19 @@ owner-release policy. The creation-time race pauses a real CreateTable retry,
 observes destruction of both original data activations under ordinary SDK
 pressure, then completes the same pending generation and restores the old data.
 Those values and the new table write survive another fresh owner.
+Two native cold-admission cases hold actual coordinator LTX payload PUTs.
+Concurrent replay shares one held cold publication after both requests reach
+SDK ingress; independent coordinator scopes overlap before release. Account
+registration survives owner replacement, and replay retains a newer signed
+value after local-file deletion. These cases keep four caller threads and the
+original 8/16-cell budgets and 150 ms/one-second observation bounds.
 The latest complete fixture run passed 133 focused native tests; its unchanged
 server passed all nine explicitly executed RustFS process cases, zero
 failed/ignored. The later fixture-only discovery port passes all three native
 peer cases, using non-owning snapshots and SDK owner observations so the test
 cannot perform the recovery it is meant to observe. The creation target's five
-cases pass as a separate focused run, as do the two deletion and five reclamation
-cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
+cases pass as a separate focused run, as do the two deletion, five reclamation
+and two cold-admission cases. See the current fingerprint and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. These are application transport faults; they do not qualify fleet
 fencing or follower-log recovery; the separate process fixture supplies the

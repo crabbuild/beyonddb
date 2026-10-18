@@ -56,6 +56,7 @@ jobs:
             --test cellar_serving --test cellar_metadata --test cellar_batches \
             --test cellar_images --test cellar_coalescing --test cellar_placement \
             --test cellar_creation --test cellar_deletion --test cellar_reclamation \
+            --test cellar_admission \
             --test embedded --test ranges \
             -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-peer.log" || result=$?
