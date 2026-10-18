@@ -128,24 +128,28 @@ fn scan_page(
     if input.limit == Some(0) {
         return Ok(Json(PartitionScanOutcome::InvalidLimit));
     }
-    let mut cursor = match input.exclusive_start_key {
+    let (mut cursor, (partition_cursor, sort_cursor)) = match input.exclusive_start_key {
         Some(key)
             if index.map_or_else(
                 || valid_key(&key, &spec.table),
                 |index| crate::secondary_index::valid_cursor(&key, &spec.table, index),
             ) =>
         {
-            item_key(&key, &spec.table.key_schema)?
+            (
+                item_key(&key, &spec.table.key_schema)?,
+                super::key::index_key(&key, &spec.table.key_schema)?,
+            )
         }
         Some(_) => return Ok(Json(PartitionScanOutcome::InvalidKey)),
-        None => Vec::new(),
+        None => (Vec::new(), (Vec::new(), Vec::new())),
     };
-    // Check absent keys too; reading only live rows would skip committed but
-    // unapplied creates. Sealed export is already fenced by SealPartition.
+    // Probe intents in the same ordered PK/SK suffix as the scan, excluding
+    // the cursor itself. Check absent keys too: live rows omit unapplied
+    // creates. Sealed export is already fenced by SealPartition.
     if !export {
         let locks = context.sql(&statement(
-            "SELECT transaction_id FROM ddb_partition_transaction_locks WHERE item_key > ?1 AND write_lock = 1 LIMIT 1",
-            vec![SqlValue::Blob(cursor.clone())],
+            "SELECT transaction_id FROM ddb_partition_transaction_locks WHERE (partition_key, sort_key) > (?1, ?2) AND write_lock = 1 LIMIT 1",
+            vec![SqlValue::Blob(partition_cursor), SqlValue::Blob(sort_cursor)],
         ))?;
         if let Some(conflict) = crate::participant::read_conflict(context, &locks[0])? {
             return Ok(Json(PartitionScanOutcome::Conflict(conflict)));
@@ -163,6 +167,7 @@ fn scan_page(
             &cursor,
             true,
             64,
+            &spec.table.key_schema,
         )?;
         if key_rows.is_empty() {
             break;
@@ -205,6 +210,7 @@ fn scan_page(
             &cursor,
             true,
             1,
+            &spec.table.key_schema,
         )?;
         if remaining.is_empty() {
             None

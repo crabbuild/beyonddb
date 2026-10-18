@@ -6,6 +6,7 @@ CREATE TABLE ddb_global_index (
 
 CREATE TABLE ddb_global_index_items (
     item_key BLOB PRIMARY KEY,
+    ordered_key BLOB NOT NULL UNIQUE,
     partition_key BLOB NOT NULL,
     sort_key BLOB NOT NULL,
     version BLOB NOT NULL CHECK (length(version) = 16),

@@ -6,7 +6,7 @@ use crate::{
     ReadStreamCatalog, StreamCatalogKey, StreamJournalInput, StreamJournalOutcome, StreamTailInput,
     StreamTailOutcome, data_target,
 };
-use cellule_runtime::identity::{CellTarget, TenantId};
+use bdb_cellar_runtime::identity::{CellTarget, TenantId};
 use extenddb_core::types::{
     DescribeStreamInput, SequenceNumberRange, Shard, StreamDescription, StreamRecord, StreamStatus,
     StreamSummary,

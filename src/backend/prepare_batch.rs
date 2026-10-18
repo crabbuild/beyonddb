@@ -7,8 +7,8 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use cellule_runtime::client::{CellClient, Committed, InvocationError, Receipt};
-use cellule_runtime::identity::{CellTarget, RequestId};
+use bdb_cellar_runtime::client::{CellClient, Committed, InvocationError, Receipt};
+use bdb_cellar_runtime::identity::{CellTarget, RequestId};
 use extenddb_storage::error::StorageError;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
 
@@ -182,13 +182,13 @@ impl PrepareBatcher {
                         }
                     }
                 }
-                Err(InvocationError::Pending(_)) => {
+                Err(InvocationError::Ambiguous { .. }) => {
                     for pending in pending {
                         let result = self.observe(&slot.target, &pending.input).await;
                         let _ = pending.reply.send(result);
                     }
                 }
-                Err(InvocationError::NotStarted(cellule_runtime::Error::Capacity(reason))) => {
+                Err(InvocationError::NotStarted(bdb_cellar_runtime::Error::Capacity(reason))) => {
                     // The complete batch is proven not to have started. Its
                     // combined capture/resolution reservation may exceed the
                     // budget even when each participant fits independently.
@@ -203,19 +203,7 @@ impl PrepareBatcher {
                         }
                     }
                 }
-                Err(InvocationError::NotStarted(cellule_runtime::Error::Sqlite(error)))
-                    if error.sqlite_error_code()
-                        == Some(cellule_ltx::rusqlite::ErrorCode::DiskFull) =>
-                {
-                    // Preserve individual FULL admission classification so
-                    // the driver can durably decide ABORT when needed.
-                    for pending in pending {
-                        if !pending.reply.is_closed() {
-                            let result = self.individual(&slot.target, pending.input).await;
-                            let _ = pending.reply.send(result);
-                        }
-                    }
-                }
+
                 Err(error) => {
                     let error = cell_error(error);
                     for pending in pending {
@@ -248,7 +236,7 @@ impl PrepareBatcher {
             if committed.output.0 == PrepareTransactionOutcome::WideRequired)
         {
             // Different command digests require different mutation identities.
-            let identity = cellule_runtime::MutationIdentity {
+            let identity = bdb_cellar_runtime::MutationIdentity {
                 request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
                 ..identity
             };
@@ -279,7 +267,7 @@ impl PrepareBatcher {
             Err(InvocationError::Rejected(committed)) => {
                 Ok((committed.output.0, committed.receipt))
             }
-            Err(InvocationError::Pending(_)) => self.observe(target, input).await,
+            Err(InvocationError::Ambiguous { .. }) => self.observe(target, input).await,
             Err(error) => Err(error.into()),
         }
     }

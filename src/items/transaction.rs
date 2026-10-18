@@ -437,7 +437,7 @@ fn prepare_account(
             )));
         }
     };
-    participant::record_prepare(
+    let recorded = participant::record_prepare(
         context,
         input.transaction_id,
         input.coordinator_cell,
@@ -456,7 +456,21 @@ fn prepare_account(
             .iter()
             .filter(|image| image.effect == StagedEffect::Read)
             .map(|image| image.image.as_ref()),
-    )?;
+    );
+    if let Err(error) = recorded {
+        return match error {
+            // A typed application reservation refusal can publish a rejected
+            // receipt. The runtime rolls back all prepare effects before that
+            // receipt; unknown SQL/transport failures retain their ambiguity.
+            Error::Capacity(_) => Ok(CommandResult::Rejected(Json(
+                PrepareTransactionOutcome::Rejected {
+                    index: 0,
+                    reason: TransactionFailure::Throttled,
+                },
+            ))),
+            error => Err(error),
+        };
+    }
     for image in staged {
         context.sql(&statement("INSERT OR IGNORE INTO ddb_account_transaction_locks (table_id, item_key, transaction_id, write_lock) VALUES (?1, ?2, ?3, ?4)",
             vec![SqlValue::Text(image.table_id), SqlValue::Blob(image.key), SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Integer(i64::from(image.effect != StagedEffect::Read))]))?;

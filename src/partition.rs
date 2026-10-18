@@ -1,15 +1,18 @@
 //! Independently owned item range in one SQL Cell.
 
+use bdb_keyspace::RangeKey;
 mod indexes;
 pub(crate) mod key;
 pub(crate) mod query;
 mod scan;
+mod split_point;
+pub use split_point::*;
 mod transaction;
 mod ttl;
 mod update_batch;
 
 pub use indexes::*;
-pub use key::data_key_hash;
+pub use key::{data_key_hash, ordered_data_key, ordered_index_key};
 pub use query::*;
 pub use scan::*;
 pub use transaction::*;
@@ -18,8 +21,8 @@ pub use update_batch::*;
 
 use std::sync::OnceLock;
 
-use cellule_runtime::identity::Digest;
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::identity::Digest;
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -38,7 +41,7 @@ use key::index_key;
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        cellule_runtime::primitives::capacity::SCHEMA,
+        bdb_cellar_runtime::capacity::SCHEMA,
         crate::participant::SCHEMA,
         crate::secondary_index::SCHEMA,
         crate::global_index::outbox::SCHEMA,
@@ -50,7 +53,7 @@ pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new
 static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     id: DATA_NAMESPACE,
     name: DATA_MODULE,
-    role: cellule_runtime::cell::catalog::CatalogRole::Sql,
+    role: bdb_cellar_runtime::descriptors::CatalogRole::Sql,
     shards: 1,
     effect_targets: &[],
     dead_letter: None,
@@ -95,7 +98,7 @@ static COMMANDS: [OperationDescriptor; 29] = [
         ..no_return_operation(52)
     },
 ];
-static QUERIES: [OperationDescriptor; 19] = [
+static QUERIES: [OperationDescriptor; 20] = [
     operation(1),
     operation(2),
     operation(3),
@@ -118,6 +121,7 @@ static QUERIES: [OperationDescriptor; 19] = [
         ..operation(19)
     },
     crate::participant::bounded_read_result_operation(20),
+    operation(21),
 ];
 
 const fn operation(id: u32) -> OperationDescriptor {
@@ -144,7 +148,7 @@ const fn no_return_operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct DataModule;
 
-impl cellule_runtime::registry::CellModule for DataModule {
+impl bdb_cellar_runtime::registry::CellModule for DataModule {
     const NAME: &'static str = DATA_MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -161,6 +165,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
                 source.update(include_bytes!("secondary_index.rs"));
                 source.update(include_bytes!("secondary_index/read.rs"));
                 source.update(include_bytes!("partition/key.rs"));
+                source.update(include_bytes!("partition/split_point.rs"));
                 source.update(include_bytes!("partition/query.rs"));
                 source.update(include_bytes!("partition/scan.rs"));
                 source.update(include_bytes!("partition/transaction.rs"));
@@ -239,6 +244,7 @@ impl cellule_runtime::registry::CellModule for DataModule {
         registry.bind_query::<ReadPartitionState>()?;
         registry.bind_query::<PartitionQuery>()?;
         registry.bind_query::<PartitionUsage>()?;
+        registry.bind_query::<PartitionSplitPoint>()?;
         registry.bind_query::<ReadExpiredPartition>()?;
         registry.bind_query::<ReadPartitionTtl>()?;
         registry.bind_query::<ReadPartitionTransaction>()?;
@@ -256,10 +262,10 @@ pub struct PartitionSpec {
     pub table: TableRecord,
     /// Stable ID of this partition within the table directory.
     pub partition_id: [u8; 16],
-    /// Inclusive lower key-hash bound, absent for the first range.
-    pub lower: Option<[u8; 16]>,
-    /// Exclusive upper key-hash bound, absent for the last range.
-    pub upper: Option<[u8; 16]>,
+    /// Inclusive lower ordered-key bound, absent for the first range.
+    pub lower: Option<RangeKey>,
+    /// Exclusive upper ordered-key bound, absent for the last range.
+    pub upper: Option<RangeKey>,
     /// This data Cell's epoch accepted by writes and reads.
     pub epoch: u64,
 }
@@ -374,8 +380,14 @@ impl Query for ReadPartitionState {
         let [SqlValue::Blob(spec), SqlValue::Blob(state)] = row.as_slice() else {
             return Err(Error::Command("invalid partition status row"));
         };
+        let spec: PartitionSpec = serde_json::from_slice(spec)?;
+        if !spec.valid() {
+            return Err(Error::Command(
+                "unsupported or invalid installed partition contract",
+            ));
+        }
         Ok(Json(Some(PartitionStatus {
-            spec: serde_json::from_slice(spec)?,
+            spec,
             state: serde_json::from_slice(state)?,
         })))
     }
@@ -424,15 +436,26 @@ impl Query for PartitionUsage {
 }
 
 impl PartitionSpec {
-    pub(super) fn contains(&self, hash: [u8; 16]) -> bool {
-        self.lower.is_none_or(|bound| hash >= bound) && self.upper.is_none_or(|bound| hash < bound)
+    pub(super) fn contains(&self, hash: RangeKey) -> bool {
+        self.lower.clone().is_none_or(|bound| hash >= bound)
+            && self.upper.clone().is_none_or(|bound| hash < bound)
     }
 
     fn valid(&self) -> bool {
-        self.epoch > 0
+        self.table.key_encoding_version == bdb_keyspace::KEY_ENCODING_VERSION
+            && (self.table.local_secondary_indexes.is_empty()
+                || (self
+                    .lower
+                    .as_ref()
+                    .is_none_or(|bound| key::is_partition_fence(bound, &self.table.key_schema))
+                    && self.upper.as_ref().is_none_or(|bound| {
+                        key::is_partition_fence(bound, &self.table.key_schema)
+                    })))
+            && self.epoch > 0
             && self
                 .lower
-                .zip(self.upper)
+                .clone()
+                .zip(self.upper.clone())
                 .is_none_or(|(low, high)| low < high)
     }
 }
@@ -544,11 +567,11 @@ pub struct PartitionSeal {
     /// Planned epoch assigned to both child data Cells, independent of publication order.
     pub next_epoch: u64,
     /// Source range's inclusive lower bound.
-    pub source_lower: Option<[u8; 16]>,
+    pub source_lower: Option<RangeKey>,
     /// Source range's exclusive upper bound.
-    pub source_upper: Option<[u8; 16]>,
-    /// First hash owned by the right child.
-    pub boundary: [u8; 16],
+    pub source_upper: Option<RangeKey>,
+    /// First ordered key owned by the right child.
+    pub boundary: RangeKey,
     /// Fresh left child identity.
     pub left_partition_id: [u8; 16],
     /// Fresh right child identity.
@@ -558,38 +581,46 @@ pub struct PartitionSeal {
 impl PartitionSeal {
     fn valid_for(&self, source: &PartitionSpec) -> bool {
         self.table_id == source.table.id
+            && (source.table.local_secondary_indexes.is_empty()
+                || key::is_partition_fence(&self.boundary, &source.table.key_schema))
             && self.source_partition_id == source.partition_id
             && self.epoch == source.epoch
             && self.next_epoch > source.epoch
             && self.source_lower == source.lower
             && self.source_upper == source.upper
-            && self.boundary > source.lower.unwrap_or([0; 16])
-            && source.upper.is_none_or(|upper| self.boundary < upper)
+            && self.boundary > source.lower.clone().unwrap_or_else(RangeKey::minimum)
+            && source
+                .upper
+                .clone()
+                .is_none_or(|upper| self.boundary < upper)
             && self.left_partition_id != source.partition_id
             && self.right_partition_id != source.partition_id
             && self.left_partition_id != self.right_partition_id
     }
 
     fn valid_child(&self, child: &PartitionSpec) -> bool {
-        if child.table.id != self.table_id
+        if (!child.table.local_secondary_indexes.is_empty()
+            && !key::is_partition_fence(&self.boundary, &child.table.key_schema))
+            || child.table.id != self.table_id
             || child.epoch != self.next_epoch
             || child.partition_id == self.source_partition_id
             || self.next_epoch <= self.epoch
             || self.left_partition_id == self.right_partition_id
             || self.left_partition_id == self.source_partition_id
             || self.right_partition_id == self.source_partition_id
-            || self.boundary <= self.source_lower.unwrap_or([0; 16])
+            || self.boundary <= self.source_lower.clone().unwrap_or_else(RangeKey::minimum)
             || self
                 .source_upper
+                .clone()
                 .is_some_and(|upper| self.boundary >= upper)
         {
             return false;
         }
         (child.partition_id == self.left_partition_id
             && child.lower == self.source_lower
-            && child.upper == Some(self.boundary))
+            && child.upper == Some(self.boundary.clone()))
             || (child.partition_id == self.right_partition_id
-                && child.lower == Some(self.boundary)
+                && child.lower == Some(self.boundary.clone())
                 && child.upper == self.source_upper)
     }
 }
@@ -705,7 +736,7 @@ pub enum PartitionImportOutcome {
     NotImporting,
     /// The item violates the key or item contract.
     InvalidItem,
-    /// The item hashes outside this child's range.
+    /// The item falls outside this child's range.
     WrongPartition,
     /// A different image already exists under this primary key.
     Conflict,
@@ -758,7 +789,7 @@ impl Command for ImportPartitionItem {
             )));
         }
         let key = item_key(&input.item, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
+        if !spec.contains(ordered_data_key(
             &spec.table.id,
             &input.item,
             &spec.table.key_schema,
@@ -959,7 +990,7 @@ pub enum PartitionPutOutcome {
     Sealed,
     /// This split child is still importing its source range.
     NotReady,
-    /// The key hashes outside this partition's range.
+    /// The key falls outside this partition's range.
     WrongPartition,
     /// The item violates the table key or item contract.
     InvalidItem,
@@ -1037,7 +1068,7 @@ fn execute_partition_put(
         )));
     }
     let key = item_key(&input.item, &spec.table.key_schema)?;
-    if !spec.contains(data_key_hash(
+    if !spec.contains(ordered_data_key(
         &spec.table.id,
         &input.item,
         &spec.table.key_schema,
@@ -1118,7 +1149,7 @@ pub enum PartitionDeleteOutcome {
     Sealed,
     /// This split child is still importing its source range.
     NotReady,
-    /// The key hashes outside this partition's range.
+    /// The key falls outside this partition's range.
     WrongPartition,
     /// The key violates the table key contract.
     InvalidKey,
@@ -1201,7 +1232,7 @@ fn execute_partition_delete(
         )));
     }
     let key = item_key(&input.key, &spec.table.key_schema)?;
-    if !spec.contains(data_key_hash(
+    if !spec.contains(ordered_data_key(
         &spec.table.id,
         &input.key,
         &spec.table.key_schema,
@@ -1316,7 +1347,7 @@ pub enum PartitionUpdateOutcome {
     Sealed,
     /// This split child is still importing its source range.
     NotReady,
-    /// The key hashes outside this partition's range.
+    /// The key falls outside this partition's range.
     WrongPartition,
     /// The key or resulting item violates the table contract.
     InvalidItem,
@@ -1399,7 +1430,7 @@ fn execute_partition_update(
         )));
     }
     let key = item_key(&input.key, &spec.table.key_schema)?;
-    if !spec.contains(data_key_hash(
+    if !spec.contains(ordered_data_key(
         &spec.table.id,
         &input.key,
         &spec.table.key_schema,
@@ -1489,7 +1520,7 @@ pub enum PartitionGetOutcome {
     Sealed,
     /// This split child is still importing its source range.
     NotReady,
-    /// The key hashes outside this partition's range.
+    /// The key falls outside this partition's range.
     WrongPartition,
     /// The key does not match the table schema.
     InvalidKey,
@@ -1527,7 +1558,7 @@ impl Query for PartitionGet {
             return Ok(Json(PartitionGetOutcome::InvalidKey));
         }
         let key = item_key(&input.key, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
+        if !spec.contains(ordered_data_key(
             &spec.table.id,
             &input.key,
             &spec.table.key_schema,
@@ -1552,7 +1583,13 @@ pub(super) fn decode_spec(rows: &SqlResultSet) -> Result<Option<PartitionSpec>> 
     let [SqlValue::Blob(bytes)] = row.as_slice() else {
         return Err(Error::Command("invalid partition contract row"));
     };
-    Ok(Some(serde_json::from_slice(bytes)?))
+    let spec: PartitionSpec = serde_json::from_slice(bytes)?;
+    if !spec.valid() {
+        return Err(Error::Command(
+            "unsupported or invalid installed partition contract",
+        ));
+    }
+    Ok(Some(spec))
 }
 
 fn decode_state(rows: &SqlResultSet) -> Result<Option<PartitionState>> {
@@ -1640,8 +1677,8 @@ fn write_item(
     let (ttl_generation, ttl_epoch) = ttl::write_values(context, item)?;
     context.sql(&statement(
         "INSERT INTO ddb_partition_items \
-         (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch, logical_bytes) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(item_key) DO UPDATE SET \
+         (item_key, partition_key, sort_key, item, ttl_generation, ttl_epoch, logical_bytes, ordered_key) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(item_key) DO UPDATE SET \
          partition_key = excluded.partition_key, sort_key = excluded.sort_key, \
          item = excluded.item, ttl_generation = excluded.ttl_generation, \
          ttl_epoch = excluded.ttl_epoch, logical_bytes = excluded.logical_bytes",
@@ -1653,6 +1690,7 @@ fn write_item(
             ttl_generation,
             ttl_epoch,
             SqlValue::Integer(crate::statistics::item_bytes(item)?),
+            SqlValue::Blob(ordered_data_key(&table.id, item, &table.key_schema)?.to_vec()),
         ],
     ))?;
     if !inline {

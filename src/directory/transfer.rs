@@ -3,7 +3,8 @@
 use crate::table::statement;
 use crate::{Error, Json, Result, RoutePagePartition, SqlBatch, SqlResultSet, SqlValue};
 use crate::{GlobalIndexPartitionSpec, GlobalIndexSplitPlan, PartitionSpec, SplitPlan};
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 /// Address a range participant within the directory leaf selected by its logical bound.
@@ -82,8 +83,8 @@ impl GlobalIndexSplitPlan {
     pub(crate) fn directory_change(&self) -> crate::DirectoryChange {
         let range = |spec: &GlobalIndexPartitionSpec| RoutePagePartition {
             partition_id: spec.partition_id,
-            lower: spec.lower.unwrap_or([0; 16]),
-            upper: spec.upper,
+            lower: spec.lower.clone().unwrap_or_else(RangeKey::minimum),
+            upper: spec.upper.clone(),
             epoch: spec.epoch,
         };
         crate::DirectoryChange {
@@ -136,8 +137,8 @@ impl SplitPlan {
     pub(crate) fn directory_change(&self) -> crate::DirectoryChange {
         let range = |spec: &PartitionSpec| RoutePagePartition {
             partition_id: spec.partition_id,
-            lower: spec.lower.unwrap_or([0; 16]),
-            upper: spec.upper,
+            lower: spec.lower.clone().unwrap_or_else(RangeKey::minimum),
+            upper: spec.upper.clone(),
             epoch: spec.epoch,
         };
         crate::DirectoryChange {

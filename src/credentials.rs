@@ -1,19 +1,14 @@
 //! Encrypted, access-key-sharded credentials for ExtendDB SigV4 verification.
 
-use std::{
-    collections::HashSet,
-    sync::{OnceLock, RwLock},
-    time::Duration,
-};
+use std::{sync::OnceLock, time::Duration};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
-use cellule_app::CellType;
-use cellule_runtime::cell::catalog::{CatalogRole, CellCatalog};
-use cellule_runtime::client::{CellClient, InvocationError};
-use cellule_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
-use cellule_runtime::ltx::CellStorageLayout;
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::app::CellType;
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_cellar_runtime::descriptors::CatalogRole;
+use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId, TenantId};
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
@@ -58,7 +53,7 @@ const fn operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct CredentialModule;
 
-impl cellule_runtime::registry::CellModule for CredentialModule {
+impl bdb_cellar_runtime::registry::CellModule for CredentialModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -114,11 +109,7 @@ pub fn credential_target(access_key_id: &str) -> Result<CellTarget> {
     )
 }
 
-/// Install the credential shard schema during Cell bootstrap.
-pub fn initialize_credentials(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(SCHEMA)?;
-    Ok(())
-}
+// Schema installation is performed by the compiled Cellar module migration.
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct CredentialRecord {
@@ -265,21 +256,15 @@ impl Query for ReadCredential {
 /// Encrypted credential lookup over published credential Cells.
 pub struct CellCredentialStore {
     client: CellClient,
-    layout: CellStorageLayout,
     encryption_key: Zeroizing<[u8; 32]>,
-    // Catalog provisioning is monotonic for credential Cells. Cache only
-    // existence, never a credential record or its active/revoked state.
-    known_cells: RwLock<HashSet<[u8; 32]>>,
 }
 
 impl CellCredentialStore {
     /// Bind a Cell client and an operator-supplied AES-256 key.
-    pub fn new(client: CellClient, layout: CellStorageLayout, encryption_key: [u8; 32]) -> Self {
+    pub fn new(client: CellClient, encryption_key: [u8; 32]) -> Self {
         Self {
             client,
-            layout,
             encryption_key: Zeroizing::new(encryption_key),
-            known_cells: RwLock::new(HashSet::new()),
         }
     }
 
@@ -312,6 +297,7 @@ impl CellCredentialStore {
         }
         let target = credential_target(access_key_id)
             .map_err(|error| StorageError::Validation(error.to_string()))?;
+        crate::inventory::register(&self.client, &target).await?;
         let encrypted_secret = self.encrypt(access_key_id.as_bytes(), secret_key.as_bytes())?;
         let encrypted_session_token = credential
             .session_token
@@ -329,7 +315,7 @@ impl CellCredentialStore {
             is_active: credential.is_active,
             encrypted_secret,
         };
-        let outcome = match self
+        match self
             .client
             .command::<PutCredential>(&target, mutation_identity()?, Json(record))
             .await
@@ -350,11 +336,7 @@ impl CellCredentialStore {
                 )),
             },
             Err(error) => Err(cell_error(error)),
-        };
-        if outcome.is_ok() {
-            self.remember_cell(target.cell_id().as_bytes());
         }
-        outcome
     }
 
     fn encrypt(&self, aad: &[u8], plaintext: &[u8]) -> std::result::Result<Vec<u8>, StorageError> {
@@ -397,38 +379,17 @@ impl CellCredentialStore {
     ) -> std::result::Result<Option<StoredCredential>, DynamoDbError> {
         let target = credential_target(access_key_id)
             .map_err(|_| DynamoDbError::UnrecognizedClientException("invalid access key".into()))?;
-        let cell_id = *target.cell_id().as_bytes();
-        if !self.cell_is_known(&cell_id) {
-            let catalog = CellCatalog::new(self.layout.clone(), target.tenant());
-            if catalog
-                .lookup(target.cell_id())
-                .await
-                .map_err(|_| internal_error())?
-                .is_none()
-            {
-                return Ok(None);
-            }
-            self.remember_cell(&cell_id);
+        if !crate::inventory::contains(&self.client, &target)
+            .await
+            .map_err(|_| internal_error())?
+        {
+            return Ok(None);
         }
-        let lookup = async {
-            let observed = self
-                .client
-                .query::<ReadCredential>(&target, None, Json(access_key_id.into()))
-                .await;
-            if matches!(
-                &observed,
-                Err(InvocationError::NotStarted(Error::CellNotActive))
-            ) {
-                // Pressure can release the owner while the peer transport paces
-                // a pre-dispatch refusal. Re-enter the resolver once so it can
-                // restore the now-idle Cell rather than forwarding to no owner.
-                self.client
-                    .query::<ReadCredential>(&target, None, Json(access_key_id.into()))
-                    .await
-            } else {
-                observed
-            }
-        };
+        // The compiled namespace has only 256 fixed shards. SDK routing owns
+        // their activation and restoration; credential values are never cached.
+        let lookup = self
+            .client
+            .query::<ReadCredential>(&target, None, Json(access_key_id.into()));
         let output = tokio::time::timeout(QUERY_TIMEOUT, lookup)
             .await
             .map_err(|_| {
@@ -444,18 +405,6 @@ impl CellCredentialStore {
             .0
             .map(|record| self.decrypt(record))
             .transpose()
-    }
-
-    fn cell_is_known(&self, cell_id: &[u8; 32]) -> bool {
-        self.known_cells
-            .read()
-            .is_ok_and(|known| known.contains(cell_id))
-    }
-
-    fn remember_cell(&self, cell_id: &[u8; 32]) {
-        if let Ok(mut known) = self.known_cells.write() {
-            known.insert(*cell_id);
-        }
     }
 
     fn decrypt(

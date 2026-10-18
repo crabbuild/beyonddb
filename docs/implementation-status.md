@@ -1,5 +1,11 @@
 # Review BeyondDB's implementation evidence
 
+> **Historical Cellule baseline:** this page records the earlier host and its
+> qualification. The current server embeds Cellar, pinned to the crates.io
+> `cellar-main =0.1.0` release. Read [Cellar migration status](../CELLAR_MIGRATION.md)
+> for current evidence and open gates, and [the server guide](cellar-server.md)
+> for current startup and deployment behavior.
+
 This is the detailed engineering and qualification record for BeyondDB. It explains what each path does, which tests exercise it, and which claims remain open. Start with the [API coverage table](api.md) for a workload decision, the [architecture guide](architecture.md) for Cell ownership, the [user guide](user-guide.md) for requests, or the [deployment guide](deployment.md) for a local node. Run commands on this page from the repository root. Some historical results used earlier dependency pins; check [Cargo.toml](../Cargo.toml) for the current revisions.
 
 BeyondDB connects ExtendDB's DynamoDB protocol, validation, expression, authentication, and operation layers to Cellule's Cell runtime, peer transport, SQLite execution, and LTX publication. Both dependencies are pinned to reviewed Git revisions.
@@ -615,7 +621,7 @@ engine does not dispatch PartiQL or Global Tables operations. Its import/export
 handlers use local filesystem extensions rather than the DynamoDB S3 workflow
 ([ImportTable](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ImportTable.html),
 [ExportTableToPointInTime](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExportTableToPointInTime.html)).
-BeyondDB supplies empty import/export path lists in `src/server.rs`, so those
+BeyondDB supplies empty import/export path lists in `src/cellar/server.rs`, so those
 handlers reject requests before file access. Enabling filesystem paths would
 not establish DynamoDB import/export compatibility. These operations need
 upstream protocol support and Cell-backed orchestration, followed by signed SDK
@@ -660,8 +666,8 @@ The cases below describe focused evidence, not blanket API support. The [API mat
 | Fixture | Evidence it supplies | Important limit |
 | --- | --- | --- |
 | `tests/account_cell.rs` | Account Cell commands, rollback, replay, and restoration from a published root | Local fixture behavior does not prove the public protocol. |
-| `tests/elastic_cells.rs` | Routed data Cells, splits, transactions, indexes, and owner recovery | Focused ranges and failures do not establish fleet-scale behavior. |
-| `tests/peer_network.rs` | Authenticated two-node transport, signed requests, and fenced replacement | A two-node fixture does not establish unattended fleet recovery. |
+| Native `cellar_transactions`, `cellar_directories`, `cellar_indexes` and `cellar_serving` targets | Ordered cells, transactions, splits, indexes and owner restoration | Focused ranges and failures do not establish fleet-scale behavior. |
+| `tests/cellar_peer.rs` | SDK peer transport, signed requests, stale-owner recovery and fenced replacement | A small peer fixture does not establish unattended fleet recovery. |
 | `tests/server_binary.rs` | Signed SDK/CLI requests through a running process and hard-restart checks | Process tests are ignored by ordinary `cargo test`. |
 | `scripts/qualify-upstream.py` | Unchanged ExtendDB Python client tests against a compiled BeyondDB server | Passing selected files does not prove the whole protocol suite. |
 
@@ -719,6 +725,12 @@ query index extend unreleased initial SQL schemas; upgrading roots written by
 earlier binaries is unqualified.
 
 ### Native Cell and signed SDK fixtures
+
+The descriptions below retain historical Cellule fixture details. The unported
+`elastic_cells` and `peer_network` targets were removed on 2026-10-18 at the
+user's request; [their source and coverage inventory](retired-cellule-tests.md)
+records what is no longer gated. Current native Cellar results are recorded in
+[the migration report](../CELLAR_MIGRATION.md).
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,

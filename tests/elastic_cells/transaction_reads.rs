@@ -1,17 +1,14 @@
-use crate::*;
-use beyonddb::{
-    BoundedTransactionReadResult, ReadAccountTransactionResult,
-    ReadAccountTransactionResultBounded, ReadPartitionTransactionResult,
-    ReadPartitionTransactionResultBounded, ReadTransactionResultInput, TransactionReadResult,
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::{MutationIdentity, client::CellClient, identity::CellTarget};
+use beyonddb::*;
+use extenddb_core::{
+    expression::ExpressionMaps,
+    types::{AttributeValue, Item, TableKeyInfo},
 };
-use extenddb_core::types::TableKeyInfo;
-
+use extenddb_storage::{DataEngine, TransactGetOp, error::StorageError};
 fn mutation() -> MutationIdentity {
-    let mut identity = identity(242);
-    identity.request_id = RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-    identity
+    local_node::wall_mutation()
 }
-
 pub(super) async fn assert_shared_snapshots(
     client: &CellClient,
     storage: &CellStorage,
@@ -20,27 +17,10 @@ pub(super) async fn assert_shared_snapshots(
     key: &Item,
 ) {
     let account_id = &infos[0].account_id;
-    let account = account_target(account_id).unwrap();
     let mut participants = Vec::new();
     for (index, info) in infos.iter().enumerate() {
-        let route = crate::point_range(
-            client,
-            &account,
-            &info.table_id,
-            data_key_hash(&info.table_id, key, &info.base_key_schema).unwrap(),
-        )
-        .await;
-        let (target, participant) = match route {
-            None => (account.clone(), CoordinatorParticipantTarget::Account),
-            Some((partition_id, epoch)) => (
-                data_target(account_id, &info.table_id, &partition_id).unwrap(),
-                CoordinatorParticipantTarget::Data {
-                    table_id: info.table_id.clone(),
-                    partition_id,
-                    epoch,
-                },
-            ),
-        };
+        let (target, participant) =
+            transaction_fixture::participant_for_key(client, info, key).await;
         participants.push((
             target,
             CoordinatorParticipant {
@@ -59,10 +39,7 @@ pub(super) async fn assert_shared_snapshots(
     participants.sort_by_key(|(target, _)| *target.cell_id().as_bytes());
     for byte in [242, 243] {
         let id = [byte; 16];
-        provisioner
-            .admit_coordinator(account_id, &id)
-            .await
-            .unwrap();
+        provisioner.ensure(client, account_id, &id).await.unwrap();
         let coordinator = coordinator_target(account_id, &id).unwrap();
         transaction_command!(
             client,

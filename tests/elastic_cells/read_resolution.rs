@@ -1,13 +1,21 @@
-use crate::*;
-use beyonddb::{PrepareAccountTransaction, PrepareAccountTransactionInput};
-use extenddb_core::types::TableKeyInfo;
-
-fn mutation() -> MutationIdentity {
-    let mut id = identity(248);
-    id.request_id = RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-    id
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::{MutationIdentity, client::CellClient, identity::CellTarget};
+use beyonddb::*;
+use extenddb_core::{
+    expression::{Expr, ExpressionMaps, KeyCondition, PathElement},
+    types::{AttributeValue, Item, TableKeyInfo},
+};
+use extenddb_storage::{DataEngine, TableEngine, error::StorageError};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::AtomicI64},
+};
+fn identity(_: u8) -> MutationIdentity {
+    local_node::wall_mutation()
 }
-
+fn mutation() -> MutationIdentity {
+    local_node::wall_mutation()
+}
 pub(super) async fn assert_reads_finish_terminal_decisions(
     client: &CellClient,
     storage: &CellStorage,
@@ -34,28 +42,14 @@ pub(super) async fn assert_reads_finish_terminal_decisions(
         let id = *uuid::Uuid::now_v7().as_bytes();
         let key = Item::from([("id".into(), AttributeValue::S(token.clone()))]);
         provisioner
-            .admit_coordinator(account_id, token.as_bytes())
+            .ensure(client, account_id, token.as_bytes())
             .await
             .unwrap();
         let coordinator = coordinator_target(account_id, token.as_bytes()).unwrap();
         let mut participants = Vec::new();
         for (position, info) in infos.iter().enumerate() {
-            let account = account_target(account_id).unwrap();
-            let route = crate::single_leaf_route(client, &account, &info.table_id.clone()).await;
-            let (target, participant) = match route {
-                Some(route) => {
-                    let spec = &route.partitions[0];
-                    (
-                        data_target(account_id, &info.table_id, &spec.partition_id).unwrap(),
-                        CoordinatorParticipantTarget::Data {
-                            table_id: info.table_id.clone(),
-                            partition_id: spec.partition_id,
-                            epoch: spec.epoch,
-                        },
-                    )
-                }
-                None => (account, CoordinatorParticipantTarget::Account),
-            };
+            let (target, participant) =
+                transaction_fixture::participant_for_key(client, info, &key).await;
             participants.push((
                 target,
                 CoordinatorParticipant {
@@ -216,46 +210,25 @@ pub(super) async fn assert_reads_finish_terminal_decisions(
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn query_resolves_committed_create_in_intent_range() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "read-resolution".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
-    let account_id = "123456789012";
-    let account = account_target(account_id).unwrap();
-    let directory = tempfile::TempDir::new().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("read-resolution"),
-        *account.application().as_bytes(),
-    );
-    let session = SessionId::from_bytes([248; 16]);
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
+#[test]
+fn query_resolves_committed_create_in_intent_range() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
         .unwrap();
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application.clone(),
-            layout.clone(),
-            session,
-            "http://resolution.internal".into(),
-            directory.path().into(),
-        )
-        .unwrap(),
-    );
-    provisioner.admit_account(account_id).await.unwrap();
-    let client = CellClient::local_runtime(application.registry(), host.runtime(), layout);
-    let storage = CellStorage::new(client.clone(), "us-east-1")
-        .with_initial_partitions(provisioner.clone())
-        .with_transaction_coordinators(provisioner.clone());
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+    let account_id = "123456789012";
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(AtomicI64::new(mutation().issued_at_ms));
+    let (node, client) = local_node::start(directory.path(), clock, host.handle(), core.handle()).await.unwrap();
+    let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap()).with_initial_partition_count(2).unwrap());
+    let storage = CellStorage::new(client.clone(), "local").with_initial_partitions(provisioner.clone()).with_transaction_coordinators(provisioner.clone());
     let table = storage.create_table(account_id, serde_json::from_value(serde_json::json!({
         "TableName": "ReadResolution", "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
         "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "N"}], "BillingMode": "PAY_PER_REQUEST"
@@ -264,21 +237,20 @@ async fn query_resolves_committed_create_in_intent_range() {
         .table_key_info(account_id, &table.table_name)
         .await
         .unwrap();
-    let route = crate::single_leaf_route(&client, &account, &table.table_id)
-        .await
-        .unwrap();
-    let partition = &route.partitions[0];
-    let target = data_target(account_id, &info.table_id, &partition.partition_id).unwrap();
+    let created = Item::from([("pk".into(), AttributeValue::S("same".into())), ("sk".into(), AttributeValue::N("9".into()))]);
+    let (target, participant) = transaction_fixture::participant_for_key(&client, &info, &created).await;
+    let CoordinatorParticipantTarget::Data {epoch, ..} = participant else {panic!("expected routed table")};
     assert_query_finishes_commit(
         &storage,
         &client,
         &target,
-        partition.epoch,
+        epoch,
         &info,
         &provisioner,
     )
     .await;
-    host.shutdown().await.unwrap();
+    local_node::stop(node).await.unwrap();
+    });
 }
 
 async fn assert_query_finishes_commit(
@@ -306,23 +278,15 @@ async fn assert_query_finishes_commit(
     );
     let id = [249; 16];
     provisioner
-        .admit_coordinator(&key_info.account_id, &id)
+        .ensure(client, &key_info.account_id, &id)
         .await
         .unwrap();
     let coordinator = coordinator_target(&key_info.account_id, &id).unwrap();
-    let route = crate::single_leaf_route(
-        client,
-        &account_target(&key_info.account_id).unwrap(),
-        &key_info.table_id.clone(),
-    )
-    .await
-    .unwrap();
+    let (owner, target_participant) =
+        transaction_fixture::participant_for_key(client, key_info, &created).await;
+    assert_eq!(&owner, target);
     let participant = CoordinatorParticipant {
-        target: CoordinatorParticipantTarget::Data {
-            table_id: key_info.table_id.clone(),
-            partition_id: route.partitions[0].partition_id,
-            epoch,
-        },
+        target: target_participant,
         operations: vec![IndexedTransactionOperation {
             index: 0,
             operation: TransactionOperation::Put(PutItemInput {

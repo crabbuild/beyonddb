@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::types::{
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker, aws CLI, and the pinned RustFS GA image"]
 async fn cached_metadata_observes_local_create_and_update() {
-    let mut fixture = process_fixture_with_cache(1, true).await;
+    let mut fixture = process_fixture_with_cache(2, true).await;
     let before = fixture.sdk.list_tables().send().await.unwrap();
     assert!(!before.table_names().contains(&"ProcessData".to_owned()));
 

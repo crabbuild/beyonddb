@@ -12,8 +12,8 @@ macro_rules! transaction_command {
             let reference =
                 beyonddb::TransactionPayloadRef::new(&bytes, identity.expires_at_ms).unwrap();
             for chunk in reference.chunks(&bytes) {
-                let identity = cellule_runtime::MutationIdentity {
-                    request_id: cellule_runtime::identity::RequestId::from_bytes(
+                let identity = bdb_cellar_runtime::MutationIdentity {
+                    request_id: bdb_cellar_runtime::identity::RequestId::from_bytes(
                         *uuid::Uuid::now_v7().as_bytes(),
                     ),
                     ..identity

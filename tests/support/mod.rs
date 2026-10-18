@@ -21,12 +21,17 @@ struct PayloadTransaction {
     expected: Vec<HashMap<String, AttributeValue>>,
 }
 
+/// Appending retains the leading ordered key component used by bootstrap ranges.
+pub fn escaped_key(id: &str) -> String {
+    format!("{id}-escaped")
+}
+
 impl LargeTransaction {
     pub async fn write(sdk: &Client, keys: Vec<(String, String)>) -> Self {
         assert_eq!(keys.len(), 10);
         let escaped_keys = vec![keys[0].clone(), keys[9].clone()]
             .into_iter()
-            .map(|(table, id)| (table, format!("escaped-{id}")))
+            .map(|(table, id)| (table, escaped_key(&id)))
             .collect();
         let cases = vec![
             PayloadTransaction::new(

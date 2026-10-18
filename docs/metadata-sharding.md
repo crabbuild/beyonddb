@@ -56,7 +56,7 @@ Catalog sharding and 10,000-Cell/multi-TB qualification remain open.
 | GSI split | `directory/transfer.rs`, `global_index/transfer.rs`, `provision/global_indexes.rs` | Transfer versions and tombstones as well as items; retain unfinished source/child reservations through opening. |
 | Delete | `table/deletion.rs`, account lifecycle marker and cleanup worker | Fence the exact generation before bounded metadata cleanup. Prepared account transactions prevent deletion; name reuse waits for catalog removal. |
 | Statistics | `statistics.rs::PublishStatistics`, `backend/statistics.rs` | Base and GSI sampling validate each leaf before leaving its immutable interval; final publication checks the live table and index generation set. |
-| Residency/recovery | `provision.rs`, `provision/residency.rs`, `provision/transactions.rs` | Metadata absence is authoritative only at the current owner and for the exact generation. Original transaction participants remain recoverable after directory changes. |
+| Residency/recovery | `src/cellar/provision.rs`, `src/cellar/transactions.rs`, Cellar SDK owner routing | Metadata absence is authoritative only at the current owner and for the exact generation. Original transaction participants remain recoverable after directory changes. |
 
 Moving SQL tables alone would break these contracts. Increasing the account
 budget or creating one directory Cell per table would retain an eventual

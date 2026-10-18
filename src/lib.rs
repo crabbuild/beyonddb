@@ -1,4 +1,5 @@
-//! Account-scoped DynamoDB state hosted by Cellule.
+//! DynamoDB domain state executed inside the embedded Cellar SDK.
+#![recursion_limit = "512"]
 
 mod authorization;
 mod backend;
@@ -7,14 +8,18 @@ mod credentials;
 mod directory;
 mod expression_wire;
 mod global_index;
+#[path = "cellar/inventory.rs"]
+mod inventory;
 mod item_storage;
 mod item_wire;
 mod items;
 mod participant;
 mod partition;
+#[path = "cellar/provision.rs"]
 mod provision;
 mod routing;
 mod secondary_index;
+#[path = "cellar/server.rs"]
 mod server;
 mod split;
 mod statistics;
@@ -22,6 +27,9 @@ mod stream_journal;
 mod stream_retention;
 mod table;
 mod tags;
+#[cfg(test)]
+#[path = "cellar/test_support.rs"]
+mod test_support;
 mod transaction_coordinator;
 mod transaction_payload;
 mod transaction_token;
@@ -41,10 +49,8 @@ pub use partition::*;
 pub use provision::*;
 pub use routing::*;
 pub use server::{
-    BeyonddbPeerScope, BeyonddbPeers, NodeLeasePublisher, PeerNodeDurabilityProvider,
-    PeerNodeLogTransport, PublishedNodeLease, PublishedNodeLogAuthority, RuntimeMetrics,
-    build_http_state, build_http_state_with_cache, measured_node_capacity, recover_fenced_node_log,
-    shutdown_serving_node,
+    CellarServer, CellarServerConfig, TaskGroup, TransactionRecovery, build_http_state,
+    build_http_state_with_cache, http_dispatch_client,
 };
 pub use split::*;
 pub use stream_journal::{
@@ -69,20 +75,21 @@ pub use ttl::*;
 pub use authorization::CellAuthorizationStore;
 pub use backend::{CellStorage, CoordinatorProvisioner, InitialPartitionProvisioner};
 pub use catalog::CellCatalogStore;
-pub use credentials::{CellCredentialStore, credential_target, initialize_credentials};
+pub use credentials::{CellCredentialStore, credential_target};
 
 use std::{collections::HashSet, sync::OnceLock};
 
-use cellule_app::{ApplicationBuilder, CellApplication, CellType};
-use cellule_runtime::cell::catalog::CatalogRole;
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use cellule_runtime::identity::{ApplicationId, CellTarget, Digest, NamespaceId, TenantId};
-use cellule_runtime::primitives::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::app::{ApplicationBuilder, CellApplication, CellType};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use bdb_cellar_runtime::descriptors::CatalogRole;
+use bdb_cellar_runtime::identity::partition_for_shard;
+use bdb_cellar_runtime::identity::{ApplicationId, CellTarget, Digest, NamespaceId, TenantId};
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, Query, QueryContext, RegistryBuilder,
 };
-use cellule_runtime::{Error, Result, partition_for_shard};
+use bdb_cellar_runtime::sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
+use bdb_cellar_runtime::{Error, Result};
 use extenddb_core::limits::LimitsConfig;
 use extenddb_core::types::{
     AttributeDefinition, BillingMode, CreateTableInput, Item, KeySchemaElement,
@@ -101,7 +108,7 @@ pub const APPLICATION_ID: ApplicationId = APPLICATION;
 static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
-        cellule_runtime::primitives::capacity::SCHEMA,
+        bdb_cellar_runtime::capacity::SCHEMA,
         participant::SCHEMA,
         secondary_index::SCHEMA,
         global_index::outbox::SCHEMA,
@@ -303,6 +310,7 @@ impl CellApplication for Beyonddb {
 
     fn register(builder: &mut ApplicationBuilder) -> Result<()> {
         builder.register(AccountModule)?;
+        builder.register(inventory::InventoryModule)?;
         builder.register(directory::DirectoryModule)?;
         builder.register(partition::DataModule)?;
         builder.register(global_index::GlobalIndexModule)?;
@@ -312,6 +320,7 @@ impl CellApplication for Beyonddb {
             CellType::new(MODULE, MODULE, NAMESPACE, CatalogRole::Sql, 1)?
                 .with_limits(512 * 1024 * 1024, 64 * 1024 * 1024)?,
         )?;
+        builder.cell_type(inventory::cell_type()?)?;
         builder.cell_type(data_cell_type()?)?;
         builder.cell_type(directory::cell_type()?)?;
         builder.cell_type(global_index::cell_type()?)?;
@@ -382,21 +391,9 @@ fn account_for_tenant(tenant: TenantId) -> Result<CellTarget> {
     CellTarget::new(tenant, APPLICATION, NAMESPACE, &partition_for_shard(0))
 }
 
-/// Installs the initial account schema during Cell bootstrap.
-pub fn initialize_account(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(&SCHEMA)?;
-    Ok(())
-}
-
-/// Installs a data partition's SQL schema during Cell bootstrap.
-pub fn initialize_partition(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(&partition::SCHEMA)?;
-    Ok(())
-}
-
 struct AccountModule;
 
-impl cellule_runtime::registry::CellModule for AccountModule {
+impl bdb_cellar_runtime::registry::CellModule for AccountModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {

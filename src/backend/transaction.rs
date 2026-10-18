@@ -1,7 +1,7 @@
 //! Resume read and write transactions from immutable coordinator records.
 
-use cellule_runtime::client::{InvocationError, Receipt};
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::{InvocationError, Receipt};
+use bdb_cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
 use std::time::Duration;
@@ -234,7 +234,7 @@ impl CellStorage {
                         .prepare_transaction_participant(&target, input.clone())
                         .await;
                     match result {
-                        Err(PhaseError::Capacity(cellule_runtime::Error::Capacity(_)))
+                        Err(PhaseError::Capacity(bdb_cellar_runtime::Error::Capacity(_)))
                             if admission_retries < 4 =>
                         {
                             admission_retries += 1;
@@ -367,7 +367,7 @@ impl CellStorage {
             Err(InvocationError::Rejected(result)) => result.output.0,
             // An absent reply cannot distinguish a durable decision from an
             // unfinished command. Read authoritative state before resolving.
-            Err(InvocationError::Pending(_)) => {
+            Err(InvocationError::Ambiguous { .. }) => {
                 return self.finish_transaction(coordinator, read).await;
             }
             Err(error) => return Err(cell_error(error)),
@@ -448,7 +448,7 @@ impl CellStorage {
             Err(InvocationError::Rejected(result))
                 if result.output.0 == DecideCrossCellTransactionOutcome::DecisionConflict => {}
             // A lost reply may conceal a commit; read the authoritative state.
-            Err(InvocationError::Pending(_)) => {}
+            Err(InvocationError::Ambiguous { .. }) => {}
             Ok(_) | Err(InvocationError::Rejected(_)) => {
                 return Err(StorageError::Internal(
                     "coordinator refused transaction decision".into(),
@@ -545,7 +545,7 @@ impl CellStorage {
         match result {
             Ok(result) => Ok((result.output.0, result.receipt)),
             Err(InvocationError::Rejected(result)) => Ok((result.output.0, result.receipt)),
-            Err(InvocationError::Pending(_)) => {
+            Err(InvocationError::Ambiguous { .. }) => {
                 let observed = self.participant_state(target, read).await?;
                 let outcome = match observed.output.0 {
                     ParticipantTransactionState::Prepared => PrepareTransactionOutcome::Replay,

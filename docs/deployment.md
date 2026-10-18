@@ -1,5 +1,10 @@
 # Deploy a BeyondDB node
 
+For `beyonddb-cellar`, use [the embedded Cellar server guide](cellar-server.md).
+It describes the current executable, configuration and fresh ordered storage
+roots. The Cellule configuration and runtime qualification recorded below are
+historical and still require migration.
+
 This guide builds and bootstraps one BeyondDB node, then explains the requirements for adding peers. The serving binary has restart-tested process fixtures, but table backup and point-in-time recovery (PITR), upgrades of older roots, unattended fleet recovery, and sustained load remain unqualified. Preserve the encryption key and object-store root as durable state.
 
 ```mermaid

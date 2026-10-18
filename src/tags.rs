@@ -1,6 +1,6 @@
 //! Table resource tags committed with account Cell commands.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Tag;
 use serde::{Deserialize, Serialize};
 

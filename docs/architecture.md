@@ -1,5 +1,10 @@
 # Understand BeyondDB's architecture and durability
 
+For `beyonddb-cellar`, the current runtime is described in
+[the embedded server guide](cellar-server.md), and table ownership follows
+[ordered cell partitioning](ordered-cell-partitioning.md). The Cellule runtime
+details and HASH placement described below record the earlier implementation.
+
 This page explains how a signed request becomes durable, which Cell owns each kind of state, and how another node recovers that state. BeyondDB uses two pinned projects: ExtendDB owns the DynamoDB protocol and security boundary; Cellule owns fenced execution and durable publication. BeyondDB connects them through Cell schemas, adapters, routing, provisioners, a transaction coordinator, and serving workers. The design does not establish fleet-scale performance.
 
 ![The layers from AWS clients through ExtendDB, BeyondDB, and Cellule to the object store](../diagram/beyonddb-architecture/layers.svg)
@@ -174,7 +179,7 @@ Use these entry points to follow a diagram into the implementation:
 
 | Boundary | Entry point |
 | --- | --- |
-| Public server composition | [`src/server.rs`](../src/server.rs) and [`src/bin/beyonddb.rs`](../src/bin/beyonddb.rs) |
+| Public server composition | [`src/cellar/server.rs`](../src/cellar/server.rs) and [`src/bin/beyonddb.rs`](../src/bin/beyonddb.rs) |
 | Table and item adapter | [`src/backend.rs`](../src/backend.rs) and [`src/backend/data.rs`](../src/backend/data.rs) |
 | Cell routing and ownership | [`src/routing.rs`](../src/routing.rs), [`src/directory.rs`](../src/directory.rs) |
 | Transaction driver and coordinator | [`src/backend/transaction.rs`](../src/backend/transaction.rs), [`src/transaction_coordinator.rs`](../src/transaction_coordinator.rs) |

@@ -1,6 +1,7 @@
 //! Complete cataloged table creation through the same request and recovery path.
 
-use cellule_runtime::client::{CellClient, InvocationError};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_keyspace::RangeKey;
 use extenddb_storage::error::StorageError;
 
 use super::{InitialPartitionProvisioner, cell_error, mutation_identity};
@@ -16,38 +17,27 @@ pub(super) fn placement(
     configured_partitions: Option<u16>,
     tags: &[extenddb_core::types::Tag],
 ) -> Result<crate::TablePlacement, StorageError> {
+    let count = configured_partitions
+        .filter(|count| *count >= 2)
+        .ok_or_else(|| {
+            StorageError::Connection("multiple data-cell provisioning is required".into())
+        })?;
     let mut models = tags.iter().filter(|tag| tag.key == CELL_MODEL_TAG);
-    let Some(model) = models.next() else {
-        return Ok(
-            configured_partitions.map_or(crate::TablePlacement::Account, |count| {
-                crate::TablePlacement::Routed {
-                    initial_partitions: count,
-                }
-            }),
-        );
-    };
-    if models.next().is_some() {
-        return Err(StorageError::Validation(
-            "duplicate beyonddb:cell-model tag".into(),
-        ));
+    if let Some(model) = models.next() {
+        if models.next().is_some() {
+            return Err(StorageError::Validation(
+                "duplicate beyonddb:cell-model tag".into(),
+            ));
+        }
+        if !matches!(model.value.as_str(), "auto" | "partitioned") {
+            return Err(StorageError::Validation(
+                "Cellar tables require partitioned placement; single is unsupported".into(),
+            ));
+        }
     }
-    let Some(count) = configured_partitions else {
-        return Err(StorageError::Validation(
-            "cell model selection requires data Cell provisioning".into(),
-        ));
-    };
-    match model.value.as_str() {
-        "single" => Ok(crate::TablePlacement::Single),
-        "auto" => Ok(crate::TablePlacement::Routed {
-            initial_partitions: 1,
-        }),
-        "partitioned" => Ok(crate::TablePlacement::Routed {
-            initial_partitions: count.max(2),
-        }),
-        _ => Err(StorageError::Validation(
-            "beyonddb:cell-model must be single, auto, or partitioned".into(),
-        )),
-    }
+    Ok(crate::TablePlacement::Routed {
+        initial_partitions: count,
+    })
 }
 
 pub(crate) async fn publish_initial_routes(
@@ -63,7 +53,7 @@ pub(crate) async fn publish_initial_routes(
         &target,
         RoutePageInput {
             table_id: record.id.clone(),
-            start_hash: None,
+            start_key: None,
             after_lower: None,
             expected_epoch: None,
         },
@@ -90,7 +80,7 @@ pub(crate) async fn publish_initial_routes(
             .into_iter()
             .map(|range| crate::RoutePagePartition {
                 partition_id: range.partition_id,
-                lower: range.lower.unwrap_or([0; 16]),
+                lower: range.lower.clone().unwrap_or_else(RangeKey::minimum),
                 upper: range.upper,
                 epoch: range.epoch,
             })
@@ -123,8 +113,8 @@ pub(crate) async fn publish_initial_routes(
         .iter()
         .map(|part| crate::RoutePagePartition {
             partition_id: part.partition_id,
-            lower: part.lower.unwrap_or([0; 16]),
-            upper: part.upper,
+            lower: part.lower.clone().unwrap_or_else(RangeKey::minimum),
+            upper: part.upper.clone(),
             epoch: part.epoch,
         })
         .collect();

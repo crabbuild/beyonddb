@@ -1,4 +1,6 @@
 /target/
+/crates/bdb-cellar-runtime/target/
+/crates/bdb-keyspace/target/
 .env
 .env.*
 !.env.example

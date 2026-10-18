@@ -1,5 +1,20 @@
-use crate::*;
-use beyonddb::{ReadCoordinatorToken, ReadCoordinatorTokenOutcome};
+use crate::local_node;
+use bdb_cellar_runtime::{MutationIdentity, client::InvocationError, identity::RequestId};
+use beyonddb::*;
+use extenddb_core::types::{AttributeValue, Item};
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
 
 const ACCOUNT: &str = "123456789012";
 const TOKEN: &str = "retained-token";
@@ -49,104 +64,96 @@ fn request() -> BeginCrossCellTransactionInput {
     }
 }
 
-// Historical snapshots use old logical times so expiry is exercised without
-// sleeping ten minutes or changing a live Cell's SQLite state behind its actor.
-fn seed(
-    transaction: &rusqlite::Transaction<'_>,
-    state: i64,
-    unresolved: i64,
-) -> cellule_runtime::Result<()> {
-    initialize_coordinator(transaction)?;
-    let input = request();
-    let digest = blake3::hash(&serde_json::to_vec(&input.participants).unwrap());
-    transaction.execute(
-        "INSERT INTO ddb_coordinator_transactions \
-         (transaction_id, account_id, token, fingerprint, request_digest, state, unresolved_count, created_at_ms, decided_at_ms, completed_at_ms) \
-         VALUES (?1, ?2, ?3, 'original', ?4, ?5, ?6, 1, ?7, ?8)",
-        rusqlite::params![input.transaction_id.as_slice(), ACCOUNT, TOKEN, digest.as_bytes().as_slice(), state, unresolved, (state != 0).then_some(2_i64), (unresolved == 0).then_some(3_i64)],
-    )?;
-    for (position, participant) in input.participants.iter().enumerate() {
-        let CoordinatorParticipantTarget::Data {
-            table_id,
-            partition_id,
-            ..
-        } = &participant.target
-        else {
-            unreachable!()
-        };
-        let cell = data_target(ACCOUNT, table_id, partition_id)?;
-        transaction.execute(
-            "INSERT INTO ddb_coordinator_participants \
-             (transaction_id, position, cell_id, target, operation_chunks, prepared_sequence, resolved_sequence, retain_operations) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, 0)",
-            rusqlite::params![input.transaction_id.as_slice(), position as i64, cell.cell_id().as_bytes().as_slice(), serde_json::to_vec(&participant.target).unwrap(), (state != 0).then_some(1_i64), ((position as i64) < 2 - unresolved).then_some(2_i64)],
-        )?;
-        transaction.execute(
-            "INSERT INTO ddb_transaction_payloads (transaction_id, position, chunk, payload) VALUES (?1, ?2, 0, ?3)",
-            rusqlite::params![input.transaction_id.as_slice(), position as i64, serde_json::to_vec(&participant.operations).unwrap()],
-        )?;
-    }
-    Ok(())
+async fn assert_payload(
+    client: &bdb_cellar_runtime::client::CellClient,
+    coordinator: &bdb_cellar_runtime::identity::CellTarget,
+    original: &BeginCrossCellTransactionInput,
+    position: usize,
+) {
+    let payload = client
+        .query::<ReadCoordinatorParticipant>(
+            coordinator,
+            None,
+            Json(ReadCoordinatorParticipantInput {
+                chunk: 0,
+                account_id: ACCOUNT.into(),
+                transaction_id: original.transaction_id,
+                routing_key: TOKEN.as_bytes().to_vec(),
+                position: position as u8,
+            }),
+        )
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(payload.target, original.participants[position].target);
+    assert_eq!(
+        serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&payload.payload).unwrap(),
+        original.participants[position].operations
+    );
 }
 
-fn old_begin(tx: &rusqlite::Transaction<'_>) -> cellule_runtime::Result<()> {
-    seed(tx, 0, 2)
-}
-fn old_unresolved_commit(tx: &rusqlite::Transaction<'_>) -> cellule_runtime::Result<()> {
-    seed(tx, 1, 1)
-}
-fn old_completed_commit(tx: &rusqlite::Transaction<'_>) -> cellule_runtime::Result<()> {
-    seed(tx, 1, 0)
-}
-
-type Initialize = for<'a> fn(&rusqlite::Transaction<'a>) -> cellule_runtime::Result<()>;
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_window_expires() {
-    let cases: [(Initialize, CoordinatorDecision, bool); 3] = [
-        (old_begin, CoordinatorDecision::Begin, false),
-        (old_unresolved_commit, CoordinatorDecision::Commit, false),
-        (old_completed_commit, CoordinatorDecision::Commit, true),
+#[test]
+fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_window_expires() {
+    let host_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host_runtime.block_on(async {
+    // All states are produced by the actual coordinator commands. Only the
+    // application clock advances; no live SQLite files are edited or seeded.
+    let cases = [
+        (0, CoordinatorDecision::Begin, false),
+        (1, CoordinatorDecision::Commit, false),
+        (2, CoordinatorDecision::Commit, true),
     ];
-    for (initialize, original_decision, expired) in cases {
-        let application = Arc::new(
-            Beyonddb::compile(BuildDescriptor {
-                source_revision: "coordinator-token-test".into(),
-                cargo_lock_digest: Digest::from_bytes([1; 32]),
-            })
-            .unwrap(),
-        );
+    for (state, original_decision, expired) in cases {
         let coordinator = coordinator_target(ACCOUNT, TOKEN.as_bytes()).unwrap();
-        let session = SessionId::from_bytes([210; 16]);
-        let directory = tempfile::TempDir::new().unwrap();
-        let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            object_store::path::Path::from("coordinator-tokens"),
-            *coordinator.application().as_bytes(),
-        );
-        let host = CellNodeBuilder::new(application.clone())
-            .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
-            .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-            .with_session(session)
-            .build_unleased_for_maintenance()
-            .unwrap();
-        let registry = application.registry();
-        let bootstrap = Bootstrap {
-            runtime: host.runtime(),
-            registry: &registry,
-            layout: &layout,
-            session,
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(AtomicI64::new(now_ms()));
+        let identity = |byte| MutationIdentity {
+            request_id: RequestId::from_bytes([byte; 16]),
+            ..local_node::mutation(&clock)
         };
-        let handle = bootstrap
-            .cell(
-                &coordinator,
-                "beyonddb-coordinator",
-                210,
-                &directory.path().join("coordinator.sqlite"),
-                initialize,
-            )
-            .await;
-        let client = CellClient::local(registry.clone(), handle);
+        let (node, client) = local_node::start(
+            directory.path(), clock.clone(), host_runtime.handle(), core_runtime.handle(),
+        ).await.unwrap();
         let original = request();
+        assert_eq!(transaction_command!(client, BeginCrossCellTransaction, &coordinator,
+            identity(200), Json(original.clone())).await.unwrap().output.0,
+            BeginCrossCellTransactionOutcome::Begun);
+        for position in 0..2 {
+            assert_payload(&client, &coordinator, &original, position).await;
+        }
+        if state != 0 {
+            for (position, participant) in original.participants.iter().enumerate() {
+                let CoordinatorParticipantTarget::Data { table_id, partition_id, .. } = &participant.target else { unreachable!() };
+                client.command::<RecordParticipantPrepare>(&coordinator, identity(201 + position as u8), Json(CoordinatorPhaseInput {
+                    account_id: ACCOUNT.into(), transaction_id: original.transaction_id,
+                    routing_key: TOKEN.as_bytes().to_vec(), position: position as u8,
+                    participant_cell: *data_target(ACCOUNT, table_id, partition_id).unwrap().cell_id().as_bytes(), sequence: 1,
+                })).await.unwrap();
+            }
+            client.command::<DecideCrossCellTransaction>(&coordinator, identity(203), Json(DecideCrossCellTransactionInput {
+                account_id: ACCOUNT.into(), transaction_id: original.transaction_id,
+                routing_key: TOKEN.as_bytes().to_vec(), decision: CoordinatorDecision::Commit,
+            })).await.unwrap();
+            for (position, participant) in original.participants.iter().take(state).enumerate() {
+                let CoordinatorParticipantTarget::Data { table_id, partition_id, .. } = &participant.target else { unreachable!() };
+                client.command::<RecordParticipantResolution>(&coordinator, identity(204 + position as u8), Json(CoordinatorPhaseInput {
+                    account_id: ACCOUNT.into(), transaction_id: original.transaction_id,
+                    routing_key: TOKEN.as_bytes().to_vec(), position: position as u8,
+                    participant_cell: *data_target(ACCOUNT, table_id, partition_id).unwrap().cell_id().as_bytes(), sequence: 2,
+                })).await.unwrap();
+            }
+        }
+        clock.fetch_add(10 * 60 * 1_000 + 1, Ordering::SeqCst);
         let token = original.token.clone().unwrap();
         let read = |token| client.query::<ReadCoordinatorToken>(&coordinator, None, Json(token));
         let expected = if expired {
@@ -212,28 +219,34 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
                 }
             }
         );
-        let original_payload = client
-            .query::<ReadCoordinatorParticipant>(
-                &coordinator,
-                None,
-                Json(ReadCoordinatorParticipantInput {
-                    chunk: 0,
-                    account_id: ACCOUNT.into(),
-                    transaction_id: original.transaction_id,
-                    routing_key: TOKEN.as_bytes().to_vec(),
-                    position: 0,
-                }),
-            )
-            .await
-            .unwrap()
-            .output
-            .unwrap();
-        assert_eq!(original_payload.target, original.participants[0].target);
-        assert_eq!(
-            serde_json::from_slice::<Vec<IndexedTransactionOperation>>(&original_payload.payload)
-                .unwrap(),
-            original.participants[0].operations
-        );
+        for position in state..2 {
+            assert_payload(&client, &coordinator, &original, position).await;
+        }
+        // Resolution deliberately collects write payloads. The old SQL seed
+        // bypassed that command; verify its retained decision/identity contract
+        // through delayed phase replies instead of requiring unreachable rows.
+        for position in 0..state {
+            assert!(client.query::<ReadCoordinatorParticipant>(&coordinator, None, Json(ReadCoordinatorParticipantInput {
+                chunk: 0, account_id: ACCOUNT.into(), transaction_id: original.transaction_id,
+                routing_key: TOKEN.as_bytes().to_vec(), position: position as u8,
+            })).await.unwrap().output.is_none());
+            let mut phase = CoordinatorPhaseInput {
+                account_id: ACCOUNT.into(), transaction_id: original.transaction_id,
+                routing_key: TOKEN.as_bytes().to_vec(), position: position as u8,
+                participant_cell: [99; 32], sequence: 2,
+            };
+            assert!(matches!(client.command::<RecordParticipantResolution>(&coordinator, identity(206 + position as u8), Json(phase.clone())).await,
+                Err(InvocationError::Rejected(result)) if result.output.0 == CoordinatorPhaseOutcome::WrongParticipant));
+            let CoordinatorParticipantTarget::Data {table_id, partition_id, ..} = &original.participants[position].target else { unreachable!() };
+            phase.participant_cell = *data_target(ACCOUNT, table_id, partition_id).unwrap().cell_id().as_bytes();
+            assert_eq!(client.command::<RecordParticipantResolution>(&coordinator, identity(208 + position as u8), Json(phase)).await.unwrap().output.0, CoordinatorPhaseOutcome::Replay);
+        }
+        let status = client.query::<ReadCrossCellTransaction>(&coordinator, None, Json(ReadCrossCellTransactionInput {
+            account_id: ACCOUNT.into(), transaction_id: original.transaction_id, routing_key: TOKEN.as_bytes().to_vec(),
+        })).await.unwrap().output.0.unwrap();
+        assert_eq!(status.decision, original_decision);
+        assert_eq!(usize::from(status.resolved_count), state);
+        assert_eq!(status.participant_count, 2);
         retry.token = Some(changed_token);
         assert!(
             matches!(transaction_command!(client, BeginCrossCellTransaction,&coordinator, identity(212), Json(retry)).await, Err(InvocationError::Rejected(result)) if result.output.0 == BeginCrossCellTransactionOutcome::Mismatch)
@@ -317,6 +330,7 @@ async fn tokens_pin_unfinished_work_and_replay_original_routes_until_completion_
                 }
             );
         }
-        host.shutdown().await.unwrap();
+        local_node::stop(node).await.unwrap();
     }
+    });
 }

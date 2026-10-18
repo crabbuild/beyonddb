@@ -3,9 +3,11 @@
 BeyondDB is an **in-progress, self-hosted DynamoDB-compatible service**. It
 uses [ExtendDB](https://github.com/ExtendDB/extenddb) for the DynamoDB HTTP
 protocol, SigV4, IAM evaluation, validation, and expressions. It uses
-[Cellule](https://github.com/crabbuild/cellule) for fenced Cell ownership,
-SQLite execution, LTX publication, and object-store durability. The reviewed
-dependency revisions are pinned in [Cargo.toml](Cargo.toml).
+[Cellar](https://github.com/crabbuild/cellar) for fenced Cell ownership,
+SQLite execution, LTX publication, and object-store durability. The
+[`cellar-main` crates.io release](https://crates.io/crates/cellar-main/0.1.0) is
+pinned to `=0.1.0`, and ExtendDB's reviewed Git revision is pinned in
+[Cargo.toml](Cargo.toml).
 
 An AWS SDK can send signed requests to BeyondDB's public endpoint. Core table
 and item operations, transactions, TTL, selected secondary indexes, and a
@@ -14,26 +16,37 @@ tests. **BeyondDB is not yet a complete or production-qualified DynamoDB
 replacement.** See the [API coverage and gaps](docs/api.md) before choosing a
 workload.
 
+**Cellar migration branch:** the production manifest and domain handlers now use
+Cellar. The executable passes local signed SDK/restart checks. Table ownership
+now uses ordered `(PK, SK)` ranges across multiple cells, with a real serving
+router/split fixture. Nine bucket-backed process cases and SDK handoff to a
+second node pass. Historical Cellule results below are not Cellar qualification.
+The user retired the unported Cellule-only test targets; their
+[coverage inventory](docs/retired-cellule-tests.md) records the gaps and source
+revision. All-target build and strict Clippy gates remain enabled and pass.
+Broader API/index and fleet fault qualification remains future work.
+See [migration status](CELLAR_MIGRATION.md) and the
+[ordered range plan](docs/ordered-cell-partitioning.md).
+
 ## Start here
 
 | Need | Read |
 | --- | --- |
-| Configure and start a node | [Deployment guide](docs/deployment.md) |
+| Configure and start a node | [Embedded Cellar server](docs/cellar-server.md) |
 | Send AWS CLI requests | [User guide](docs/user-guide.md) |
 | Check an operation or limitation | [API coverage](docs/api.md) |
-| Understand Cells, routing, and transactions | [Architecture](docs/architecture.md) |
+| Understand Cells, routing, and transactions | [Ordered cell architecture](docs/ordered-cell-partitioning.md) |
 | Measure latency and throughput | [Performance guide](docs/performance.md) |
 | Follow implementation evidence and open gates | [Implementation status](docs/implementation-status.md) |
 
 ## Architecture at a glance
 
-![Layered BeyondDB architecture: AWS clients, ExtendDB protocol, BeyondDB state and routing, Cellule execution, and object-store durability](diagram/beyonddb-architecture/layers.svg)
-
 ExtendDB owns the public HTTP, SigV4, IAM, validation, and expression layers.
 BeyondDB implements ExtendDB's storage contracts with Cell-backed state,
-routing, provisioning, and transaction coordination. Cellule owns fenced Cell
-execution, peer transport, SQLite commands, and LTX publication. The object
-store holds published roots for owner recovery. [PNG version](diagram/beyonddb-architecture/layers@2x.png)
+routing, provisioning, and transaction coordination. Cellar owns fenced Cell
+execution, peer transport, SQLite commands, and durability. ExtendDB and Cellar
+are embedded in the BeyondDB executable. In fleet mode the object store holds
+published state for owner recovery.
 
 ### BeyondDB's Cell types
 
@@ -49,32 +62,35 @@ flowchart LR
     Coordinator --> Account
 ```
 
-Each box represents BeyondDB state hosted in Cellule, not an independent
+Each box represents BeyondDB state hosted in Cellar, not an independent
 HTTP service. An account Cell owns table metadata; data Cells own
-partition-key ranges. A GSI is maintained asynchronously from a journal
+ordered `(PK, SK)` ranges. A GSI is maintained asynchronously from a journal
 committed with the base item. Cross-Cell transactions use a durable
 coordinator decision and idempotent participant resolution.
 
-### Choose placement per table
+### Partition every table across cells
 
-Set the `CreateTable` tag `beyonddb:cell-model` to `single`, `auto`, or `partitioned`. Keep one base data Cell for a table that fits its resource budgets, start at one and permit growth, or provision multiple ranges immediately. Omitting the tag preserves `initial_partitions`. GSIs use separate Cells; changing the tag later does not migrate the table. Live model conversion is not implemented. See [Cell model selection](docs/scaling.md#choose-a-tables-cell-model) and the [AWS CLI example](docs/user-guide.md#create-a-table-and-wait-for-it).
+Every new table starts with multiple ordered data ranges. `initial_partitions`
+defaults to four and accepts counts from two through 256. The `CreateTable` tag
+`beyonddb:cell-model` accepts `auto` or `partitioned`; `single` is rejected.
+Point requests route by the full primary key. Query visits only intersecting
+ranges, and a hot PK can split by SK when the table has no LSIs. GSIs have their
+own ordered data cells. See [ordered cell partitioning](docs/ordered-cell-partitioning.md).
 
 ### When a write becomes durable
 
-![Sequence of a signed PutItem: ExtendDB validates, BeyondDB routes, Cellule commits and publishes LTX, then the response returns](diagram/beyonddb-architecture/durable-write.svg)
-
 A partition-local mutation, its result, LSI changes, GSI journal entry, and
 stream intent commit in one Cell command. The successful response follows
-durable publication. [PNG version](diagram/beyonddb-architecture/durable-write@2x.png) ·
-[Detailed architecture and recovery design](docs/architecture.md)
+Cellar's durability proof. See the [embedded server guide](docs/cellar-server.md)
+for the selected persistence mode.
 
-The default serving path waits for object-store publication on each durable
-write. Experimental `follower_durability_enabled` installs Cellule's node-log
-provider and can acknowledge after every enrolled follower fsyncs the commit.
-A three-process signed SDK test verifies item mutations, same-partition
-transaction replay, and stream records after an owner kill with object uploads
-withheld. Broader fault and performance qualification remains open. See the
-[follower durability guide](docs/follower-durability.md).
+Fleet mode requires bucket publication by default. Opt-in
+`fleet.follower_durability: true` lets native follower fsyncs race bucket
+publication. A RustFS crash fixture recovers acknowledged writes on a fresh
+successor after deleting the failed owner's local directory while both bundle
+and LTX uploads were withheld. Cellar controls enrollment, proofs and recovery;
+see [follower durability](docs/follower-durability.md) for the tested boundary.
+Local-only mode persists to the configured local directory.
 
 ## Current capability boundary
 
@@ -114,7 +130,8 @@ For runnable table and item commands, see the [user guide](docs/user-guide.md).
 
 The ordinary test suite excludes ignored process tests. The latter start a
 RustFS fixture, use signed AWS SDK calls, kill the server, and read committed
-state after fenced recovery. They require Docker, the AWS CLI, and OpenSSL.
+state after fenced recovery. They require Docker and the AWS CLI. Legacy peer
+fixtures also require OpenSSL.
 Use a unique target directory under `$HOME/Workspace/crabbuild-target` on
 workstations with the mounted Workspace volume.
 
@@ -123,6 +140,7 @@ export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-docs-3c23"
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --lib
+cargo test --test cellar_process --locked -- --ignored --test-threads=1
 cargo test --test server_binary -- --ignored --test-threads=1
 ```
 

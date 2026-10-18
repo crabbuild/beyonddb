@@ -1,6 +1,7 @@
 //! Account-owned table TTL configuration.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 use crate::table::{command_table, query_table, statement};
@@ -157,12 +158,10 @@ impl Query for ListTtlTables {
 pub struct TtlSweepState {
     pub table_id: String,
     pub attribute_name: String,
-    pub after_lower: Option<[u8; 16]>,
+    pub after_lower: Option<RangeKey>,
 }
 
-fn sweep_state(
-    rows: &cellule_runtime::primitives::sql::SqlResultSet,
-) -> Result<Option<TtlSweepState>> {
+fn sweep_state(rows: &bdb_cellar_runtime::sql::SqlResultSet) -> Result<Option<TtlSweepState>> {
     let Some(row) = rows.rows.first() else {
         return Ok(None);
     };
@@ -217,8 +216,8 @@ pub struct AdvanceTtlSweepInput {
     pub table_name: String,
     pub table_id: String,
     pub attribute_name: String,
-    pub expected_after: Option<[u8; 16]>,
-    pub next_after: Option<[u8; 16]>,
+    pub expected_after: Option<RangeKey>,
+    pub next_after: Option<RangeKey>,
 }
 
 /// Move one table's sweep position after its route page was processed.
@@ -265,9 +264,7 @@ fn schedule_sql() -> &'static str {
     "SELECT last_table FROM ddb_ttl_schedule WHERE singleton = 1"
 }
 
-fn schedule_cursor(
-    rows: &cellule_runtime::primitives::sql::SqlResultSet,
-) -> Result<Option<String>> {
+fn schedule_cursor(rows: &bdb_cellar_runtime::sql::SqlResultSet) -> Result<Option<String>> {
     match rows.rows.first().map(Vec::as_slice) {
         Some([SqlValue::Null]) => Ok(None),
         Some([SqlValue::Text(name)]) => Ok(Some(name.clone())),

@@ -1,6 +1,7 @@
 //! Account generation anchors and traversal of independently owned index directories.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult};
+use bdb_keyspace::RangeKey;
 use serde::{Deserialize, Serialize};
 
 use super::GlobalIndexRecord;
@@ -39,21 +40,27 @@ impl Command for ActivateGlobalIndexRoute {
         };
         if table != input.table
             || !table.global_secondary_indexes.contains(&input.index)
-            || input.partitions.is_empty()
+            || !crate::routing::initial_partition_count_matches(
+                table.placement,
+                input.partitions.len(),
+            )
         {
             return Ok(CommandResult::Rejected(Json(false)));
         }
-        let mut lower = Some([0; 16]);
+        let mut lower = Some(RangeKey::minimum());
         let mut ids = std::collections::HashSet::new();
         for range in &input.partitions {
             if range.epoch != 1
-                || lower != Some(range.lower)
-                || range.upper.is_some_and(|upper| upper <= range.lower)
+                || lower != Some(range.lower.clone())
+                || range
+                    .upper
+                    .clone()
+                    .is_some_and(|upper| upper <= range.lower)
                 || !ids.insert(range.partition_id)
             {
                 return Ok(CommandResult::Rejected(Json(false)));
             }
-            lower = range.upper;
+            lower = range.upper.clone();
         }
         if lower.is_some() {
             return Ok(CommandResult::Rejected(Json(false)));

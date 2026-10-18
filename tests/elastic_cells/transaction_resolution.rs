@@ -1,150 +1,161 @@
-use crate::*;
-use beyonddb::{PrepareAccountTransaction, PrepareAccountTransactionInput, ReadAccountTransaction};
-use cellule_runtime::codec::{BoundedDecoder, WireValue};
-use std::sync::atomic::AtomicU8;
+use crate::{local_node, transaction_fixture};
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::{Invocation, InvocationTransport},
+    codec::{BoundedDecoder, WireValue},
+    identity::{CellTarget, RequestId},
+    registry::Command,
+};
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use extenddb_core::{
+    expression::ExpressionMaps,
+    types::{AttributeValue, Item},
+};
+use extenddb_storage::{DataEngine, TableEngine, error::StorageError};
+use http_body_util::{BodyExt, Full};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, AtomicU8, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Notify;
-
 fn mutation() -> MutationIdentity {
-    let mut value = identity(246);
-    value.request_id = RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes());
-    value
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    MutationIdentity {
+        request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+        issued_at_ms: now,
+        expires_at_ms: now + 60_000,
+    }
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_resolution_progresses_past_unavailable_participants_and_receipts() {
-    resolution_progress(2, false).await;
+#[test]
+fn terminal_resolution_progresses_past_unavailable_participants_and_receipts() {
+    run(2, false);
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn terminal_resolution_releases_healthy_cells_while_first_rpc_is_pending() {
-    // More participants than the resolution window also exercises replenishing
-    // it while the first request stays pending, rather than waiting in batches.
-    resolution_progress(6, true).await;
+#[test]
+fn terminal_resolution_releases_healthy_cells_while_first_rpc_is_pending() {
+    run(6, true);
 }
-
-async fn resolution_progress(participant_count: usize, hold_first: bool) {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "resolution-progress".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+fn run(participant_count: usize, hold_first: bool) {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(resolution_progress(
+        host.handle(),
+        core.handle(),
+        participant_count,
+        hold_first,
+    ));
+}
+async fn resolution_progress(
+    host: &tokio::runtime::Handle,
+    core: &tokio::runtime::Handle,
+    participant_count: usize,
+    hold_first: bool,
+) {
     let account_id = "123456789012";
     let account = account_target(account_id).unwrap();
-    let directory = tempfile::TempDir::new().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("resolution-progress"),
-        *account.application().as_bytes(),
-    );
-    let session = SessionId::from_bytes([246; 16]);
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(AtomicI64::new(mutation().issued_at_ms));
+    let (node, client) = local_node::start(directory.path(), clock, host, core)
+        .await
         .unwrap();
-    let registry = application.registry();
     let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application,
-            layout.clone(),
-            session,
-            "https://resolution.internal".into(),
-            directory.path().into(),
-        )
-        .unwrap(),
+        CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap())
+            .with_initial_partition_count(2)
+            .unwrap(),
     );
-    provisioner.admit_account(account_id).await.unwrap();
-    let client = CellClient::local_runtime(registry.clone(), host.runtime(), layout.clone());
-    let local = CellStorage::new(client.clone(), "us-east-1");
+    let local = CellStorage::new(client.clone(), "local");
     let routed =
-        CellStorage::new(client.clone(), "us-east-1").with_initial_partitions(provisioner.clone());
+        CellStorage::new(client.clone(), "local").with_initial_partitions(provisioner.clone());
     let mut participants = Vec::new();
     for index in 0..participant_count {
         let name = format!("Items{index}");
-        let storage = if index == 0 { &local } else { &routed };
-        let table = storage
-            .create_table(
-                account_id,
-                serde_json::from_value(serde_json::json!({
-                    "TableName": name, "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
-                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
-                    "BillingMode": "PAY_PER_REQUEST"
-                }))
-                .unwrap(),
+        if index == 0 {
+            client
+                .command::<CreateTable>(
+                    &account,
+                    mutation(),
+                    Json(transaction_fixture::account_spec(&name)),
+                )
+                .await
+                .unwrap();
+        } else {
+            routed.create_table(account_id, serde_json::from_value(serde_json::json!({
+                "TableName": name, "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}], "BillingMode": "PAY_PER_REQUEST"
+            })).unwrap()).await.unwrap();
+        }
+        let info = local.table_key_info(account_id, &name).await.unwrap();
+        let (target, participant) = if index == 0 {
+            (account.clone(), CoordinatorParticipantTarget::Account)
+        } else {
+            let RoutePageOutcome::Page { partitions, .. } = read_route_page(
+                &client,
+                &account,
+                RoutePageInput {
+                    table_id: info.table_id.clone(),
+                    start_key: None,
+                    after_lower: None,
+                    expected_epoch: None,
+                },
             )
             .await
-            .unwrap();
-        let info = storage.table_key_info(account_id, &name).await.unwrap();
-        let route = crate::single_leaf_route(&client, &account, &table.table_id).await;
-        let (target, participant) = match route {
-            Some(route) => {
-                let spec = &route.partitions[0];
-                (
-                    data_target(account_id, &info.table_id, &spec.partition_id).unwrap(),
-                    CoordinatorParticipantTarget::Data {
-                        table_id: info.table_id.clone(),
-                        partition_id: spec.partition_id,
-                        epoch: spec.epoch,
-                    },
-                )
-            }
-            None => (account.clone(), CoordinatorParticipantTarget::Account),
+            .unwrap() else {
+                panic!("missing table routes");
+            };
+            assert_eq!(partitions.len(), 2);
+            // Every case key has the ASCII resolution- prefix, in this interval.
+            let key = Item::from([("id".into(), AttributeValue::S("resolution-0".into()))]);
+            let encoded = ordered_data_key(&info.table_id, &key, &info.key_schema).unwrap();
+            let spec = partitions
+                .iter()
+                .find(|spec| {
+                    spec.lower <= encoded
+                        && spec.upper.as_ref().is_none_or(|upper| &encoded < upper)
+                })
+                .unwrap();
+            (
+                data_target(account_id, &info.table_id, &spec.partition_id).unwrap(),
+                CoordinatorParticipantTarget::Data {
+                    table_id: info.table_id.clone(),
+                    partition_id: spec.partition_id,
+                    epoch: spec.epoch,
+                },
+            )
         };
         participants.push((target, participant, info));
     }
     participants.sort_by_key(|(target, _, _)| *target.cell_id().as_bytes());
-    let peer_session = SessionId::from_bytes([247; 16]);
-    let runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 8).unwrap(),
-        16 * 1024 * 1024,
-        peer_session,
-    )
-    .unwrap();
-    let signer = PeerSigner::new(
-        peer_session,
-        registry.release_digest(),
-        SigningKey::from_bytes(&[247; 32]),
-    );
     let fault = Arc::new(AtomicU8::new(0));
     let pause = hold_first.then(|| Arc::new(ResolutionPause::default()));
-    let transport = ResolutionFault {
-        verifier: Arc::new(PeerVerifier::new(
-            peer_session,
-            registry.release_digest(),
-            signer.verifying_key(),
-        )),
-        dispatcher: Arc::new(PeerDispatcher::new(
-            registry.clone(),
-            Arc::new(LocalRuntimePeerResolver {
-                runtime: host.runtime(),
-                layout: layout.clone(),
-            }),
-            Arc::new(TestPeerAuthorizer),
-        )),
-        first: participants[0].0.clone(),
-        fault: fault.clone(),
-        pause: pause.clone(),
-    };
-    let remote = Arc::new(CellStorage::new(
-        CellClient::runtime_with_peer(
-            registry,
-            runtime.clone(),
-            layout,
-            Arc::new(signer),
-            PeerPrincipal {
-                issuer: "resolution-test".into(),
-                subject: "resolution".into(),
-                actions: vec!["beyonddb.cell.invoke".into()],
-            },
-            Arc::new(transport),
-        ),
-        "us-east-1",
-    ));
-
+    let fault_client = client.map_transport(|inner| {
+        Arc::new(ResolutionFault {
+            inner,
+            first: participants[0].0.clone(),
+            fault: fault.clone(),
+            pause: pause.clone(),
+        })
+    });
+    let remote = Arc::new(CellStorage::new(fault_client, "local"));
     // Each cut follows a durable decision. Refusing the first state read or
     // apply must not strand the second owner; a lost first receipt must not
     // stop later applies either. Run the same cuts for COMMIT and ABORT.
@@ -159,7 +170,7 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
         let mut proposed = key.clone();
         proposed.insert("value".into(), AttributeValue::S("prepared".into()));
         provisioner
-            .admit_coordinator(account_id, token.as_bytes())
+            .ensure(&client, account_id, token.as_bytes())
             .await
             .unwrap();
         let coordinator = coordinator_target(account_id, token.as_bytes()).unwrap();
@@ -482,99 +493,80 @@ async fn resolution_progress(participant_count: usize, hold_first: bool) {
             );
         }
     }
-    runtime.shutdown().await.unwrap();
-    host.shutdown().await.unwrap();
+    local_node::stop(node).await.unwrap();
 }
-
 struct ResolutionFault {
-    verifier: Arc<PeerVerifier>,
-    dispatcher: Arc<PeerDispatcher>,
+    inner: Arc<dyn InvocationTransport>,
     first: CellTarget,
     fault: Arc<AtomicU8>,
     pause: Option<Arc<ResolutionPause>>,
 }
-
 #[derive(Default)]
 struct ResolutionPause {
     entered: Notify,
     released: Notify,
 }
-
-impl PeerRoundTrip for ResolutionFault {
-    fn send(
-        &self,
-        target: CellTarget,
-        request: Vec<u8>,
-        _remaining_ms: u32,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<Vec<u8>>> + Send + 'static>,
-    > {
-        let verifier = self.verifier.clone();
-        let dispatcher = self.dispatcher.clone();
-        let first = self.first.clone();
-        let fault = self.fault.clone();
-        let pause = self.pause.clone();
+impl InvocationTransport for ResolutionFault {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
         Box::pin(async move {
-            use cellule_runtime::peer::wire::{mutation_request, peer_request};
-            use cellule_runtime::registry::Command;
-            let now_ms = i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis(),
-            )
-            .unwrap();
-            let verified = verifier.verify(&request, now_ms)?;
-            assert_eq!(verified.target(), &target);
-            let command = match verified.operation() {
-                Some(peer_request::Operation::Mutate(mutation)) => match &mutation.operation {
-                    Some(mutation_request::Operation::CellCommand(command)) => Some(command),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let cut = fault.load(Ordering::SeqCst);
+            let cut = self.fault.load(Ordering::SeqCst);
+            let command = invocation.mutation.is_some();
             let selected = match cut {
-                1 => target == first,
+                1 => invocation.target == self.first,
                 2 => {
-                    target == first
+                    invocation.target == self.first
+                        && command
                         && matches!(
-                            command.map(|command| command.command_id),
-                            Some(
-                                <ResolvePartitionTransaction as Command>::ID
-                                    | <beyonddb::ResolveAccountTransaction as Command>::ID
-                            )
+                            invocation.operation,
+                            <ResolvePartitionTransaction as Command>::ID
+                                | <ResolveAccountTransaction as Command>::ID
                         )
                 }
-                3 => command.is_some_and(|command| {
-                    if command.command_id != RecordParticipantResolutions::ID {
-                        return false;
+                3 => {
+                    if !command
+                        || invocation.operation != RecordParticipantResolutions::ID
+                        || invocation.target.namespace()
+                            != coordinator_target("123456789012", &[0; 16])
+                                .unwrap()
+                                .namespace()
+                    {
+                        false
+                    } else {
+                        let mut decoder = BoundedDecoder::new(invocation.input, 4096).unwrap();
+                        let phases = Json::<Vec<CoordinatorPhaseInput>>::decode(&mut decoder)
+                            .unwrap()
+                            .0;
+                        decoder.finish().unwrap();
+                        phases
+                            .iter()
+                            .any(|phase| phase.participant_cell == *self.first.cell_id().as_bytes())
                     }
-                    let mut decoder = BoundedDecoder::new(&command.input, 4096).unwrap();
-                    let phases = Json::<Vec<CoordinatorPhaseInput>>::decode(&mut decoder)
-                        .unwrap()
-                        .0;
-                    phases
-                        .iter()
-                        .any(|phase| phase.participant_cell == *first.cell_id().as_bytes())
-                }),
+                }
                 _ => false,
             };
             if selected
-                && fault
+                && self
+                    .fault
                     .compare_exchange(cut, 0, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
             {
-                if let Some(pause) = pause {
+                if let Some(pause) = &self.pause {
                     pause.entered.notify_one();
                     pause.released.notified().await;
                 }
-                return Err(cellule_runtime::Error::PeerTransportUnknown {
-                    context: "injected resolution outage",
-                    source: Box::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
-                });
+                let body = Full::new(Bytes::new())
+                    .map_err(|never| -> std::io::Error { match never {} })
+                    .boxed_unsync();
+                let mut response = http::Response::new(body);
+                *response.status_mut() = http::StatusCode::SERVICE_UNAVAILABLE;
+                response
+            } else {
+                self.inner.call(invocation, request).await
             }
-            dispatcher.dispatch_bytes(&verified, now_ms).await
         })
     }
 }

@@ -1,6 +1,6 @@
 //! Durable acknowledgement and recovery of consumed transactional read images.
 
-use cellule_runtime::registry::{Command, CommandContext, CommandResult};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult};
 use serde::{Deserialize, Serialize};
 
 use super::phase::phase_identity;

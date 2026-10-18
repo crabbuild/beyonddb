@@ -1,288 +1,204 @@
+//! Native SDK lease/log integration, replacing BeyondDB's old lease publisher.
+use cellar::sdk::{FenceReason, NodeOutcome};
 use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, atomic::Ordering},
+    time::Duration,
 };
-
-use beyonddb::NodeLeasePublisher;
-use cellule_runtime::{
-    identity::{Digest, NodeId, SessionId},
-    ltx::CellStorageLayout,
-    node::{
-        NODE_LOG_PROTOCOL_VERSION, NodeAdvertisement, NodeCapacity, NodeDirectory,
-        NodeFailureDomain, durability::NodeLogAuthority, log::DurabilityGate,
-    },
-};
-use cellule_store::Store;
-use ed25519_dalek::SigningKey;
-use object_store::{memory::InMemory, path::Path};
-use tokio_util::sync::CancellationToken;
-
-#[path = "node_log_authority/stalled_log_read.rs"]
-mod stalled_log_read;
-
+#[path = "node_log_authority/fixture.rs"]
+mod fixture;
 #[path = "node_log_authority/heartbeat_versions.rs"]
 mod heartbeat_versions;
+#[allow(dead_code)] // Shared peer fixture also exposes table and wire-cut helpers.
+#[path = "support/native_peer.rs"]
+mod native_peer;
+#[path = "node_log_authority/stalled_log_read.rs"]
+mod stalled_log_read;
+#[path = "node_log_authority/store.rs"]
+mod store;
+use fixture::*;
+use native_peer::{FRONT, SOURCE};
 
-const FLEET: Digest = Digest::from_bytes([80; 32]);
-const IMAGE: Digest = Digest::from_bytes([81; 32]);
-const RELEASE: Digest = Digest::from_bytes([82; 32]);
+fn runtimes() -> (tokio::runtime::Runtime, tokio::runtime::Runtime) {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .with_ansi(false)
+        .try_init();
+    (
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap(),
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+}
 
-fn now_ms() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+#[test]
+fn folded_log_and_ack_marker_survive_native_heartbeats() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let mut fixture = Fixture::start(host.handle(), core.handle()).await;
+        fixture.assert_source_owned();
+        let before = fixture.lease(SOURCE).await;
+        assert_eq!(before.log()["state"], "open");
+        assert_eq!(before.log()["may_have_fleet_acks"], true);
+        let after = fixture
+            .wait_lease(SOURCE, |lease| lease.expires() >= before.expires() + 5_000)
+            .await;
+        assert_same_session(&before, &after);
+        fixture.write("after-heartbeats").await;
+        fixture.source.stop().await;
+        let sealed = fixture.lease(SOURCE).await;
+        assert_eq!(sealed.log()["state"], "sealed");
+        assert_eq!(sealed.epoch(), before.epoch());
+        assert_eq!(sealed.log()["may_have_fleet_acks"], true);
+        assert!(
+            fixture
+                .source
+                .client
+                .query::<beyonddb::ListTables>(
+                    &beyonddb::account_target(ACCOUNT).unwrap(),
+                    None,
+                    beyonddb::Json(beyonddb::ListTablesInput {
+                        limit: 1,
+                        exclusive_start: None,
+                        live_only: false
+                    }),
+                )
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            fixture.lease(SOURCE).await.etag,
+            sealed.etag,
+            "shutdown resurrected lease/log work"
+        );
+        fixture.stop().await;
+    });
+}
+
+#[test]
+fn expired_unreachable_follower_cannot_prove_a_new_write() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let mut fixture = Fixture::start(host.handle(), core.handle()).await;
+        let before = fixture.lease(SOURCE).await;
+        fixture.front.network.cut(true).await;
+        let outcome = fixture.front.node.take().unwrap().cancel().await.unwrap();
+        assert_eq!(outcome, NodeOutcome::Cancelled);
+        fixture
+            .wait_lease(FRONT, |lease| {
+                lease.expires() <= cellar::ownership_store::now_ms()
+            })
+            .await;
+        // Native Cellar can retain a historical ensemble after expiry. That
+        // membership is not a new durability proof: all live acknowledgements
+        // are gone, so withholding both payload paths must hold this response.
+        fixture
+            .ordinary
+            .withhold_payloads
+            .store(true, Ordering::SeqCst);
+        let write = fixture
+            .http
+            .sdk
+            .put_item()
+            .table_name("NetworkData")
+            .item(
+                "id",
+                aws_sdk_dynamodb::types::AttributeValue::S("first".into()),
+            )
+            .item(
+                "value",
+                aws_sdk_dynamodb::types::AttributeValue::S("after-follower-expiry".into()),
+            )
+            .send();
+        tokio::pin!(write);
+        let held = tokio::time::timeout(Duration::from_secs(2), &mut write).await;
+        let blocked = fixture.ordinary.blocked_payloads.load(Ordering::SeqCst);
+        fixture
+            .ordinary
+            .withhold_payloads
+            .store(false, Ordering::SeqCst);
+        assert!(
+            held.is_err(),
+            "expired follower allowed a response without bucket proof: {held:?}"
+        );
+        assert!(
+            blocked > 0,
+            "test did not withhold a native bundle/LTX publication"
+        );
+        tokio::time::timeout(Duration::from_secs(20), &mut write)
+            .await
             .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
+            .unwrap();
+        fixture.assert_value("after-follower-expiry").await;
+        let after = fixture.lease(SOURCE).await;
+        assert_eq!(after.body["generation"], before.body["generation"]);
+        assert_eq!(after.body["lineage"], before.body["lineage"]);
+        fixture.stop().await;
+    });
 }
 
-fn advertisement(
-    node: NodeId,
-    session: SessionId,
-    key: u8,
-    capacity: NodeCapacity,
-    now: i64,
-    expires: i64,
-) -> cellule_runtime::Result<NodeAdvertisement> {
-    NodeAdvertisement::sign(
-        node,
-        session,
-        format!("https://node-{key}.internal:8081"),
-        FLEET,
-        Digest::from_bytes([key; 32]),
-        IMAGE,
-        RELEASE,
-        &SigningKey::from_bytes(&[key; 32]),
-        1,
-        now,
-        expires,
-        vec![Digest::from_bytes([86; 32])],
-        vec![1],
-        NodeFailureDomain::default(),
-        capacity,
-    )
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn published_log_authority_reconciles_heartbeat_and_fences_transitions() {
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        Path::from("beyonddb-node-log-authority"),
-        [42; 16],
-    );
-    let directory = NodeDirectory::new(layout, FLEET, IMAGE, RELEASE);
-    let leader_node = NodeId::from_bytes([83; 16]);
-    let leader_session = SessionId::from_bytes([90; 16]);
-    let follower_node = NodeId::from_bytes([92; 16]);
-    let follower_session = SessionId::from_bytes([93; 16]);
-    let now = now_ms();
-    directory
-        .create(
-            advertisement(
-                follower_node,
-                follower_session,
-                95,
-                NodeCapacity {
-                    free_memory_bytes: 16 * 1024 * 1024,
-                    free_disk_bytes: 1 << 30,
-                    follower_free_bytes: 1 << 30,
-                    job_credits: 8,
-                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
-                    ..NodeCapacity::default()
-                },
-                now,
-                now + 15_000,
-            )
-            .unwrap(),
-            now,
+#[test]
+fn lease_write_outage_fences_the_native_node_and_closes_ingress() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let mut fixture = Fixture::start(host.handle(), core.handle()).await;
+        let before = fixture.lease(SOURCE).await;
+        fixture.safety.refuse_writes.store(true, Ordering::SeqCst);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            fixture.source.node.as_mut().unwrap().finished(),
         )
         .await
+        .unwrap()
         .unwrap();
-    let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
-        advertisement(
-            leader_node,
-            leader_session,
-            85,
-            NodeCapacity {
-                free_memory_bytes: 16 * 1024 * 1024,
-                free_disk_bytes: 1 << 30,
-                job_credits: 8,
-                ..NodeCapacity::default()
-            },
-            now,
-            expires,
-        )
-    })
-    .publish()
-    .await
-    .unwrap();
-    let guard = published.guard();
-    let authority = published.log_authority();
-    assert_eq!(
-        authority.recruit(1, 4096, 16).await.unwrap(),
-        Some(vec![follower_node])
-    );
-    assert_eq!(
-        authority.recruit(1, 4096, 16).await.unwrap(),
-        Some(vec![follower_node])
-    );
-    assert!(!authority.rotation_required(1, 16).await.unwrap());
-    assert!(authority.rotation_required(2, 16).await.is_err());
-    assert!(authority.activate(2).await.is_err());
-
-    let cancellation = CancellationToken::new();
-    let run_cancellation = cancellation.clone();
-    let task = tokio::spawn(async move { published.run(&run_cancellation).await });
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let observed = directory
-                .load(leader_session, now_ms())
+        assert!(
+            matches!(
+                outcome,
+                NodeOutcome::Fenced {
+                    reason: FenceReason::NodeLeaseExpired,
+                    ..
+                }
+            ),
+            "{outcome:?}"
+        );
+        assert!(fixture.safety.refused.load(Ordering::SeqCst) > 0);
+        let after = fixture.lease(SOURCE).await;
+        assert_eq!(after.etag, before.etag);
+        assert_eq!(after.log(), before.log());
+        assert!(after.expires() <= cellar::ownership_store::now_ms());
+        assert!(
+            fixture
+                .source
+                .client
+                .query::<beyonddb::ListTables>(
+                    &beyonddb::account_target(ACCOUNT).unwrap(),
+                    None,
+                    beyonddb::Json(beyonddb::ListTablesInput {
+                        limit: 1,
+                        exclusive_start: None,
+                        live_only: false
+                    }),
+                )
                 .await
-                .unwrap()
-                .unwrap();
-            if observed.advertisement().generation() > 2 {
-                assert_eq!(observed.advertisement().log().unwrap().epoch(), 1);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-
-    authority.activate(1).await.unwrap();
-    authority.activate(1).await.unwrap();
-    assert!(authority.recruit(1, 4096, 16).await.is_err());
-    let gate = DurabilityGate::new(leader_session, leader_node, 1, [follower_node]).unwrap();
-    let ticket = gate.issue(1).unwrap();
-    assert_eq!(gate.prove_object(ticket).unwrap(), 1);
-    authority.advance_coverage(1, 1).await.unwrap();
-    authority.advance_coverage(1, 1).await.unwrap();
-    let observed = directory
-        .load(leader_session, now_ms())
-        .await
-        .unwrap()
-        .unwrap();
-    let log = observed.advertisement().log().unwrap();
-    assert!(log.active());
-    assert_eq!(log.tiered_through(), 1);
-
-    let barrier = gate.begin_rotation().unwrap();
-    authority.close(&barrier).await.unwrap();
-    let observed = directory
-        .load(leader_session, now_ms())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(observed.advertisement().log().is_none());
-    let closed_generation = observed.advertisement().generation();
-    tokio::time::timeout(Duration::from_secs(8), async {
-        loop {
-            let refreshed = directory
-                .load(leader_session, now_ms())
-                .await
-                .unwrap()
-                .unwrap();
-            if refreshed.advertisement().generation() > closed_generation {
-                assert!(refreshed.advertisement().log().is_none());
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    cancellation.cancel();
-    task.await.unwrap().unwrap();
-    guard.fence();
-    assert!(matches!(
-        authority.activate(1).await,
-        Err(cellule_runtime::Error::Fenced)
-    ));
-    assert!(matches!(
-        authority.rotation_required(1, 16).await,
-        Err(cellule_runtime::Error::Fenced)
-    ));
+                .is_err()
+        );
+        assert!(fixture.http.sdk.list_tables().send().await.is_err());
+        fixture.http.stop().await;
+        drop(fixture.source.node.take());
+        fixture.front.stop().await;
+        fixture.inspection.close().await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn current_log_membership_requires_rotation_after_follower_expiry() {
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        Path::from("beyonddb-node-log-member-expiry"),
-        [44; 16],
-    );
-    let directory = NodeDirectory::new(layout, FLEET, IMAGE, RELEASE);
-    let leader_node = NodeId::from_bytes([101; 16]);
-    let leader_session = SessionId::from_bytes([102; 16]);
-    let follower_node = NodeId::from_bytes([103; 16]);
-    let follower_session = SessionId::from_bytes([104; 16]);
-    let now = now_ms();
-    let follower_expires = now + 5_000;
-    directory
-        .create(
-            advertisement(
-                follower_node,
-                follower_session,
-                105,
-                NodeCapacity {
-                    free_memory_bytes: 16 * 1024 * 1024,
-                    free_disk_bytes: 1 << 30,
-                    follower_free_bytes: 1 << 30,
-                    job_credits: 8,
-                    log_protocol: NODE_LOG_PROTOCOL_VERSION,
-                    ..NodeCapacity::default()
-                },
-                now,
-                follower_expires,
-            )
-            .unwrap(),
-            now,
-        )
-        .await
-        .unwrap();
-    let published = NodeLeasePublisher::new(directory.clone(), move |now, expires| {
-        advertisement(
-            leader_node,
-            leader_session,
-            106,
-            NodeCapacity {
-                free_memory_bytes: 16 * 1024 * 1024,
-                free_disk_bytes: 1 << 30,
-                job_credits: 8,
-                ..NodeCapacity::default()
-            },
-            now,
-            expires,
-        )
-    })
-    .publish()
-    .await
-    .unwrap();
-    let authority = published.log_authority();
-    assert_eq!(
-        authority.recruit(1, 4096, 16).await.unwrap(),
-        Some(vec![follower_node])
-    );
-    assert!(!authority.rotation_required(1, 16).await.unwrap());
-    // A different epoch is an error, rather than a healthy membership result.
-    assert!(authority.rotation_required(2, 16).await.is_err());
-    tokio::time::timeout(Duration::from_secs(7), async {
-        while now_ms() <= follower_expires {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(authority.rotation_required(1, 16).await.unwrap());
-    // Liveness observation cannot silently replace the enrolled member set.
-    let current = directory
-        .load(leader_session, now_ms())
-        .await
-        .unwrap()
-        .unwrap();
-    let log = current.advertisement().log().unwrap();
-    assert_eq!(log.epoch(), 1);
-    assert_eq!(log.members(), &[follower_node]);
-}
+#[path = "node_log_authority/lifecycle_store.rs"]
+mod lifecycle_store;
+#[path = "elastic_cells/node_sessions.rs"]
+mod node_sessions;

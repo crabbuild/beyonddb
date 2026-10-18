@@ -3,10 +3,10 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use cellule_app::CellType;
-use cellule_runtime::cell::catalog::CatalogRole;
-use cellule_runtime::identity::{CellTarget, Digest, NamespaceId};
-use cellule_runtime::registry::{
+use bdb_cellar_runtime::app::CellType;
+use bdb_cellar_runtime::descriptors::CatalogRole;
+use bdb_cellar_runtime::identity::{CellTarget, Digest, NamespaceId};
+use bdb_cellar_runtime::registry::{
     Command, CommandContext, CommandResult, MigrationDescriptor, ModuleDescriptor,
     NamespaceDescriptor, OperationDescriptor, RegistryBuilder,
 };
@@ -37,7 +37,8 @@ static NAMESPACES: [NamespaceDescriptor; 1] = [NamespaceDescriptor {
     effect_targets: &[],
     dead_letter: None,
 }];
-static COMMANDS: [OperationDescriptor; 11] = [
+static COMMANDS: [OperationDescriptor; 12] = [
+    crate::participant::phase_operation(12),
     operation(1),
     crate::participant::phase_operation(2),
     operation(3),
@@ -103,7 +104,7 @@ const fn operation(id: u32) -> OperationDescriptor {
 
 pub(crate) struct CoordinatorModule;
 
-impl cellule_runtime::registry::CellModule for CoordinatorModule {
+impl bdb_cellar_runtime::registry::CellModule for CoordinatorModule {
     const NAME: &'static str = MODULE;
 
     fn descriptor(&self) -> &'static ModuleDescriptor {
@@ -148,6 +149,7 @@ impl cellule_runtime::registry::CellModule for CoordinatorModule {
         registry.bind_command::<RecordParticipantPrepare>()?;
         registry.bind_command::<RecordParticipantPrepares>()?;
         registry.bind_command::<DecideCrossCellTransaction>()?;
+        registry.bind_command::<AbortExpiredTransaction>()?;
         registry.bind_command::<CommitPreparedTransaction>()?;
         registry.bind_command::<RecordParticipantResolution>()?;
         registry.bind_command::<RecordParticipantResolutions>()?;
@@ -183,11 +185,7 @@ pub fn coordinator_target(account_id: &str, routing_key: &[u8]) -> Result<CellTa
     )
 }
 
-/// Install the coordinator schema during Cell bootstrap.
-pub fn initialize_coordinator(transaction: &cellule_ltx::rusqlite::Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(SCHEMA)?;
-    Ok(())
-}
+// Schema installation is performed by the compiled Cellar module migration.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum CoordinatorParticipantTarget {

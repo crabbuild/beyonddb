@@ -1,0 +1,24 @@
+{
+  "node_name": "bdb-node-1",
+  "data_dir": "/var/lib/beyonddb",
+  "region": "us-east-1",
+  "public_bind": "127.0.0.1:8000",
+  "public_endpoint": "http://127.0.0.1:8000",
+  "peer_bind": "127.0.0.1:9000",
+  "peer_advertise": "127.0.0.1:9000",
+  "peer_key_file": "/etc/beyonddb/peer.key",
+  "encryption_key_file": "/etc/beyonddb/encryption.key",
+  "accounts": ["123456789012"],
+  "initial_partitions": 4,
+  "max_active_cells": 128,
+  "shutdown_mode": "preserve",
+  "split_threshold_bytes": 268435456,
+  "auth_cache_enabled": false,
+  "bootstrap": {
+    "account_id": "123456789012",
+    "access_key_id": "REPLACE_WITH_ACCESS_KEY_ID",
+    "principal_name": "admin",
+    "policy_name": "operator",
+    "policy_file": "/etc/beyonddb/operator-policy.json"
+  }
+}

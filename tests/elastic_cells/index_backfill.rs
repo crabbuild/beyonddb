@@ -1,16 +1,24 @@
-use super::global_indexes::{ACCOUNT, mutation, owner};
-use crate::*;
-use beyonddb::{
-    BackfillPartitionIndex, BackfillPartitionIndexInput, BackfillPartitionIndexOutcome,
-    ConfigurePartitionIndexes, ConfigurePartitionIndexesInput, ConfigurePartitionIndexesOutcome,
-    GlobalIndexRecord, IndexChangeChunk, IndexChangeDelivery, PartitionIndexPolicy,
-    ReadPartitionIndexChange, ReadPartitionIndexChangeChunk, ReadPartitionIndexes,
-    RecordPartitionIndexDelivery,
+use super::global_indexes::{ACCOUNT, contains, mutation, owner, ranges, runtimes};
+use crate::native_peer::{self, FRONT, Inspection, Observations, Peer, SOURCE};
+use bdb_cellar_runtime::{
+    app::CompiledApplication,
+    client::{CellClient, InvocationError},
+    identity::CellTarget,
 };
+use beyonddb::*;
+use extenddb_core::{
+    expression::ExpressionMaps,
+    types::{AttributeValue, Item, ScalarAttributeType},
+};
+use extenddb_storage::{DataEngine, TableEngine};
+use std::sync::{Arc, Mutex};
 
 struct Fixture {
     _files: tempfile::TempDir,
-    host: cellule_host::CellNode,
+    host: Peer,
+    application: Arc<CompiledApplication>,
+    bucket: cellar::bucket::Bucket,
+    observed: Observations,
     provisioner: Arc<CellInitialPartitionProvisioner>,
     client: CellClient,
     spec: PartitionSpec,
@@ -20,27 +28,21 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new() -> Self {
-        let application = Arc::new(
-            Beyonddb::compile(BuildDescriptor {
-                source_revision: "online-index-policy".into(),
-                cargo_lock_digest: Digest::from_bytes([1; 32]),
-            })
-            .unwrap(),
-        );
-        let account = account_target(ACCOUNT).unwrap();
+    async fn new(host_executor: &tokio::runtime::Handle, core: &tokio::runtime::Handle) -> Self {
+        let application = native_peer::application();
         let files = tempfile::tempdir().unwrap();
-        let layout = CellStorageLayout::new(
-            Store::new(Arc::new(InMemory::new())),
-            object_store::path::Path::from("online-index-policy"),
-            *account.application().as_bytes(),
-        );
+        let bucket =
+            cellar::bucket::Bucket::open_dev(&files.path().join("objects.sqlite")).unwrap();
+        let observed = Arc::new(Mutex::new(Default::default()));
         let (host, provisioner, client, storage) = owner(
-            &application,
-            &layout,
-            SessionId::from_bytes([144; 16]),
-            files.path(),
-        );
+            application.clone(),
+            bucket.clone(),
+            &files.path().join(SOURCE),
+            observed.clone(),
+            host_executor,
+            core,
+        )
+        .await;
         provisioner.admit_account(ACCOUNT).await.unwrap();
         storage
             .create_table(
@@ -58,11 +60,17 @@ impl Fixture {
             .table_key_info(ACCOUNT, "OnlinePolicy")
             .await
             .unwrap();
-        let spec = crate::single_leaf_route(&client, &account, &info.table_id)
+        let routes = ranges(&client, &info.table_id).await;
+        assert_eq!(routes.len(), 2);
+        let target = data_target(ACCOUNT, &info.table_id, &routes[0].partition_id).unwrap();
+        let spec = client
+            .query::<ReadPartitionState>(&target, None, Json(()))
             .await
             .unwrap()
-            .partitions
-            .remove(0);
+            .output
+            .0
+            .unwrap()
+            .spec;
         let target = data_target(ACCOUNT, &info.table_id, &spec.partition_id).unwrap();
         let items = (0..1000)
             .map(|i| {
@@ -72,9 +80,8 @@ impl Fixture {
                 ])
             })
             .filter(|item| {
-                let hash = data_key_hash(&spec.table.id, item, &spec.table.key_schema).unwrap();
-                spec.lower.is_none_or(|low| low <= hash)
-                    && spec.upper.is_none_or(|high| hash < high)
+                let key = ordered_data_key(&spec.table.id, item, &spec.table.key_schema).unwrap();
+                contains(&routes[0], &key)
             })
             .take(24)
             .collect::<Vec<_>>();
@@ -111,6 +118,9 @@ impl Fixture {
         Self {
             _files: files,
             host,
+            application,
+            bucket,
+            observed,
             provisioner,
             client,
             spec,
@@ -118,6 +128,51 @@ impl Fixture {
             policy,
             items,
         }
+    }
+
+    async fn replace_owner(
+        &mut self,
+        host_executor: &tokio::runtime::Handle,
+        core: &tokio::runtime::Handle,
+    ) {
+        let inspection = Inspection::new(self.bucket.clone(), host_executor);
+        let previous = native_peer::identity(&self.observed, SOURCE, &self.target).unwrap();
+        let old_owner = inspection.owner(&previous.scope).await;
+        self.host.stop().await;
+        std::fs::remove_dir_all(self._files.path().join(SOURCE)).unwrap();
+        let (host, provisioner, client, _) = owner(
+            self.application.clone(),
+            self.bucket.clone(),
+            &self._files.path().join(FRONT),
+            self.observed.clone(),
+            host_executor,
+            core,
+        )
+        .await;
+        self.host = host;
+        self.provisioner = provisioner;
+        self.client = client;
+        inspection.departed().await;
+        // Activate through the real SDK, then observe its actual identity and
+        // immutable installation. No old local file or authority edits exist.
+        assert_eq!(
+            self.client
+                .query::<ReadPartitionState>(&self.target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap()
+                .spec,
+            self.spec
+        );
+        let current = native_peer::identity(&self.observed, FRONT, &self.target).unwrap();
+        assert_eq!(current.scope, previous.scope);
+        let owner = inspection.owner(&current.scope).await;
+        assert_eq!(owner.node.as_deref(), Some(FRONT));
+        assert!(owner.epoch > old_owner.epoch);
+        assert_eq!(owner.epoch, current.epoch);
+        inspection.close().await;
     }
 
     fn configuration(&self) -> ConfigurePartitionIndexesInput {
@@ -213,9 +268,11 @@ impl Fixture {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn backfill_policy_preserves_prepare_reservations_and_resumes_with_a_delivery_barrier() {
-    let fixture = Fixture::new().await;
+#[test]
+fn backfill_policy_preserves_prepare_reservations_and_resumes_with_a_delivery_barrier() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+    let mut fixture = Fixture::new(host.handle(), core.handle()).await;
     let transaction_id = [144; 16];
     let coordinator_cell = *account_target(ACCOUNT).unwrap().cell_id().as_bytes();
     transaction_command!(
@@ -287,17 +344,7 @@ async fn backfill_policy_preserves_prepare_reservations_and_resumes_with_a_deliv
         .output
         .0
         .unwrap();
-    let handle = fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &fixture.spec.table.id, &fixture.spec.partition_id)
-        .await
-        .unwrap();
-    handle.drain().await.unwrap();
-    fixture
-        .provisioner
-        .admit_existing_partition(ACCOUNT, &fixture.spec.table.id, &fixture.spec.partition_id)
-        .await
-        .unwrap();
+    fixture.replace_owner(host.handle(), core.handle()).await;
     assert_eq!(
         fixture
             .client
@@ -362,104 +409,113 @@ async fn backfill_policy_preserves_prepare_reservations_and_resumes_with_a_deliv
             .is_empty(),
         "ordinary pending work must not extend the historical delivery barrier"
     );
-    fixture.host.shutdown().await.unwrap();
+    fixture.host.stop().await;
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn split_inherits_unfinished_backfill_and_mutable_policy_without_changing_installation() {
-    let fixture = Fixture::new().await;
-    fixture.configure().await;
-    // No scan has started. Splitting must preserve the obligation to backfill
-    // every child even though the source has no journal entry to drain yet.
-    let plan = fixture
-        .provisioner
-        .split_partition(
-            ACCOUNT,
-            fixture.client.clone(),
-            &fixture.spec.table.id,
-            fixture.spec.partition_id,
-            fixture.spec.lower.unwrap_or([0; 16]),
-        )
-        .await
-        .unwrap();
-    let mut historical = Vec::new();
-    for child in &plan.children {
-        let target = data_target(ACCOUNT, &child.table.id, &child.partition_id).unwrap();
-        let state = fixture
-            .client
-            .query::<ReadPartitionIndexes>(&target, None, Json(()))
-            .await
-            .unwrap()
-            .output
-            .0
-            .unwrap();
-        assert_eq!(state.policy, fixture.policy);
-        assert_eq!(
-            state.pending_backfills,
-            vec![fixture.policy.indexes[0].id.clone()]
-        );
-        loop {
-            match fixture.backfill(&target, child.epoch).await {
-                BackfillPartitionIndexOutcome::Progress => {}
-                BackfillPartitionIndexOutcome::Scanned => break,
-                outcome => panic!("unexpected backfill outcome: {outcome:?}"),
-            }
-        }
-        while let Some((id, change)) = fixture.next_change(&target).await {
-            historical.push(change["new"]["id"].clone());
-            assert_eq!(change["version"]["source_epoch"], child.epoch);
-            fixture.ack(&target, IndexChangeDelivery::Applied(id)).await;
-        }
-        let mut removed = fixture.policy.clone();
-        removed.revision += 1;
-        removed.indexes.clear();
-        removed.attribute_definitions = child.table.attribute_definitions.clone();
-        fixture
-            .client
-            .command::<ConfigurePartitionIndexes>(
-                &target,
-                mutation(),
-                Json(ConfigurePartitionIndexesInput {
-                    table_id: child.table.id.clone(),
-                    epoch: child.epoch,
-                    policy: removed,
-                }),
+#[test]
+fn split_inherits_unfinished_backfill_and_mutable_policy_without_changing_installation() {
+    let (host, core) = runtimes();
+    host.block_on(async {
+        let mut fixture = Fixture::new(host.handle(), core.handle()).await;
+        fixture.configure().await;
+        // No scan has started. Splitting must preserve the obligation to backfill
+        // every child even though the source has no journal entry to drain yet.
+        let plan = fixture
+            .provisioner
+            .split_partition(
+                ACCOUNT,
+                fixture.client.clone(),
+                &fixture.spec.table.id,
+                fixture.spec.partition_id,
+                fixture
+                    .spec
+                    .lower
+                    .clone()
+                    .unwrap_or_else(bdb_keyspace::RangeKey::minimum),
             )
             .await
             .unwrap();
-        let item = fixture
+        let mut historical = Vec::new();
+        for child in &plan.children {
+            let target = data_target(ACCOUNT, &child.table.id, &child.partition_id).unwrap();
+            let state = fixture
+                .client
+                .query::<ReadPartitionIndexes>(&target, None, Json(()))
+                .await
+                .unwrap()
+                .output
+                .0
+                .unwrap();
+            assert_eq!(state.policy, fixture.policy);
+            assert_eq!(
+                state.pending_backfills,
+                vec![fixture.policy.indexes[0].id.clone()]
+            );
+            loop {
+                match fixture.backfill(&target, child.epoch).await {
+                    BackfillPartitionIndexOutcome::Progress => {}
+                    BackfillPartitionIndexOutcome::Scanned => break,
+                    outcome => panic!("unexpected backfill outcome: {outcome:?}"),
+                }
+            }
+            while let Some((id, change)) = fixture.next_change(&target).await {
+                historical.push(change["new"]["id"].clone());
+                assert_eq!(change["version"]["source_epoch"], child.epoch);
+                fixture.ack(&target, IndexChangeDelivery::Applied(id)).await;
+            }
+            let mut removed = fixture.policy.clone();
+            removed.revision += 1;
+            removed.indexes.clear();
+            removed.attribute_definitions = child.table.attribute_definitions.clone();
+            fixture
+                .client
+                .command::<ConfigurePartitionIndexes>(
+                    &target,
+                    mutation(),
+                    Json(ConfigurePartitionIndexesInput {
+                        table_id: child.table.id.clone(),
+                        epoch: child.epoch,
+                        policy: removed,
+                    }),
+                )
+                .await
+                .unwrap();
+            let item = fixture
+                .items
+                .iter()
+                .find(|item| {
+                    let key =
+                        ordered_data_key(&child.table.id, item, &child.table.key_schema).unwrap();
+                    child.lower.as_ref().is_none_or(|low| low <= &key)
+                        && child.upper.as_ref().is_none_or(|high| &key < high)
+                })
+                .unwrap();
+            let mut item = item.clone();
+            item.insert("value".into(), AttributeValue::N("42".into()));
+            fixture
+                .client
+                .command::<PartitionPut>(
+                    &target,
+                    mutation(),
+                    Json(PartitionPutInput {
+                        table_id: child.table.id.clone(),
+                        epoch: child.epoch,
+                        item,
+                        condition: None,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        historical.sort_by_key(serde_json::Value::to_string);
+        let mut expected = fixture
             .items
             .iter()
-            .find(|item| {
-                let hash = data_key_hash(&child.table.id, item, &child.table.key_schema).unwrap();
-                child.lower.is_none_or(|low| low <= hash)
-                    && child.upper.is_none_or(|high| hash < high)
-            })
-            .unwrap();
-        let mut item = item.clone();
-        item.insert("value".into(), AttributeValue::N("42".into()));
-        fixture
-            .client
-            .command::<PartitionPut>(
-                &target,
-                mutation(),
-                Json(PartitionPutInput {
-                    table_id: child.table.id.clone(),
-                    epoch: child.epoch,
-                    item,
-                    condition: None,
-                }),
-            )
-            .await
-            .unwrap();
-    }
-    historical.sort_by_key(serde_json::Value::to_string);
-    let mut expected = fixture
-        .items
-        .iter()
-        .map(|item| serde_json::to_value(&item["id"]).unwrap())
-        .collect::<Vec<_>>();
-    expected.sort_by_key(serde_json::Value::to_string);
-    assert_eq!(historical, expected);
-    fixture.host.shutdown().await.unwrap();
+            .map(|item| serde_json::to_value(&item["id"]).unwrap())
+            .collect::<Vec<_>>();
+        expected.sort_by_key(serde_json::Value::to_string);
+        assert_eq!(historical, expected);
+        fixture.host.stop().await;
+    });
 }

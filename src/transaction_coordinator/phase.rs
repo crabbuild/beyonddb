@@ -1,7 +1,7 @@
 //! Decision publication and participant progress in a coordinator Cell.
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -214,6 +214,54 @@ pub enum DecideCrossCellTransactionOutcome {
 
 /// Publish the sole transaction decision after every prepare, or abort.
 pub struct DecideCrossCellTransaction;
+
+/// A live recovery worker may resolve an abandoned BEGIN without interpreting
+/// a Cellar node lease. The age check and terminal ABORT decision are atomic.
+/// Ten minutes is an execution deadline, not permission to collect decisions.
+pub struct AbortExpiredTransaction;
+impl Command for AbortExpiredTransaction {
+    const MODULE: &'static str = MODULE;
+    const ID: u32 = 12;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Json<ReadCrossCellTransactionInput>;
+    type Output = Json<bool>;
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        Json(input): Self::Input,
+    ) -> Result<CommandResult<Self::Output>> {
+        phase_identity(context, &input.account_id, &input.routing_key)?;
+        let rows = context.sql(&statement(
+            "SELECT state, created_at_ms FROM ddb_coordinator_transactions WHERE transaction_id=?1 AND account_id=?2",
+            vec![SqlValue::Blob(input.transaction_id.to_vec()), SqlValue::Text(input.account_id.clone())],
+        ))?;
+        match rows[0].rows.first().map(Vec::as_slice) {
+            Some([SqlValue::Integer(0), SqlValue::Integer(created)])
+                if *created <= context.now_ms().saturating_sub(600_000) => {}
+            None | Some([SqlValue::Integer(_), SqlValue::Integer(_)]) => {
+                return Ok(CommandResult::Success(Json(false)));
+            }
+            _ => return Err(Error::Command("invalid pending transaction timestamp")),
+        }
+        let result = DecideCrossCellTransaction::execute(
+            context,
+            Json(DecideCrossCellTransactionInput {
+                account_id: input.account_id,
+                transaction_id: input.transaction_id,
+                routing_key: input.routing_key,
+                decision: CoordinatorDecision::Abort {
+                    index: None,
+                    reason: None,
+                },
+            }),
+        )?;
+        match result {
+            CommandResult::Success(Json(DecideCrossCellTransactionOutcome::Decided(
+                CoordinatorDecision::Abort { .. },
+            ))) => Ok(CommandResult::Success(Json(true))),
+            _ => Err(Error::Command("expired transaction could not record abort")),
+        }
+    }
+}
 
 impl Command for DecideCrossCellTransaction {
     const MODULE: &'static str = MODULE;

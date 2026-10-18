@@ -1,5 +1,9 @@
 # Check DynamoDB API coverage
 
+Cellar qualification is tracked in [the migration record](../CELLAR_MIGRATION.md).
+The detailed coverage labels below record the earlier Cellule fixtures. Each
+path needs equivalent Cellar evidence before those labels apply to this branch.
+
 Use this page to decide whether a DynamoDB operation fits your workload. BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but a protocol handler alone does not establish Cell-backed support. A **verified path** has a signed AWS SDK or CLI request, a durable Cell commit, and a result checked after owner or process restart. Each fixture proves only its stated cases, not every DynamoDB option or error response.
 
 | Label in this page | What you can conclude |
@@ -107,7 +111,7 @@ These gaps require more than a server configuration change. In particular, the c
 
 The source gates are in [table creation/update](../src/backend.rs),
 [backup methods](../src/backend/remaining.rs), and
-[server wiring](../src/server.rs). For ExtendDB's own standalone feature set,
+[server wiring](../src/cellar/server.rs). For ExtendDB's own standalone feature set,
 see its [differences from DynamoDB](https://github.com/ExtendDB/extenddb/blob/main/docs/differences-from-dynamodb.md).
 
 ## How to qualify a new API claim

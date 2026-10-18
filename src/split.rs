@@ -1,6 +1,7 @@
 //! Recoverable host orchestration of one planned data-range split.
 
-use cellule_runtime::client::{CellClient, InvocationError, ReadPolicy};
+use bdb_cellar_runtime::client::{CellClient, InvocationError};
+use bdb_keyspace::RangeKey;
 use extenddb_storage::error::StorageError;
 
 use crate::backend::{cell_error, mutation_identity};
@@ -11,7 +12,7 @@ use crate::{
     PartitionExport, PartitionImportInput, PartitionImportOutcome, PartitionInstall,
     PartitionScanInput, PartitionScanOutcome, PartitionSeal, PartitionSpec, PartitionState,
     ReadDirectoryTransfer, ReadPartitionState, SealPartition, SealPartitionOutcome, SplitPlan,
-    SplitRouteState, account_target, data_key_hash, data_target,
+    SplitRouteState, account_target, data_target, ordered_data_key,
 };
 
 /// Runs a durable split using already admitted account and data Cells.
@@ -26,9 +27,7 @@ pub struct CellSplitController {
 impl CellSplitController {
     /// Bind the routed Cell client used for all split participants.
     pub fn new(client: CellClient) -> Self {
-        Self {
-            client: client.with_read_policy(ReadPolicy::CurrentOwner),
-        }
+        Self { client }
     }
 
     /// Finish a previously planned split and open its replacement ranges.
@@ -47,7 +46,7 @@ impl CellSplitController {
             &self.client,
             &account,
             &source.table.id,
-            source.lower.unwrap_or([0; 16]),
+            source.lower.clone().unwrap_or_else(RangeKey::minimum),
         )
         .await?;
         let current_plan = self
@@ -187,7 +186,7 @@ impl CellSplitController {
                 return Err(split_state("sealed source export failed"));
             };
             for item in items {
-                let hash = data_key_hash(&source.table.id, &item, &source.table.key_schema)
+                let hash = ordered_data_key(&source.table.id, &item, &source.table.key_schema)
                     .map_err(cell_identity)?;
                 let index = usize::from(hash >= seal.boundary);
                 expected[index]
@@ -329,6 +328,7 @@ pub(crate) fn split_contract(
     let children = plan.children.clone();
     let boundary = children[0]
         .upper
+        .clone()
         .ok_or_else(|| split_state("split boundary is absent"))?;
     let seal = PartitionSeal {
         table_id: source.table.id.clone(),
@@ -337,8 +337,8 @@ pub(crate) fn split_contract(
         next_epoch: plan
             .next_epoch()
             .ok_or_else(|| split_state("split epoch exhausted"))?,
-        source_lower: source.lower,
-        source_upper: source.upper,
+        source_lower: source.lower.clone(),
+        source_upper: source.upper.clone(),
         boundary,
         left_partition_id: children[0].partition_id,
         right_partition_id: children[1].partition_id,
@@ -350,6 +350,6 @@ fn split_state(message: &str) -> StorageError {
     StorageError::Transient(message.into())
 }
 
-fn cell_identity(error: cellule_runtime::Error) -> StorageError {
+fn cell_identity(error: bdb_cellar_runtime::Error) -> StorageError {
     StorageError::Internal(error.to_string())
 }

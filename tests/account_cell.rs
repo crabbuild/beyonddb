@@ -1,5 +1,13 @@
 use std::{collections::HashMap, sync::Arc, time::UNIX_EPOCH};
 
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    app::CellApplication,
+    client::{CellClient, InvocationError},
+    descriptors::BuildDescriptor,
+    identity::{CellTarget, Digest, RequestId},
+};
+use bdb_keyspace::RangeKey;
 use beyonddb::{
     AdvanceTtlSchedule, AdvanceTtlScheduleInput, AdvanceTtlSweep, AdvanceTtlSweepInput, Beyonddb,
     CellInitialPartitionProvisioner, CellStorage, CreateTable, CreateTableOutcome, DeleteItem,
@@ -8,20 +16,10 @@ use beyonddb::{
     PartitionQueryOutcome, PutItem, PutItemInput, QueryAccountItems, ReadAccountStreamJournal,
     ReadStreamGcShard, ReadTtlSchedule, ReadTtlSweep, StreamConfig, StreamJournalInput,
     StreamJournalOutcome, TableSpec, TransactWrite, TransactWriteInput, TransactionOperation,
-    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target, initialize_account,
+    TransactionOutcome, UpdateTtl, UpdateTtlInput, account_target,
 };
-use cellule_app::CellApplication;
-use cellule_host::CellNodeBuilder;
-use cellule_ltx::CellReplica;
-use cellule_runtime::cell::catalog::{CatalogEntry, CatalogRole, CellCatalog};
-use cellule_runtime::client::CellClient;
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::control::{Owner, authority::CellAuthority};
-use cellule_runtime::identity::{Digest, IncarnationId, RequestId, SessionId};
-use cellule_runtime::ltx::{CellStorageLayout, DiskBudget, Host, Limits};
-use cellule_runtime::registry::BuildDescriptor;
-use cellule_runtime::{MutationIdentity, SqlWorkerPool};
-use cellule_store::Store;
+#[path = "support/cellar_node.rs"]
+mod cellar_node;
 use extenddb_core::expression::{Expr, ExpressionMaps, KeyCondition, PathElement, UpdateAction};
 use extenddb_core::types::{
     AttributeDefinition, AttributeValue, BillingMode, CreateTableInput, DeleteTableInput,
@@ -33,7 +31,6 @@ use extenddb_storage::{
     DataEngine, IdempotencyKey, MetadataEngine, StreamCapture, StreamContinuation, StreamEngine,
     TableEngine, TransactGetOp, TransactWriteOp, error::StorageError,
 };
-use object_store::memory::InMemory;
 
 fn identity(byte: u8) -> MutationIdentity {
     let now_ms = i64::try_from(
@@ -50,8 +47,19 @@ fn identity(byte: u8) -> MutationIdentity {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn account_items_replay_rollback_and_restore_on_new_host() {
+#[test]
+fn account_items_replay_rollback_and_restore_on_new_host() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
     let application = Arc::new(
         Beyonddb::compile(BuildDescriptor {
             source_revision: "account-cell-test".into(),
@@ -60,85 +68,13 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap(),
     );
     let target = account_target("123456789012").unwrap();
-    let session = SessionId::from_bytes([2; 16]);
     let directory = tempfile::TempDir::new().unwrap();
-    let store = Store::new(Arc::new(InMemory::new()));
-    let layout = CellStorageLayout::new(
-        store,
-        object_store::path::Path::from("beyonddb-account-test"),
-        *target.application().as_bytes(),
-    );
-    let host = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let registry = application.registry();
-    let catalog = CellCatalog::new(layout.clone(), target.tenant());
-    let proof = catalog
-        .provision(
-            CatalogEntry::new(
-                &target,
-                CatalogRole::Sql,
-                registry.module_code("beyonddb-account").unwrap(),
-                1,
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let authority = CellAuthority::new(layout.clone());
-    let incarnation = IncarnationId::from_bytes([3; 16]);
-    let control = authority
-        .create_initial(
-            &proof,
-            incarnation,
-            Owner {
-                session,
-                endpoint: "https://beyonddb.internal:8081".into(),
-            },
-        )
-        .await
-        .unwrap();
-    let handle = host
-        .runtime()
-        .bootstrap(
-            proof,
-            CellReplica::new(
-                layout.clone(),
-                *target.cell_id().as_bytes(),
-                *incarnation.as_bytes(),
-                Limits::default(),
-            )
-            .unwrap(),
-            authority,
-            control,
-            directory.path().join("account.sqlite"),
-            initialize_account,
-        )
-        .await
-        .unwrap();
-    let cell_client = CellClient::local(registry, handle.clone());
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application.clone(),
-            layout.clone(),
-            session,
-            "https://beyonddb.internal:8081".into(),
-            directory.path().join("coordinators"),
-        )
-        .unwrap(),
-    );
-    let storage = CellStorage::new(
-        CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
-        "us-east-1",
-    )
-    .with_transaction_coordinators(provisioner.clone());
-    let client = host
-        .application_handle::<Beyonddb>(cell_client, target.tenant(), target.application())
-        .unwrap();
+    let bucket = cellar::bucket::Bucket::open_dev(&directory.path().join("bucket.sqlite")).unwrap();
+    let first_owner = directory.path().join("owner-a");
+    let (node, client) = cellar_node::start(application.clone(), &first_owner, host.handle(), core.handle(), bucket.clone()).await.unwrap();
+    let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), application.clone()));
+    let storage = CellStorage::new(client.clone(), "us-east-1")
+        .with_transaction_coordinators(provisioner.clone());
     let schema = TableSpec {
         table_class: Default::default(),
         placement: beyonddb::TablePlacement::Account,
@@ -188,7 +124,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         table_id: book_table_id.clone(),
         attribute_name: "expires".into(),
         expected_after: None,
-        next_after: Some([7; 16]),
+        next_after: Some(RangeKey::new(vec![7; 16]).unwrap()),
     };
     assert!(
         client
@@ -297,29 +233,23 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .await
         .unwrap();
     assert_eq!(deleted.output.0, ItemMutationOutcome::Applied(Some(item)));
-    let connection = cellule_ltx::rusqlite::Connection::open_with_flags(
-        directory.path().join("account.sqlite"),
-        cellule_ltx::rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut query = connection
-        .prepare(
-            "SELECT record FROM ddb_stream_records WHERE table_id = ?1 ORDER BY sequence_number",
-        )
-        .unwrap();
-    let records = query
-        .query_map([&book_table_id], |row| row.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .map(|row| serde_json::from_slice::<StreamRecord>(&row.unwrap()).unwrap())
-        .collect::<Vec<_>>();
+    let records = account_records(&client, &target, &book_table_id).await;
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].event_name, StreamEventName::Insert);
     assert_eq!(records[1].event_name, StreamEventName::Remove);
     assert_eq!(records[0].dynamodb.new_image, records[1].dynamodb.old_image);
 
-    let author_table = storage
-        .create_table(
-            "123456789012",
+    assert!(matches!(
+        storage.create_table("123456789012", CreateTableInput {
+            table_name: "MustBeRouted".into(),
+            key_schema: schema.key_schema.clone(),
+            attribute_definitions: schema.attribute_definitions.clone(),
+            billing_mode: Some(BillingMode::PayPerRequest),
+            ..CreateTableInput::default()
+        }).await,
+        Err(StorageError::Connection(_))
+    ));
+    let author_table = create_account_table(&storage, &client,
             CreateTableInput {
                 table_name: "Authors".into(),
                 key_schema: schema.key_schema.clone(),
@@ -520,13 +450,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
     let book_key = Item::from([("id".into(), AttributeValue::S("book-2".into()))]);
     let author_key = Item::from([("id".into(), AttributeValue::S("author-1".into()))]);
     let invalid_key = Item::from([("wrong".into(), AttributeValue::S("author-1".into()))]);
-    let stream_count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
-            [&book_table_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let stream_count: i64 = i64::try_from(account_records(&client, &target, &book_table_id).await.len()).unwrap();
     let attempted = client
         .command::<TransactWrite>(
             &target,
@@ -555,13 +479,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             if matches!(committed.output.0, TransactionOutcome::Rejected { index: 1, .. })
     ));
     assert_eq!(
-        connection
-            .query_row(
-                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
-                [&book_table_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
+        i64::try_from(account_records(&client, &target, &book_table_id).await.len()).unwrap(),
         stream_count
     );
 
@@ -604,13 +522,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(committed.output.0, TransactionOutcome::Applied);
     assert_eq!(
-        connection
-            .query_row(
-                "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
-                [&book_table_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
+        i64::try_from(account_records(&client, &target, &book_table_id).await.len()).unwrap(),
         stream_count + 1
     );
     assert_eq!(
@@ -965,9 +877,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         storage.transact_get_items(&reads).await.unwrap(),
         large_items
     );
-    let ordered_table = storage
-        .create_table(
-            "123456789012",
+    let ordered_table = create_account_table(&storage, &client,
             CreateTableInput {
                 table_name: "Ordered".into(),
                 key_schema: vec![
@@ -1082,20 +992,8 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             &AttributeValue::N("-2".into())
         ]
     );
-    let committed_stream_count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
-            [&book_table_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let tail: Option<String> = connection
-        .query_row(
-            "SELECT max(sequence_number) FROM ddb_stream_records WHERE table_id = ?1",
-            [&book_table_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let committed_stream_count: i64 = i64::try_from(account_records(&client, &target, &book_table_id).await.len()).unwrap();
+    let tail: Option<String> = account_records(&client, &target, &book_table_id).await.last().map(|record| record.dynamodb.sequence_number.clone());
     assert_eq!(
         storage
             .sweep_account_stream_records("123456789012")
@@ -1103,13 +1001,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             .unwrap(),
         0
     );
-    let retained_stream_count: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM ddb_stream_records WHERE table_id = ?1",
-            [&book_table_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let retained_stream_count: i64 = i64::try_from(account_records(&client, &target, &book_table_id).await.len()).unwrap();
     assert_eq!(retained_stream_count, committed_stream_count);
     let shard_id = format!("shardId-{book_table_id}-account-2026-09-27T00:00:00.000");
     storage
@@ -1124,9 +1016,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         storage.latest_sequence_number(&shard_id).await.unwrap(),
         tail
     );
-    let streamed = storage
-        .create_table(
-            "123456789012",
+    let streamed = create_account_table(&storage, &client,
             CreateTableInput {
                 table_name: "Streamed".into(),
                 key_schema: schema.key_schema.clone(),
@@ -1205,11 +1095,8 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         StreamContinuation::More(Some(streamed_records[0].dynamodb.sequence_number.clone()))
     );
     assert_eq!(streamed_records[0].dynamodb.new_image, Some(streamed_item));
-    let routed_storage = CellStorage::new(
-        CellClient::local_runtime(application.registry(), host.runtime(), layout.clone()),
-        "us-east-1",
-    )
-    .with_initial_partitions(provisioner);
+    let routed_storage = CellStorage::new(client.clone(), "us-east-1")
+        .with_initial_partitions(provisioner.clone());
     let routed_table = routed_storage
         .create_table(
             "123456789012",
@@ -1238,7 +1125,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         )
         .await
         .unwrap();
-    assert_eq!(routed_stream.shards.len(), 1);
+    assert_eq!(routed_stream.shards.len(), 4);
     let routed_key = routed_storage
         .table_key_info("123456789012", "RoutedStream")
         .await
@@ -1258,53 +1145,22 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         )
         .await
         .unwrap();
-    let (routed_records, _) = routed_storage
-        .get_stream_records("123456789012", &routed_stream.shards[0].shard_id, None, 100)
-        .await
-        .unwrap();
+    let mut routed_records = Vec::new();
+    for shard in &routed_stream.shards {
+        let (records, _) = routed_storage.get_stream_records("123456789012", &shard.shard_id, None, 100).await.unwrap();
+        routed_records.extend(records);
+    }
     assert_eq!(routed_records.len(), 1);
-    let routed_owner =
-        beyonddb::data_target("123456789012", &routed_table.table_id, &[0; 16]).unwrap();
-    assert_eq!(
-        routed_storage
-            .sweep_partition_stream_records(&routed_owner)
-            .await
-            .unwrap(),
-        0
-    );
-    assert!(
-        host.runtime()
-            .active_cell_targets()
-            .await
-            .unwrap()
-            .contains(&routed_owner)
-    );
-    assert_eq!(
-        routed_storage
-            .sweep_active_partition_stream_records(&host.runtime())
-            .await
-            .unwrap(),
-        0
-    );
-    let before = client
-        .query::<ReadStreamGcShard>(&target, None, Json(()))
-        .await
-        .unwrap()
-        .output
-        .0;
-    assert_eq!(
-        routed_storage
-            .sweep_account_catalog_stream_records("123456789012", &layout)
-            .await
-            .unwrap(),
-        0
-    );
-    let after = client
-        .query::<ReadStreamGcShard>(&target, None, Json(()))
-        .await
-        .unwrap()
-        .output
-        .0;
+    let before = client.query::<ReadStreamGcShard>(&target, None, Json(())).await.unwrap().output.0;
+    let beyonddb::RoutePageOutcome::Page { partitions, has_more: false, .. } = beyonddb::read_route_page(&client, &target, beyonddb::RoutePageInput { table_id: routed_table.table_id.clone(), start_key: None, after_lower: None, expected_epoch: None }).await.unwrap() else { panic!("missing routed stream ranges"); };
+    for range in partitions {
+        let owner = beyonddb::data_target("123456789012", &routed_table.table_id, &range.partition_id).unwrap();
+        let installed = client.query::<beyonddb::ReadPartitionState>(&owner, None, Json(())).await.unwrap().output.0.unwrap();
+        assert_eq!(installed.state, beyonddb::PartitionState::Serving);
+        assert_eq!(routed_storage.sweep_partition_stream_records(&owner).await.unwrap(), 0);
+    }
+    client.command::<beyonddb::AdvanceStreamGcShard>(&target, identity(90), Json(before)).await.unwrap();
+    let after = client.query::<ReadStreamGcShard>(&target, None, Json(())).await.unwrap().output.0;
     assert_eq!(after, before.wrapping_add(1));
     let (first_streams, cursor) = storage
         .list_streams("123456789012", None, 1, None)
@@ -1350,9 +1206,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(retained_records.len(), 1);
     assert_eq!(continuation, StreamContinuation::End);
-    storage
-        .create_table(
-            "123456789012",
+    create_account_table(&storage, &client,
             CreateTableInput {
                 table_name: "Streamed".into(),
                 key_schema: schema.key_schema.clone(),
@@ -1390,48 +1244,11 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .unwrap();
     assert_eq!(old_records.len(), 1);
     assert_eq!(continuation, StreamContinuation::End);
-    handle.drain().await.unwrap();
-    host.shutdown().await.unwrap();
-
-    let next_session = SessionId::from_bytes([10; 16]);
-    let restored_host = CellNodeBuilder::new(Arc::clone(&application))
-        .with_runtime(SqlWorkerPool::new(1, 8).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(next_session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let catalog = CellCatalog::new(layout.clone(), target.tenant());
-    let proof = catalog.lookup(target.cell_id()).await.unwrap().unwrap();
-    let authority = CellAuthority::new(layout.clone());
-    let idle = authority.load(target.cell_id()).await.unwrap().unwrap();
-    let restored = restored_host
-        .runtime()
-        .acquire_idle_restored(
-            proof,
-            CellReplica::new(
-                layout,
-                *target.cell_id().as_bytes(),
-                *incarnation.as_bytes(),
-                Limits::default(),
-            )
-            .unwrap(),
-            authority,
-            idle,
-            directory.path().join("restored-account.sqlite"),
-            Owner {
-                session: next_session,
-                endpoint: "https://restored-beyonddb.internal:8081".into(),
-            },
-        )
-        .await
-        .unwrap();
-    let restored_client = restored_host
-        .application_handle::<Beyonddb>(
-            CellClient::local(application.registry(), restored),
-            target.tenant(),
-            target.application(),
-        )
-        .unwrap();
+    // Handoff needs an eligible successor. Start an independent SDK owner with
+    // an empty local directory before stopping the original owner.
+    let (restored_node, restored_client) = cellar_node::start(application, &directory.path().join("owner-b"), host.handle(), core.handle(), bucket).await.unwrap();
+    cellar_node::stop(node, cellar::sdk::ShutdownMode::Handoff).await.unwrap();
+    std::fs::remove_dir_all(first_owner).unwrap();
     let mut after_sequence = None;
     let mut restored_stream_count = 0;
     loop {
@@ -1472,7 +1289,7 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
         .output
         .0
         .unwrap();
-    assert_eq!(restored_sweep.after_lower, Some([7; 16]));
+    assert_eq!(restored_sweep.after_lower, Some(RangeKey::new(vec![7; 16]).unwrap()));
     let restored_schedule = restored_client
         .query::<ReadTtlSchedule>(&target, None, Json(()))
         .await
@@ -1564,5 +1381,96 @@ async fn account_items_replay_rollback_and_restore_on_new_host() {
             &AttributeValue::N("10".into())
         ]
     );
-    restored_host.shutdown().await.unwrap();
+    cellar_node::stop(restored_node, cellar::sdk::ShutdownMode::Preserve).await.unwrap();
+    });
+}
+
+// Explicit private account-table commands retain coverage of the account module.
+// Public CreateTable always provisions multiple data cells in the serving fixture.
+async fn create_account_table(
+    storage: &CellStorage,
+    client: &CellClient,
+    input: CreateTableInput,
+) -> Result<extenddb_core::types::TableDescription, StorageError> {
+    let table_name = input.table_name.clone();
+    let stream = input
+        .stream_specification
+        .filter(|stream| stream.stream_enabled)
+        .map(|stream| StreamConfig {
+            region: "us-east-1".into(),
+            label: uuid::Uuid::now_v7().to_string(),
+            view_type: stream.stream_view_type.unwrap(),
+        });
+    client
+        .command::<CreateTable>(
+            &account_target("123456789012").unwrap(),
+            MutationIdentity {
+                request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
+                ..identity(99)
+            },
+            Json(TableSpec {
+                table_class: Default::default(),
+                placement: beyonddb::TablePlacement::Account,
+                table_name,
+                key_schema: input.key_schema,
+                attribute_definitions: input.attribute_definitions,
+                local_secondary_indexes: input.local_secondary_indexes.unwrap_or_default(),
+                global_secondary_indexes: input.global_secondary_indexes.unwrap_or_default(),
+                billing_mode: input.billing_mode.unwrap_or(BillingMode::PayPerRequest),
+                provisioned_throughput: input.provisioned_throughput,
+                deletion_protection_enabled: input.deletion_protection_enabled.unwrap_or(false),
+                initial_tags: Vec::new(),
+                resource_arn: None,
+                stream,
+            }),
+        )
+        .await
+        .unwrap();
+    storage
+        .describe_table(
+            "123456789012",
+            extenddb_core::types::DescribeTableInput {
+                table_name: input.table_name,
+            },
+        )
+        .await
+}
+async fn account_records(
+    client: &CellClient,
+    target: &CellTarget,
+    table_id: &str,
+) -> Vec<StreamRecord> {
+    let mut records = Vec::new();
+    let mut after = None;
+    loop {
+        let page = client
+            .query::<ReadAccountStreamJournal>(
+                target,
+                None,
+                Json(StreamJournalInput {
+                    table_id: table_id.into(),
+                    label: "2026-09-27T00:00:00.000".into(),
+                    after_sequence: after,
+                    limit: 1_000,
+                }),
+            )
+            .await
+            .unwrap()
+            .output
+            .0;
+        let StreamJournalOutcome::Page {
+            records: page,
+            last_sequence,
+            ..
+        } = page
+        else {
+            panic!("account stream generation missing");
+        };
+        records.extend(page);
+        let Some(next) = last_sequence else {
+            break;
+        };
+        after = Some(next);
+    }
+    records
 }

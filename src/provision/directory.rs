@@ -7,6 +7,7 @@ use crate::{
     OpenDirectory, PublishDirectorySplit, ReadDirectory, ReadDirectoryPage, RoutePagePartition,
     directory_target,
 };
+use bdb_keyspace::RangeKey;
 
 impl CellInitialPartitionProvisioner {
     pub(super) async fn split_ready_directory(
@@ -14,11 +15,12 @@ impl CellInitialPartitionProvisioner {
         client: &CellClient,
         account_id: &str,
         id: &str,
-        lower: [u8; 16],
-    ) -> Result<cellule_runtime::identity::CellTarget, StorageError> {
+        lower: RangeKey,
+    ) -> Result<bdb_cellar_runtime::identity::CellTarget, StorageError> {
         let account = crate::account_target(account_id).map_err(provision_error)?;
         for _ in 0..128 {
-            let directory = crate::route_directory_target(client, &account, id, lower).await?;
+            let directory =
+                crate::route_directory_target(client, &account, id, lower.clone()).await?;
             let state = client
                 .query::<crate::ReadDirectory>(&directory, None, Json(()))
                 .await
@@ -41,77 +43,6 @@ impl CellInitialPartitionProvisioner {
         Err(StorageError::Transient(
             "directory did not become writable".into(),
         ))
-    }
-
-    pub(crate) async fn recover_route_directory_path(
-        &self,
-        client: &CellClient,
-        account_id: &str,
-        directory_id: &str,
-        after: Option<[u8; 16]>,
-        nodes: &NodeDirectory,
-    ) -> Result<(), StorageError> {
-        let mut hash = after.unwrap_or([0; 16]);
-        // At a leaf boundary, pagination first checks the previous leaf and then
-        // crosses into its neighbour. Restore only those two bounded paths.
-        for crossing in 0..2 {
-            let mut spec = DirectorySpec::root(directory_id.into());
-            for _ in 0..128 {
-                let (target, _) = self.published_directory(account_id, &spec).await?;
-                self.recover_discovered_owner(
-                    &target,
-                    crate::directory::MODULE,
-                    crate::initialize_directory,
-                    nodes,
-                )
-                .await?;
-                let state = client
-                    .query::<ReadDirectory>(&target, None, Json(()))
-                    .await
-                    .map_err(cell_error)?
-                    .output
-                    .0
-                    .ok_or_else(|| StorageError::Transient("directory state is missing".into()))?;
-                match state.mode {
-                    DirectoryMode::Branch(split) => {
-                        spec = split
-                            .children
-                            .into_iter()
-                            .find(|child| {
-                                child.lower <= hash && child.upper.is_none_or(|upper| hash < upper)
-                            })
-                            .ok_or_else(|| {
-                                StorageError::Internal("directory recovery has no child".into())
-                            })?;
-                    }
-                    DirectoryMode::Leaf | DirectoryMode::Frozen(_) | DirectoryMode::Importing => {
-                        break;
-                    }
-                    DirectoryMode::Retiring { .. } | DirectoryMode::Retired => {
-                        return Err(StorageError::Transient("directory is retiring".into()));
-                    }
-                }
-            }
-            let page = crate::read_directory_leaf(
-                client,
-                account_target(account_id)
-                    .map_err(provision_error)?
-                    .tenant(),
-                directory_id,
-                hash,
-            )
-            .await?;
-            if crossing == 0
-                && let Some(after) = after
-                && !page.ranges.iter().any(|range| range.lower > after)
-                && let Some(next) = page.spec.upper
-            {
-                hash = next;
-                continue;
-            }
-            return Ok(());
-        }
-        Ok(())
     }
 
     async fn existing_directory_client(
@@ -172,14 +103,15 @@ impl CellInitialPartitionProvisioner {
         };
         if !published {
             let mut copies: [Vec<RoutePagePartition>; 2] = [Vec::new(), Vec::new()];
-            let mut hash = spec.lower;
+            let mut hash = spec.lower.clone();
             loop {
                 let page = parent_client
                     .query::<ReadDirectoryPage>(
                         &parent,
                         None,
                         Json(DirectoryPageInput {
-                            hash,
+                            reverse: false,
+                            hash: hash.clone(),
                             expected_version: Some(split.version),
                         }),
                     )
@@ -197,7 +129,7 @@ impl CellInitialPartitionProvisioner {
                 let last = ranges
                     .last()
                     .ok_or_else(|| StorageError::Internal("empty directory copy page".into()))?;
-                let next = last.upper;
+                let next = last.upper.clone();
                 for range in ranges {
                     let side = usize::from(range.lower >= split.children[1].lower);
                     copies[side].push(range);
@@ -299,7 +231,6 @@ impl CellInitialPartitionProvisioner {
                 // The account's durable creation intent authorizes this root.
                 // Unlike a published tree, it may never have been installed.
                 let target = directory_target(account_id, &spec).map_err(provision_error)?;
-                self.reclaim_retired_ranges(client, &account, None).await?;
                 let client = self.provision_range(&target, client).await?;
                 client
                     .command::<crate::RetireDirectory>(

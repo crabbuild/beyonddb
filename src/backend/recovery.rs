@@ -1,7 +1,7 @@
 //! Complete published cross-Cell decisions after a request or owner exits.
 
-use cellule_runtime::client::{InvocationError, Observed, Receipt};
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::{InvocationError, Observed, Receipt};
+use bdb_cellar_runtime::identity::CellTarget;
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
 use std::time::Duration;
@@ -23,6 +23,87 @@ use crate::{
 };
 
 impl CellStorage {
+    /// Recover one discovered record while its coordinator may have a live
+    /// owner. Resume admitted BEGINs from immutable coordinator payloads; only
+    /// the atomic expiry command may abort them solely because of their age.
+    pub(crate) async fn recover_live_coordinator_entry(
+        &self,
+        coordinator: &CellTarget,
+        entry: PendingCrossCellTransaction,
+    ) -> Result<(), StorageError> {
+        if entry.state == PendingTransactionState::Begin {
+            let aborted = self
+                .client
+                .command::<crate::AbortExpiredTransaction>(
+                    coordinator,
+                    mutation_identity()?,
+                    Json(ReadCrossCellTransactionInput {
+                        account_id: entry.account_id.clone(),
+                        transaction_id: entry.transaction_id,
+                        routing_key: entry.routing_key.clone(),
+                    }),
+                )
+                .await
+                .map_err(cell_error)?
+                .output
+                .0;
+            if !aborted {
+                // Observe every original participant before recovery acquires
+                // additional locks. A known admission failure on an already
+                // prepared participant must not expand an unfinished BEGIN.
+                // These reads use SDK routing; they confer no owner authority
+                // and do not replace the prepare/commit protocol's fences.
+                let participants = self
+                    .client
+                    .query::<ReadUnresolvedCoordinatorParticipants>(
+                        coordinator,
+                        None,
+                        Json(ReadCrossCellTransactionInput {
+                            account_id: entry.account_id.clone(),
+                            transaction_id: entry.transaction_id,
+                            routing_key: entry.routing_key.clone(),
+                        }),
+                    )
+                    .await
+                    .map_err(cell_error)?
+                    .output
+                    .0;
+                for participant in participants {
+                    let target = match participant.target {
+                        CoordinatorParticipantTarget::Account => account_target(&entry.account_id),
+                        CoordinatorParticipantTarget::Data {
+                            table_id,
+                            partition_id,
+                            ..
+                        } => data_target(&entry.account_id, &table_id, &partition_id),
+                    }
+                    .map_err(|error| StorageError::Internal(error.to_string()))?;
+                    self.participant_state(
+                        &target,
+                        ReadTransactionInput {
+                            transaction_id: entry.transaction_id,
+                            coordinator_cell: *coordinator.cell_id().as_bytes(),
+                        },
+                    )
+                    .await?;
+                }
+                self.resume_cross_cell_transaction(
+                    &entry.account_id,
+                    &entry.routing_key,
+                    entry.transaction_id,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+        self.finish_decided_cross_cell_transaction(
+            &entry.account_id,
+            &entry.routing_key,
+            entry.transaction_id,
+        )
+        .await
+    }
+
     pub(crate) async fn pending_coordinator_transaction(
         &self,
         coordinator: &CellTarget,
@@ -450,7 +531,7 @@ impl CellStorage {
             Ok(_) | Err(InvocationError::Rejected(_)) => Err(StorageError::Internal(
                 "participant rejected published transaction decision".into(),
             )),
-            Err(InvocationError::Pending(_)) => {
+            Err(InvocationError::Ambiguous { .. }) => {
                 let observed = self.participant_state(target, input).await?;
                 if matches!(
                     (commit, observed.output.0),
@@ -512,7 +593,7 @@ read_barrier!(
 );
 
 impl CellStorage {
-    pub(super) async fn query_resolving<Q: cellule_runtime::registry::Query>(
+    pub(super) async fn query_resolving<Q: bdb_cellar_runtime::registry::Query>(
         &self,
         target: &CellTarget,
         account_id: &str,

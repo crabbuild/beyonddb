@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+members = ["crates/bdb-cellar-runtime", "crates/bdb-keyspace"]
 
 [workspace.package]
 edition = "2024"
@@ -8,12 +9,7 @@ repository = "https://github.com/crabbuild/beyonddb"
 rust-version = "1.97"
 
 [workspace.dependencies]
-cellule-app = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
-cellule-host = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
-cellule-peer-http = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
-cellule-runtime = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
-cellule-store = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
-cellule-ltx = { git = "https://github.com/crabbuild/cellule.git", rev = "1d0648b3b5ae0cca040c614b505b4d72bb769ab1" }
+cellar = { package = "cellar-main", version = "=0.1.0" }
 async-trait = "0.1"
 blake3 = "1.8"
 futures-util = "0.3"
@@ -28,7 +24,7 @@ aws-config = "1"
 aws-credential-types = "1"
 aws-sdk-dynamodb = "1"
 ed25519-dalek = "2.2"
-object_store = { version = "0.14.1", default-features = false }
+object_store = { version = "0.12.5", default-features = false, features = ["aws"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 tempfile = "3"
 
@@ -40,20 +36,22 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Cell-based DynamoDB service over Cellule"
+description = "Cell-based DynamoDB service over the embedded Cellar SDK"
 
 [dependencies]
+anyhow = "1"
+bdb-cellar-runtime = { path = "crates/bdb-cellar-runtime" }
+bdb-keyspace = { path = "crates/bdb-keyspace" }
+cellar.workspace = true
+http = "1"
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 aes-gcm = "0.10"
 async-trait.workspace = true
 bigdecimal = "0.4"
 blake3.workspace = true
-cellule-app.workspace = true
-cellule-host.workspace = true
-cellule-peer-http.workspace = true
-cellule-runtime.workspace = true
-cellule-store.workspace = true
-cellule-ltx = { workspace = true, features = ["replica"] }
 extenddb-auth = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 extenddb-core = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 extenddb-server = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
@@ -75,8 +73,8 @@ uuid.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+rusqlite = { version = "=0.31.0", features = ["blob"] }
 prost = "=0.13.5"
-cellule-store = { workspace = true, features = ["test-support"] }
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-dynamodb.workspace = true
@@ -84,3 +82,27 @@ ed25519-dalek.workspace = true
 extenddb-engine = { git = "https://github.com/crabbuild/extenddb.git", rev = "7eaa89b437feed0af0f05883d3f1493f86c6fc6d" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "time"] }
+
+# Physical prepare reservations feed the LTX codec even in local SDK tests.
+# Keep its checksums/compression optimized under the development/test profiles.
+[profile.dev.package.cellar-ltx]
+opt-level = 2
+[profile.dev.package.crc-fast]
+opt-level = 2
+[profile.dev.package.lz4_flex]
+opt-level = 2
+
+# Large signed transaction fixtures also serialize, hash and forward multi-MiB
+# images. Unoptimized byte loops can starve the SDK's unchanged durability gate
+# on small CI runners. Keep assertions enabled and optimize these dependencies
+# for both development and tests, just like the LTX codec above.
+[profile.dev.package.serde_json]
+opt-level = 2
+[profile.dev.package.memchr]
+opt-level = 2
+[profile.dev.package.fastwebsockets]
+opt-level = 2
+[profile.dev.package.blake3]
+opt-level = 2
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2

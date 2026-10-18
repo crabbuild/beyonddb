@@ -1,0 +1,8 @@
+BeyondDB Cellar runtime adapter
+
+The bounded wire codec, logical identity helpers, pure application/module
+descriptors and SQL value wire codecs are adapted from
+https://github.com/crabbuild/cellule at
+1d0648b3b5ae0cca040c614b505b4d72bb769ab1, licensed under Apache-2.0.
+These helpers contain no Cellule execution, ownership, storage or peer runtime.
+Cellar is the execution and durability implementation.

@@ -14,7 +14,7 @@ impl DirectorySplit {
             && left.table_id == self.parent.table_id
             && right.table_id == self.parent.table_id
             && left.lower == self.parent.lower
-            && left.upper == Some(right.lower)
+            && left.upper == Some(right.lower.clone())
             && right.upper == self.parent.upper
             && left.node_id == child_id(&self.parent, self.version, 0)
             && right.node_id == child_id(&self.parent, self.version, 1)
@@ -74,7 +74,7 @@ impl Command for FreezeDirectory {
             return Ok(CommandResult::Rejected(Json(None)));
         }
         let middle = rows.len() / 2;
-        let boundary = rows[middle].lower;
+        let boundary = rows[middle].lower.clone();
         let depth = state
             .spec
             .depth
@@ -82,7 +82,7 @@ impl Command for FreezeDirectory {
             .ok_or(Error::Command("directory depth overflow"))?;
         let left = DirectorySpec {
             node_id: child_id(&state.spec, version, 0),
-            upper: Some(boundary),
+            upper: Some(boundary.clone()),
             depth,
             ..state.spec.clone()
         };

@@ -3,14 +3,14 @@
 use crate::participant::StagedEffect;
 use std::collections::HashSet;
 
-use cellule_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
-use cellule_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
+use bdb_cellar_runtime::codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
+use bdb_cellar_runtime::registry::{Command, CommandContext, CommandResult, Query, QueryContext};
 use extenddb_core::types::Item;
 use serde::{Deserialize, Serialize};
 
 use super::{
     AccessState, DATA_MODULE, Json, PartitionSpec, Result, SqlValue, command_access, command_item,
-    data_key_hash, item_key, statement, valid_item, valid_key, write_item,
+    item_key, ordered_data_key, statement, valid_item, valid_key, write_item,
 };
 use crate::PrepareTransactionOutcome;
 use crate::items::{TransactionFailure, TransactionOperation};
@@ -320,7 +320,7 @@ fn query_stage_operations(
             return Ok(Err(stage_validation(index, "item violates table schema")));
         }
         let key = item_key(&input.key, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(
+        if !spec.contains(ordered_data_key(
             &spec.table.id,
             &input.key,
             &spec.table.key_schema,
@@ -457,7 +457,11 @@ fn stage_operations(
             return Ok(Err(stage_validation(index, "item violates table schema")));
         }
         let key = item_key(item, &spec.table.key_schema)?;
-        if !spec.contains(data_key_hash(&spec.table.id, item, &spec.table.key_schema)?) {
+        if !spec.contains(ordered_data_key(
+            &spec.table.id,
+            item,
+            &spec.table.key_schema,
+        )?) {
             return Ok(Err(StageError::WrongPartition));
         }
         if !touched.insert(key.clone()) && !shared {

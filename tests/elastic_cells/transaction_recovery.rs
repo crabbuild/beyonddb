@@ -1,31 +1,43 @@
-use crate::*;
-use beyonddb::TableRecord;
-
+use crate::local_node;
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::{CellClient, Invocation, InvocationTransport},
+    identity::CellTarget,
+};
+use beyonddb::*;
+use bytes::Bytes;
+use cellar::sdk::IngressResponse;
+use extenddb_core::types::AttributeValue;
+use http_body_util::{BodyExt, Full};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
+fn identity(_: u8) -> MutationIdentity {
+    local_node::wall_mutation()
+}
 pub(super) async fn assert_background_recovery(
-    host: &cellule_host::CellNode,
-    application: Arc<cellule_app::CompiledApplication>,
-    bootstrap: &Bootstrap<'_>,
-    directory: &std::path::Path,
+    client: &CellClient,
     table: &TableRecord,
     participants: &[(CellTarget, CoordinatorParticipant)],
 ) {
     let account_id = "123456789012";
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application,
-            bootstrap.layout.clone(),
-            bootstrap.session,
-            "http://recovery.internal".into(),
-            directory.join("recovery"),
-        )
-        .unwrap(),
-    );
-    let client = CellClient::local_runtime(
-        bootstrap.registry.clone(),
-        host.runtime(),
-        bootstrap.layout.clone(),
-    );
+    let provisioner =
+        CellInitialPartitionProvisioner::new(client.clone(), local_node::application().unwrap());
+    let original_spec = client
+        .query::<ReadPartitionState>(&participants[0].0, None, Json(()))
+        .await
+        .unwrap()
+        .output
+        .0
+        .unwrap()
+        .spec;
     let token = "background-recovery";
     let coordinator = coordinator_target(account_id, token.as_bytes()).unwrap();
     // Put an unavailable participant before healthy work in the same shard.
@@ -35,10 +47,10 @@ pub(super) async fn assert_background_recovery(
         .find(|id| coordinator_target(account_id, id).unwrap() == coordinator)
         .unwrap();
     provisioner
-        .admit_coordinator(account_id, token.as_bytes())
+        .ensure(client, account_id, token.as_bytes())
         .await
         .unwrap();
-    let isolated_partition = [231; 16];
+    let isolated_partition = *uuid::Uuid::now_v7().as_bytes();
     let isolated_target = data_target(account_id, &table.id, &isolated_partition).unwrap();
     let TransactionOperation::Put(original) = &participants[0].1.operations[0].operation else {
         unreachable!()
@@ -132,15 +144,6 @@ pub(super) async fn assert_background_recovery(
         .0
         .unwrap();
     assert_eq!(boundary.transaction_id, good_id);
-    bootstrap
-        .cell(
-            &isolated_target,
-            "beyonddb-data",
-            231,
-            &directory.join("isolated-participant.sqlite"),
-            initialize_partition,
-        )
-        .await;
     client
         .command::<InstallPartition>(
             &isolated_target,
@@ -148,77 +151,52 @@ pub(super) async fn assert_background_recovery(
             Json(PartitionInstall::Serving(PartitionSpec {
                 table: table.clone(),
                 partition_id: isolated_partition,
-                lower: None,
-                upper: None,
+                lower: original_spec.lower.clone(),
+                upper: original_spec.upper.clone(),
                 epoch: 1,
             })),
         )
         .await
         .unwrap();
-    let peer_session = SessionId::from_bytes([233; 16]);
-    let peer_runtime = CellRuntime::new(
-        SqlWorkerPool::new(1, 8).unwrap(),
-        16 * 1024 * 1024,
-        peer_session,
+    let unavailable = Arc::new(AtomicBool::new(true));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let recovery_client = client.map_transport(|inner| {
+        Arc::new(UnavailableParticipant {
+            inner,
+            target: isolated_target.clone(),
+            unavailable: unavailable.clone(),
+            attempts: attempts.clone(),
+        })
+    });
+    let mut recovery = TransactionRecovery::new(
+        Arc::new(CellStorage::new(recovery_client, "local")),
+        account_id.into(),
     )
     .unwrap();
-    let signer = PeerSigner::new(
-        peer_session,
-        bootstrap.registry.release_digest(),
-        SigningKey::from_bytes(&[233; 32]),
-    );
-    let unavailable = Arc::new(AtomicBool::new(true));
-    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let transport = LoopbackPeerRoundTrip {
-        verifier: Arc::new(PeerVerifier::new(
-            peer_session,
-            bootstrap.registry.release_digest(),
-            signer.verifying_key(),
-        )),
-        dispatcher: Arc::new(PeerDispatcher::new(
-            bootstrap.registry.clone(),
-            Arc::new(UnavailableParticipant {
-                inner: LocalRuntimePeerResolver {
-                    runtime: host.runtime(),
-                    layout: bootstrap.layout.clone(),
-                },
-                target: isolated_target.clone(),
-                unavailable: unavailable.clone(),
-                attempts: attempts.clone(),
-            }),
-            Arc::new(TestPeerAuthorizer),
-        )),
-    };
-    let recovery_client = CellClient::runtime_with_peer(
-        bootstrap.registry.clone(),
-        peer_runtime.clone(),
-        bootstrap.layout.clone(),
-        Arc::new(signer),
-        PeerPrincipal {
-            issuer: "recovery-test".into(),
-            subject: "recovery".into(),
-            actions: vec!["beyonddb.cell.invoke".into()],
-        },
-        Arc::new(transport),
-    );
-    let tasks = host
-        .install_task_group(CancellationToken::new(), CancellationToken::new())
-        .unwrap();
-    provisioner
-        .install_transaction_recovery_loop(
-            &tasks,
-            CellStorage::new(recovery_client, "us-east-1"),
-            NodeDirectory::new(
-                bootstrap.layout.clone(),
-                Digest::from_bytes([201; 32]),
-                Digest::from_bytes([202; 32]),
-                bootstrap.registry.release_digest(),
-            ),
-            vec![],
-        )
-        .unwrap();
+    let cancellation = CancellationToken::new();
+    let stop = cancellation.clone();
+    let worker = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(Duration::from_millis(10));
+        let mut failed = 0;
+        loop {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                _ = ticks.tick() => {
+                    tokio::select! {
+                        () = stop.cancelled() => break,
+                        result = recovery.step() => {
+                            if let Err(error) = result {
+                                failed += 1;
+                                if failed <= 3 || failed % 100 == 0 { eprintln!("recovery attempt {failed}: {error}"); }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    });
     assert_eq!(
-        wait_for_resolution(&client, account_id, token.as_bytes(), good_id).await,
+        wait_for_resolution(client, account_id, token.as_bytes(), good_id).await,
         CoordinatorDecision::Commit
     );
     for ((target, _), participant) in participants.iter().zip(&request) {
@@ -267,7 +245,7 @@ pub(super) async fn assert_background_recovery(
     assert!(attempts.load(Ordering::SeqCst) > 0);
     unavailable.store(false, Ordering::SeqCst);
     assert_eq!(
-        wait_for_resolution(&client, account_id, &bad_id, bad_id).await,
+        wait_for_resolution(client, account_id, &bad_id, bad_id).await,
         CoordinatorDecision::Commit
     );
     // A shard admitted after loop installation must join recovery, including
@@ -277,7 +255,7 @@ pub(super) async fn assert_background_recovery(
     assert_ne!(abort_coordinator, coordinator);
     unavailable.store(true, Ordering::SeqCst);
     provisioner
-        .admit_coordinator(account_id, &abort_id)
+        .ensure(client, account_id, &abort_id)
         .await
         .unwrap();
     let mut aborted_put = original.clone();
@@ -343,7 +321,7 @@ pub(super) async fn assert_background_recovery(
         .unwrap();
     unavailable.store(false, Ordering::SeqCst);
     assert_eq!(
-        wait_for_resolution(&client, account_id, &abort_id, abort_id).await,
+        wait_for_resolution(client, account_id, &abort_id, abort_id).await,
         aborted
     );
     assert_eq!(
@@ -372,37 +350,41 @@ pub(super) async fn assert_background_recovery(
             .0
             .is_none()
     );
-    // Cancellation owns the in-flight recovery future; shutdown must not wait
-    // for another timer tick or leave a task accessing closed Cell handles.
-    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+    // Cancellation owns the active step and cannot leave it using a stopped node.
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(5), worker)
         .await
         .unwrap()
         .unwrap();
-    peer_runtime.shutdown().await.unwrap();
 }
 
 struct UnavailableParticipant {
-    inner: LocalRuntimePeerResolver,
+    inner: Arc<dyn InvocationTransport>,
     target: CellTarget,
     unavailable: Arc<AtomicBool>,
-    attempts: Arc<std::sync::atomic::AtomicUsize>,
+    attempts: Arc<AtomicUsize>,
 }
-
-impl PeerCellResolver for UnavailableParticipant {
-    fn resolve(
-        &self,
-        target: CellTarget,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = cellule_runtime::Result<CellHandle>> + Send + 'static>,
-    > {
-        if target == self.target && self.unavailable.load(Ordering::SeqCst) {
-            self.attempts.fetch_add(1, Ordering::SeqCst);
-            return Box::pin(async { Err(cellule_runtime::Error::CellNotActive) });
-        }
-        self.inner.resolve(target)
+impl InvocationTransport for UnavailableParticipant {
+    fn call<'a>(
+        &'a self,
+        invocation: &'a Invocation<'a>,
+        request: http::Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = IngressResponse> + Send + 'a>> {
+        Box::pin(async move {
+            if invocation.target == self.target && self.unavailable.load(Ordering::SeqCst) {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                let body = Full::new(Bytes::new())
+                    .map_err(|never| -> std::io::Error { match never {} })
+                    .boxed_unsync();
+                let mut response = http::Response::new(body);
+                *response.status_mut() = http::StatusCode::SERVICE_UNAVAILABLE;
+                response
+            } else {
+                self.inner.call(invocation, request).await
+            }
+        })
     }
 }
-
 async fn wait_for_resolution(
     client: &CellClient,
     account_id: &str,
@@ -410,7 +392,8 @@ async fn wait_for_resolution(
     transaction_id: [u8; 16],
 ) -> CoordinatorDecision {
     let target = coordinator_target(account_id, routing_key).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let mut last = None;
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let status = client
                 .query::<ReadCrossCellTransaction>(
@@ -430,9 +413,12 @@ async fn wait_for_resolution(
             if status.resolved_count == status.participant_count {
                 return status.decision;
             }
+            last = Some(status);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .unwrap()
+    .await;
+    outcome.unwrap_or_else(|_| {
+        panic!("recovery deadline for {transaction_id:?}, key {routing_key:?}, last {last:?}")
+    })
 }

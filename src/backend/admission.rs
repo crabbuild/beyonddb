@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use cellule_runtime::client::InvocationError;
-use cellule_runtime::identity::CellTarget;
+use bdb_cellar_runtime::client::InvocationError;
+use bdb_cellar_runtime::identity::CellTarget;
 use extenddb_core::types::{Item, TableKeyInfo};
 use extenddb_storage::error::StorageError;
 use futures_util::{StreamExt, stream};
@@ -241,7 +241,7 @@ impl CellStorage {
                     _ => StorageError::Internal("unexpected rejected transaction admission".into()),
                 });
             }
-            Err(InvocationError::Pending(_)) => {
+            Err(InvocationError::Ambiguous { .. }) => {
                 // A lost BEGIN reply can name another request's winning identity.
                 // Resolve the token first; absence remains uncertain and retryable.
                 let observed = if let Some(token) = &token {
