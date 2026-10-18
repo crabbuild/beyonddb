@@ -617,11 +617,18 @@ pub struct Http {
 }
 impl Http {
     pub async fn start(client: &CellClient, access: &str) -> Self {
+        Self::with_provisioner(client, access, provisioner(client)).await
+    }
+    pub async fn with_provisioner(
+        client: &CellClient,
+        access: &str,
+        provisioner: Arc<CellInitialPartitionProvisioner>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let state = build_http_state(
             client.clone(),
-            provisioner(client),
+            provisioner,
             ENCRYPTION,
             "us-east-1",
             endpoint.clone(),

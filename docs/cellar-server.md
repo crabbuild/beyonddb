@@ -283,7 +283,13 @@ Cellar still owns cross-gateway admission, execution and durability. Mutations
 retain one transport attempt. Development/test builds optimize LTX checksum
 and compression dependencies so physical reservation traffic can meet the
 same durability deadlines; no reservation or workload bounds were reduced.
-The rebuilt gateway passes 127 focused native tests and all nine explicitly
+Three native public-placement cases also reject Single selection, retain
+four-range plans despite later creation-policy and tag changes, preserve atomic
+reads within one range of a multi-range table, and split GSI ranges independently
+of the base plan. Token replay, exact stream counts and signed index values
+survive fresh-owner recovery after local-file deletion. SDK factory identities
+and ownership rows prove higher epochs for the restored data/index scopes.
+The current fixture suite passes 130 focused native tests and all nine explicitly
 executed RustFS process cases, zero failed/ignored. See the current fingerprint
 and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains

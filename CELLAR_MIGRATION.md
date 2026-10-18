@@ -24,10 +24,12 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Current registry qualification
 
-The gateway dispatch/registration build passes all **127 focused native tests**
-across nineteen SHA-256-verified executable copies, with zero failed/ignored
-cases and normal test parallelism (380.96 seconds summed execution time).
-The same rebuilt server passes all nine explicitly executed RustFS process
+The current native suite passes all **130 focused tests** across twenty
+SHA-256-verified executable copies, with zero failed/ignored cases and normal
+test parallelism (409.75 seconds summed execution time), including the
+public multi-cell placement port. Production code and the server fingerprint
+are unchanged by that fixture port. The gateway dispatch/registration server
+passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 `a155fc7641550013b2fbba695bfa2d05713211f13c83721c22d382adf0e8c79b` throughout that run.
 The process executable copy also matched SHA-256 and ran serially with CI's
@@ -575,8 +577,8 @@ profile behavior are unchanged. The cold-registration regression uses the same r
 admission/refusal behavior. All nine new cases pass in 42.64 seconds with
 default parallelism and zero failed/ignored cases; the three image cases pass
 again in 29.21 seconds. The shared forwarding fixture now serves both targets. CI includes coalescing; only the five covered legacy
-bodies and their telemetry helper are retired. Public Single placement cases
-and the physical FULL fixture remain separate migration gates.
+bodies and their telemetry helper are retired. At that checkpoint, public
+placement cases and the physical FULL fixture remained separate migration gates.
 
 The rebuilt combined native run passes all 127 tests across nineteen
 SHA-256-verified executable copies, zero failed and zero ignored, with normal
@@ -585,6 +587,56 @@ new dispatch/registration tests and the prior native capacity, directory,
 index, metadata, lease/log and transaction targets. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
 `elastic_cells` (27 errors) and `peer_network` (53); both gates stay enabled.
+
+### Native public placement and range-local transactions
+
+`tests/cellar_placement.rs` replaces the three remaining legacy public placement
+cases. The old Single/one-cell Auto expectations conflict with the required
+multi-cell table architecture; `single` is rejected and Auto uses the configured
+multiple ranges. The domain contracts remain covered with signed SDK calls,
+AWS retries disabled, scoped Residency IAM and the original 24/32 resident-cell
+budgets. Internal participant fixtures may still use Single contracts; public
+creation cannot select them.
+
+Creation covers Auto, explicit partitioned and omitted selectors with four
+actual data scopes, unique IDs, contiguous bounds and installed-state checks.
+Both Single and unknown selectors fail without a table record. The default is
+four; configuration rejects zero/one/257 and accepts two/256. Those endpoint
+configuration checks do not claim 256 active data cells. A fresh SDK owner
+retains each original four-range plan after the creation policy returns to two.
+Every observed data scope restores at a higher native epoch after deleting the
+former local directory and observing native lease/sample departure.
+
+The range-local transaction case retains two keys in one physical range of a
+two-range table, token replay after restoration and a later write, reversed
+read-result positions, and no participant commit for the small atomic read.
+Two stream shards retain exactly four records across token replay. Auto can
+split at an observed key and grows to three ranges. A second owner replacement
+retains that split and the later value through another terminal-token replay.
+
+The GSI case retains immutable placement despite a later `single` tag. Pinned
+ExtendDB's table/* authorization for tag operations has explicit per-test
+TagResource/ListTagsOfResource grants; the shared scoped policy stays intact.
+An additional equal-GSI-key sibling supplies the two distinct complete keys
+required by ordered splitting. The installed projection worker runs under the
+original ten-second bound. Its four index ranges grow to five independently
+of the unchanged four-range base plan. Signed queries retain both base-key
+suffixes and images after deletion of the former directory; all four base and
+five index scopes restore at higher SDK epochs. Signed tag reads retain the
+updated label without changing placement.
+
+The three-case standalone run passes in 23.94 seconds, zero failed/ignored,
+with default parallelism and a SHA-256-verified executable copy. The final full
+run additionally checks unique IDs and installed bounds and passes all three
+placement cases in 23.03 seconds. All 130 focused native cases pass together
+across twenty verified executable copies, zero failed/ignored, in 409.75
+seconds summed execution time. Selected strict Clippy, formatting and diff
+checks pass. All-target Clippy still fails in `elastic_cells` (27 errors) and
+`peer_network` (53). The unchanged production binary retains its recorded nine
+RustFS process passes; this test-only change does not claim a new process run. Only the three covered
+legacy bodies are retired; their range helper remains for unported callers.
+CI includes the native placement target and retains both aggregate gates.
+Production code, dependency pins, workload sizes and deadlines are unchanged.
 
 ## Current state
 
@@ -973,7 +1025,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -994,7 +1046,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:

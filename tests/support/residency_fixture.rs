@@ -216,6 +216,34 @@ impl Fixture {
         self.http = Some(http);
     }
 
+    /// Placement tests change creation policy without changing existing plans.
+    #[allow(dead_code)] // The metadata target uses the default two-range policy.
+    pub async fn set_initial_partition_count(&mut self, count: u16) {
+        self.http.take().unwrap().stop().await;
+        self.provisioner = Arc::new(
+            CellInitialPartitionProvisioner::new(self.client.clone(), self.application.clone())
+                .with_initial_partition_count(count)
+                .unwrap(),
+        );
+        let http = Http::with_provisioner(&self.client, ACCESS, self.provisioner.clone()).await;
+        self.sdk = http.sdk.clone();
+        self.http = Some(http);
+    }
+
+    /// Observe the actual SDK factory identity and compare its ownership row.
+    #[allow(dead_code)] // Placement audits additional data and index scopes.
+    pub async fn cell_identity(
+        &self,
+        target: &bdb_cellar_runtime::identity::CellTarget,
+    ) -> cellar::sdk::CellIdentity {
+        let name = format!("residency-owner-{}", self.generation);
+        let identity = native_peer::identity(&self.observed, &name, target).unwrap();
+        let owner = self.inspection.owner(&identity.scope).await;
+        assert_eq!(owner.node.as_deref(), Some(name.as_str()));
+        assert_eq!(owner.epoch, identity.epoch);
+        identity
+    }
+
     pub async fn shutdown(mut self) {
         self.http.take().unwrap().stop().await;
         self.node.stop().await;
