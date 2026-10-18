@@ -172,6 +172,15 @@ closed ingress after fencing. An expired unavailable follower cannot prove a
 new write while both bundle and LTX publication are withheld; that same signed
 request completes when publication resumes. The fixtures never edit authority
 records or require epoch rotation from TTL expiry alone.
+Three `tests/cellar_indexes.rs` cases retain local/global index mutation,
+transaction, split, replay and restart contracts. LSI splits keep PK collections
+together and retain logical query cursors. GSI replay preserves large chunked
+images, versions and tombstones. Maintenance visits every published GSI range
+through native ingress even when its base outbox is empty, so idle and empty
+ranges recover on a new owner. Fixtures observe actual SDK factories and owner
+epochs before issuing user index reads, after deleting the former directories.
+Embedding callers can own a `TaskGroup` and call its bounded `shutdown` before
+stopping the SDK node; the executable follows that same shutdown order.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

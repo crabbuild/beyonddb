@@ -1,5 +1,26 @@
-use crate::*;
-use extenddb_core::types::TableKeyInfo;
+use crate::{
+    native_peer::{self, FRONT, Inspection, Peer, SOURCE},
+    signed_http::SignedHttp,
+};
+use bdb_cellar_runtime::{
+    MutationIdentity,
+    client::CellClient,
+    identity::{CellTarget, RequestId},
+};
+use beyonddb::*;
+use extenddb_core::{
+    expression::{
+        CompareOp, Expr, ExpressionMaps, KeyCondition, PathElement, SortKeyCondition, UpdateAction,
+    },
+    types::{AttributeValue, CreateTableInput, Item, TableKeyInfo},
+};
+use extenddb_storage::{
+    DataEngine, IdempotencyKey, TableEngine, TransactWriteOp, error::StorageError,
+};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 fn item(sk: &str, score: Option<&str>) -> Item {
     let mut item = Item::from([
@@ -54,64 +75,64 @@ async fn query(
         .await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_indexes_follow_mutations_transactions_and_splits() {
-    let application = Arc::new(
-        Beyonddb::compile(BuildDescriptor {
-            source_revision: "local-index-test".into(),
-            cargo_lock_digest: Digest::from_bytes([1; 32]),
-        })
-        .unwrap(),
-    );
+#[test]
+fn local_indexes_follow_mutations_transactions_and_splits() {
+    let host = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let core = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    host.block_on(async {
+    let application = native_peer::application();
     let account_id = "123456789012";
     let account = account_target(account_id).unwrap();
-    let session = SessionId::from_bytes([91; 16]);
     let directory = tempfile::tempdir().unwrap();
-    let layout = CellStorageLayout::new(
-        Store::new(Arc::new(InMemory::new())),
-        object_store::path::Path::from("local-index-test"),
-        *account.application().as_bytes(),
-    );
-    let host = CellNodeBuilder::new(application.clone())
-        .with_runtime(SqlWorkerPool::new(1, 16).unwrap(), 16 * 1024 * 1024)
-        .with_replica_host(Host::default().with_local_disk_budget(DiskBudget::new(1 << 30)))
-        .with_session(session)
-        .build_unleased_for_maintenance()
-        .unwrap();
-    let registry = application.registry();
-    let provisioner = Arc::new(
-        CellInitialPartitionProvisioner::new(
-            host.runtime(),
-            application,
-            layout.clone(),
-            session,
-            "http://local-index.internal".into(),
-            directory.path().join("data"),
-        )
-        .unwrap(),
-    );
+    let bucket = cellar::bucket::Bucket::open_dev(&directory.path().join("objects.sqlite")).unwrap();
+    let observed = Arc::new(Mutex::new(Default::default()));
+    let source_path = directory.path().join(SOURCE);
+    let mut source = Peer::start(application.clone(), &source_path, bucket.clone(), observed.clone(), true, host.handle(), core.handle()).await;
+    let client = source.client.clone();
+    let provisioner = Arc::new(CellInitialPartitionProvisioner::new(client.clone(), application.clone()).with_initial_partition_count(2).unwrap());
     provisioner.admit_account(account_id).await.unwrap();
-    let client = CellClient::local_runtime(registry, host.runtime(), layout);
     let storage = CellStorage::new(client.clone(), "us-east-1")
-        .with_transaction_coordinators(provisioner.clone());
-    let routed = CellStorage::new(client.clone(), "us-east-1")
         .with_initial_partitions(provisioner.clone())
         .with_transaction_coordinators(provisioner.clone());
     let mut infos = Vec::new();
     let maps = ExpressionMaps::default();
-    for (name, creator) in [("LocalAccount", &storage), ("LocalRouted", &routed)] {
+    for name in ["LocalAccount", "LocalRouted"] {
         let indexes: Vec<_> = (0..5).map(|i| serde_json::json!({
             "IndexName": format!("Score{i}"), "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"score","KeyType":"RANGE"}],
             "Projection": {"ProjectionType":"ALL"}
         })).collect();
-        let create = serde_json::from_value(serde_json::json!({
+        let create: CreateTableInput = serde_json::from_value(serde_json::json!({
             "TableName": name, "BillingMode": "PAY_PER_REQUEST",
             "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"sk","KeyType":"RANGE"}],
             "AttributeDefinitions": [{"AttributeName":"pk","AttributeType":"S"},{"AttributeName":"sk","AttributeType":"N"},{"AttributeName":"score","AttributeType":"N"}],
             "LocalSecondaryIndexes": indexes
         })).unwrap();
-        let description = creator.create_table(account_id, create).await.unwrap();
-        assert_eq!(description.local_secondary_indexes.unwrap().len(), 5);
+        if name == "LocalAccount" {
+            // Preserve the private account-generation domain path explicitly.
+            // Public CreateTable below always installs multiple ordered cells.
+            let created = client.command::<CreateTable>(&account, mutation(), Json(TableSpec {
+                table_class: Default::default(), placement: TablePlacement::Account,
+                table_name: create.table_name, key_schema: create.key_schema,
+                attribute_definitions: create.attribute_definitions,
+                local_secondary_indexes: create.local_secondary_indexes.unwrap(),
+                global_secondary_indexes: vec![], billing_mode: create.billing_mode.unwrap(),
+                provisioned_throughput: None, deletion_protection_enabled: false,
+                initial_tags: vec![], resource_arn: None, stream: None,
+            })).await.unwrap();
+            assert!(matches!(created.output.0, CreateTableOutcome::Created(_)));
+        } else {
+            let description = storage.create_table(account_id, create).await.unwrap();
+            assert_eq!(description.local_secondary_indexes.unwrap().len(), 5);
+            assert_eq!(routes(&client, &account, &storage.table_key_info(account_id, name).await.unwrap().table_id).await.len(), 2);
+        }
         let base = storage.table_key_info(account_id, name).await.unwrap();
         assert!(base.has_lsi);
         assert_eq!(base.local_secondary_indexes.len(), 5);
@@ -250,25 +271,62 @@ async fn local_indexes_follow_mutations_transactions_and_splits() {
     for commit in [false, true] {
         assert_prepared_index_barriers(&client, &storage, &provisioner, &infos, commit).await;
     }
-    let route = crate::single_leaf_route(&client, &account, &infos[1].table_id.clone())
-        .await
-        .unwrap();
-    provisioner
-        .split_partition(
-            account_id,
-            client.clone(),
-            &infos[1].table_id,
-            route.partitions[0].partition_id,
-            route.partitions[0].lower.unwrap_or([0; 16]),
-        )
-        .await
-        .unwrap();
-    let indexed = indexed(&storage, &infos[1]).await;
-    assert_eq!(
-        query(&storage, &indexed, true, None, None).await.unwrap().0,
-        images
-    );
-    host.shutdown().await.unwrap();
+    let routed = &infos[1];
+    let (original, participant) = participant_for_key(&client, routed, &item("2", None)).await;
+    let CoordinatorParticipantTarget::Data { partition_id, epoch, .. } = participant else { unreachable!() };
+    let source_spec = client.query::<ReadPartitionState>(&original, None, Json(())).await.unwrap().output.0.unwrap().spec;
+    assert_eq!(client.query::<PartitionSplitPoint>(&original, None, Json(())).await.unwrap().output.0, None);
+    assert!(matches!(provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await, Err(StorageError::LimitExceeded(_))), "one LSI collection must remain together");
+    assert_eq!(routes(&client, &account, &routed.table_id).await.len(), 2);
+    // A second PK in the same ordered source provides a real collection fence.
+    let mut neighbor = item("50", None);
+    neighbor.insert("pk".into(), AttributeValue::S("zzz".into()));
+    assert_eq!(participant_for_key(&client, routed, &neighbor).await.0, original);
+    storage.put_item(routed, neighbor.clone(), false, None, &maps, None).await.unwrap();
+    let indexed = indexed(&storage, routed).await;
+    let (first, continuation) = query(&storage, &indexed, true, None, Some(1)).await.unwrap();
+    assert_eq!(first, vec![images[0].clone()]);
+    let continuation = continuation.unwrap();
+    let plan = provisioner.split_partition(account_id, client.clone(), &routed.table_id, partition_id, source_spec.lower.clone().unwrap_or_else(bdb_keyspace::RangeKey::minimum)).await.unwrap();
+    assert_eq!(plan.source.epoch, epoch);
+    assert_eq!(routes(&client, &account, &routed.table_id).await.len(), 3);
+    let (left, _) = participant_for_key(&client, routed, &item("2", None)).await;
+    let (right, _) = participant_for_key(&client, routed, &neighbor).await;
+    assert_ne!(left, right);
+    assert_eq!(participant_for_key(&client, routed, &item("20", None)).await.0, left);
+    assert_eq!(query(&storage, &indexed, true, Some(&continuation), Some(1)).await.unwrap().0, vec![images[1].clone()]);
+    assert_eq!(query(&storage, &indexed, true, None, None).await.unwrap().0, images);
+    let http = SignedHttp::start(&client, provisioner.clone(), true).await;
+    assert_sdk_indexes(&http.sdk).await;
+    http.stop().await;
+    let targets = [account.clone(), left, right];
+    let mut owners = Vec::new();
+    let inspection = Inspection::new(bucket.clone(), host.handle());
+    for target in &targets {
+        let actual = native_peer::identity(&observed, SOURCE, target).unwrap();
+        owners.push((actual.clone(), inspection.owner(&actual.scope).await));
+    }
+    source.stop().await;
+    std::fs::remove_dir_all(&source_path).unwrap();
+    let mut replacement = Peer::start(application.clone(), &directory.path().join(FRONT), bucket, observed.clone(), true, host.handle(), core.handle()).await;
+    inspection.departed().await;
+    let restored_provisioner = Arc::new(CellInitialPartitionProvisioner::new(replacement.client.clone(), application).with_initial_partition_count(2).unwrap());
+    let http = SignedHttp::start(&replacement.client, restored_provisioner, false).await;
+    assert_sdk_indexes(&http.sdk).await;
+    let restored = http.sdk.get_item().table_name("LocalRouted").key("pk", aws_sdk_dynamodb::types::AttributeValue::S("zzz".into())).key("sk", aws_sdk_dynamodb::types::AttributeValue::N("50".into())).consistent_read(true).send().await.unwrap();
+    assert_eq!(restored.item().unwrap().len(), 2);
+    for (target, (previous, old_owner)) in targets.iter().zip(owners) {
+        let current = native_peer::identity(&observed, FRONT, target).unwrap();
+        assert_eq!(current.scope, previous.scope);
+        let owner = inspection.owner(&current.scope).await;
+        assert_eq!(owner.node.as_deref(), Some(FRONT));
+        assert!(owner.epoch > old_owner.epoch);
+        assert_eq!(owner.epoch, current.epoch);
+    }
+    http.stop().await;
+    replacement.stop().await;
+    inspection.close().await;
+    });
 }
 
 async fn assert_prepared_index_barriers(
@@ -283,10 +341,7 @@ async fn assert_prepared_index_barriers(
     let account = account_target(account_id).unwrap();
     let phase = if commit { 95 } else { 93 };
     let id = [phase; 16];
-    provisioner
-        .admit_coordinator(account_id, &id)
-        .await
-        .unwrap();
+    provisioner.ensure(client, account_id, &id).await.unwrap();
     let coordinator = coordinator_target(account_id, &id).unwrap();
     let mut participants = Vec::new();
     for (i, info) in infos.iter().enumerate() {
@@ -311,21 +366,7 @@ async fn assert_prepared_index_barriers(
                 return_old: false,
             }),
         ];
-        let route = crate::point_range(
-            client,
-            &account,
-            &info.table_id,
-            data_key_hash(&info.table_id, &item("2", None), &info.base_key_schema).unwrap(),
-        )
-        .await;
-        let target = match route {
-            None => CoordinatorParticipantTarget::Account,
-            Some((partition_id, epoch)) => CoordinatorParticipantTarget::Data {
-                table_id: info.table_id.clone(),
-                partition_id,
-                epoch,
-            },
-        };
+        let (_, target) = participant_for_key(client, info, &item("2", None)).await;
         participants.push(CoordinatorParticipant {
             target,
             operations: operations
@@ -533,6 +574,156 @@ async fn assert_prepared_index_barriers(
 fn mutation() -> MutationIdentity {
     MutationIdentity {
         request_id: RequestId::from_bytes(*uuid::Uuid::now_v7().as_bytes()),
-        ..identity(91)
+        issued_at_ms: native_peer::now_ms(),
+        expires_at_ms: native_peer::now_ms() + 60_000,
+    }
+}
+
+async fn routes(client: &CellClient, account: &CellTarget, table: &str) -> Vec<RoutePagePartition> {
+    let mut result = Vec::new();
+    let mut input = RoutePageInput {
+        table_id: table.into(),
+        start_key: None,
+        after_lower: None,
+        expected_epoch: None,
+    };
+    loop {
+        match read_route_page(client, account, input.clone())
+            .await
+            .unwrap()
+        {
+            RoutePageOutcome::Unrouted => {
+                assert!(result.is_empty());
+                return result;
+            }
+            RoutePageOutcome::Page {
+                epoch,
+                partitions,
+                has_more,
+            } => {
+                input.expected_epoch = Some(epoch);
+                input.after_lower = partitions.last().map(|part| part.lower.clone());
+                result.extend(partitions);
+                assert!(
+                    result.len() <= 16,
+                    "private index fixture exceeded route bound"
+                );
+                if !has_more {
+                    return result;
+                }
+            }
+            RoutePageOutcome::Changed => panic!("index fixture route changed during inspection"),
+        }
+    }
+}
+
+async fn participant_for_key(
+    client: &CellClient,
+    info: &TableKeyInfo,
+    key: &Item,
+) -> (CellTarget, CoordinatorParticipantTarget) {
+    let account = account_target(&info.account_id).unwrap();
+    let ranges = routes(client, &account, &info.table_id).await;
+    if ranges.is_empty() {
+        let record = client
+            .query::<DescribeTableById>(&account, None, Json(info.table_id.clone()))
+            .await
+            .unwrap()
+            .output
+            .0
+            .unwrap();
+        assert_eq!(record.placement, TablePlacement::Account);
+        return (account, CoordinatorParticipantTarget::Account);
+    }
+    let encoded = ordered_data_key(&info.table_id, key, &info.base_key_schema).unwrap();
+    let range = ranges
+        .iter()
+        .find(|range| {
+            range.lower <= encoded && range.upper.as_ref().is_none_or(|upper| &encoded < upper)
+        })
+        .unwrap();
+    (
+        data_target(&info.account_id, &info.table_id, &range.partition_id).unwrap(),
+        CoordinatorParticipantTarget::Data {
+            table_id: info.table_id.clone(),
+            partition_id: range.partition_id,
+            epoch: range.epoch,
+        },
+    )
+}
+
+async fn assert_sdk_indexes(sdk: &aws_sdk_dynamodb::Client) {
+    use aws_sdk_dynamodb::types::AttributeValue as A;
+    // Keep AWS retries off so a backend read/owner failure cannot disappear in
+    // client retry behavior. The frontend uses its normal pure-read pacing.
+    let sdk = aws_sdk_dynamodb::Client::from_conf(
+        sdk.config()
+            .to_builder()
+            .retry_config(aws_sdk_dynamodb::config::retry::RetryConfig::disabled())
+            .build(),
+    );
+    for name in ["LocalAccount", "LocalRouted"] {
+        for (forward, expected) in [(true, ["2", "20"]), (false, ["20", "2"])] {
+            let mut cursor = None;
+            let mut found = Vec::new();
+            for page in 0..8 {
+                let result = sdk
+                    .query()
+                    .table_name(name)
+                    .index_name("Score0")
+                    .key_condition_expression("pk = :p")
+                    .expression_attribute_values(":p", A::S("same".into()))
+                    .scan_index_forward(forward)
+                    .consistent_read(true)
+                    .limit(1)
+                    .set_exclusive_start_key(cursor)
+                    .send()
+                    .await
+                    .unwrap();
+                found.extend(
+                    result
+                        .items()
+                        .iter()
+                        .map(|item| item["sk"].as_n().unwrap().clone()),
+                );
+                cursor = result.last_evaluated_key;
+                if let Some(key) = &cursor {
+                    assert_eq!(key.len(), 3);
+                }
+                if cursor.is_none() {
+                    break;
+                }
+                assert!(page < 7, "SDK LSI query did not finish");
+            }
+            assert_eq!(found, expected);
+        }
+        let mut cursor = None;
+        let mut found = Vec::new();
+        for page in 0..16 {
+            let result = sdk
+                .scan()
+                .table_name(name)
+                .index_name("Score0")
+                .consistent_read(true)
+                .limit(1)
+                .set_exclusive_start_key(cursor)
+                .send()
+                .await
+                .unwrap();
+            found.extend(result.items().iter().cloned());
+            cursor = result.last_evaluated_key;
+            if cursor.is_none() {
+                break;
+            }
+            assert!(page < 15, "SDK LSI scan did not finish");
+        }
+        assert_eq!(found.len(), 2);
+        for (sk, score) in [("2", "-3"), ("20", "4")] {
+            assert!(found.contains(&HashMap::from([
+                ("pk".into(), A::S("same".into())),
+                ("sk".into(), A::N(sk.into())),
+                ("score".into(), A::N(score.into())),
+            ])));
+        }
     }
 }

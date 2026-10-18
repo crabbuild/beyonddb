@@ -82,7 +82,7 @@ pub fn ordered_data_key(
     RangeKey::new(partition).map_err(|_| Error::Command("ordered key exceeds its bound"))
 }
 /// GSI ties use the complete ordered base key, never JSON item-key bytes.
-pub(crate) fn ordered_index_key(
+pub fn ordered_index_key(
     item: &Item,
     index: &[KeySchemaElement],
     base: &[KeySchemaElement],

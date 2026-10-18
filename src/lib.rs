@@ -49,7 +49,7 @@ pub use partition::*;
 pub use provision::*;
 pub use routing::*;
 pub use server::{
-    CellarServer, CellarServerConfig, TransactionRecovery, build_http_state,
+    CellarServer, CellarServerConfig, TaskGroup, TransactionRecovery, build_http_state,
     build_http_state_with_cache,
 };
 pub use split::*;

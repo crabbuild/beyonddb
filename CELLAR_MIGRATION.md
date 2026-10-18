@@ -24,24 +24,26 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 85 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+All 88 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
 embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
-nine directory cases, two domain cases, two native peer cases, one signed
-local SDK case, 22 transaction cases and eight native lease/log cases. The
-twelve rebuilt focused test executables were checked for SHA-256 equality
-before running from the internal SSD, with unchanged parallelism, assertions
-and deadlines. The native lease/log target passed all eight cases in 46.67
-seconds during this complete rerun.
+nine directory cases, two domain cases, three index cases, two native peer
+cases, one signed local SDK case, 22 transaction cases and eight native
+lease/log cases. The thirteen rebuilt focused test executables were checked
+for SHA-256 equality before running from the internal SSD, with unchanged
+parallelism, assertions and deadlines. The index target passed all three cases
+in 28.88 seconds during this complete rerun.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
-integration/process targets. The same registry build, including the frontend
-read policy, passed all nine explicitly executed RustFS process cases in
-450.73 seconds, with zero failures or ignored cases. They cover the broad signed
+integration/process targets. The current registry build, including the frontend
+read policy and idle-index worker fix, passed all nine explicitly executed
+RustFS process cases in 464.15 seconds, with zero failures or ignored cases.
+They cover the broad signed
 SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards
 beyond residency, native follower recovery
 with bundle and LTX publication withheld, GSI recovery, large transactional
 reads, metadata caching, LSI pagination and retained Streams after hard restart.
 The process test executable was also copied and checked for SHA-256 equality;
-it ran serially with the same flags used by qualification CI.
+it ran serially with the same flags used by qualification CI. A SHA-256 check
+also confirmed the server executable stayed unchanged throughout that run.
 
 ### Native peer qualification and read backpressure
 
@@ -80,7 +82,7 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in two retained legacy roots: 65 errors in
+All-target Clippy still exits 101 in two retained legacy roots: 62 errors in
 `elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
 now compiles and passes selected strict Clippy. No gates were disabled.
 
@@ -110,8 +112,49 @@ durability proof rather than reproducing the removed publisher's explicit
 `rotation_required` API. The read-stall fixtures wait for the SDK's real
 30-second maintenance cadence before asserting the fault is active. All
 per-record state assertions and waits after fault entry remain bounded.
-Production source is unchanged by this fixture port; the nine process results
-above remain evidence from commit `c635e39`.
+This lease/log fixture port did not change production source. The subsequent
+idle-index worker fix and its qualification are described below.
+
+### Native index contracts and idle range recovery
+
+`tests/cellar_indexes.rs` ports the local-index and two global-index behavior
+cases onto real SDK ingress and shared bucket storage. The private account
+fixture remains an explicit internal generation; the public table starts with
+two ordered data cells and never uses the single-cell public creation path.
+
+The LSI case preserves five indexes, numeric sort/tie ordering in both
+directions, sparse entries, projected item-size/key validation, mutation
+maintenance, mixed account/data transaction replay, prepared Query/Scan
+barriers and read-help for both COMMIT and ABORT. A single PK collection has
+no legal split; after adding another collection, an actual PK-boundary split
+produces three ranges and preserves a previously returned logical cursor.
+Signed AWS queries/scans with retries disabled recover after removal of the
+old directory and natural SDK lease/sample expiry. Observed native factories
+retain scopes at higher physical owner epochs.
+
+The GSI journal case preserves a 350 KiB value, chunked change records larger
+than 700 KiB, partial projection, lost acknowledgement replay, superseded
+images, tombstones, pending-projection split refusal and binary prefix queries.
+A fresh owner restores the same index scope, completes the retained journal
+and serves the large numeric/binary index values through signed AWS requests.
+
+The serving-worker case refuses one target before SDK ingress while the
+second index progresses; the source journal remains until every destination
+is durable. Removing the first owner's directory then exercises native owner
+recovery and automatic journal replay. A second directory loss has no new
+base mutation or outbox entry. Before any user index read, the fixture
+requires actual SDK factories for every published range, including empty
+ranges, and checks the unchanged scopes and increased native owner epochs.
+
+This regression failed in both the combined suite and alone: the worker
+listed index ranges but its idle-index branch did no SDK work. Journal replay
+activated populated destinations, leaving other ranges undiscovered. Each
+bounded index-page job now reads `ReadGlobalIndexState` through native
+ingress; missing installation is deferred, and cursor advancement still lets
+healthy ranges progress. Cellar continues to own placement and restoration.
+`TaskGroup` is exported with its existing bounded shutdown so embedding
+callers and fixtures can cancel and join maintenance before stopping the SDK.
+The canonical ordered GSI-key helper is public for typed routing consumers.
 
 ## Current state
 
@@ -456,6 +499,13 @@ replica-read-policy override.
 7. Update contributor guidance, startup configuration, CI and operational docs
    to describe the actual Cellar server and its qualified capability boundary.
 
+The remaining `elastic_cells` setup still covers online GSI backfill/transfer,
+SQLite-full and reservation behavior, multipart upload replacement, native
+session shutdown, and its large root fixture. Its previously ported modules
+also remain included there until that root is migrated. `peer_network` retains
+its separate physical and residency fixtures. Passing the selected native
+targets does not complete either aggregate suite.
+
 The new executable configuration and lifecycle are described in
 [the Cellar server guide](docs/cellar-server.md). Legacy all-target fixtures are
 not disabled; their remaining Cellule setup must be replaced with SDK fixtures.
@@ -490,7 +540,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -511,7 +561,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -526,7 +576,7 @@ The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The latest registry-release rerun reported 65 errors in `elastic_cells` and
+The latest registry-release rerun reported 62 errors in `elastic_cells` and
 60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

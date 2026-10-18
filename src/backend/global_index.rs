@@ -505,6 +505,21 @@ impl CellStorage {
                         .await
                         .map(|_| ())
                 } else {
+                    // Listing metadata cannot activate a Cellar owner. Visit
+                    // every published index range even with an empty outbox;
+                    // native ingress owns restoration and physical authority.
+                    let installed = self
+                        .client
+                        .query::<crate::ReadGlobalIndexState>(&source, None, Json(()))
+                        .await
+                        .map_err(cell_error)?
+                        .output
+                        .0;
+                    if installed.is_none() {
+                        return Err(StorageError::Transient(
+                            "published index range is not installed".into(),
+                        ));
+                    }
                     Ok(())
                 }
             })

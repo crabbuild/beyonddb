@@ -25,6 +25,7 @@ pub use transactions::TransactionRecovery;
 #[path = "server_tests.rs"]
 mod tests;
 
+/// Owns BeyondDB maintenance tasks. Shut it down before closing the SDK node.
 #[derive(Default)]
 pub struct TaskGroup {
     cancellation: CancellationToken,
@@ -57,7 +58,8 @@ impl TaskGroup {
             .push(handle);
         Ok(())
     }
-    async fn shutdown(&self) -> anyhow::Result<()> {
+    /// Cancel and join maintenance tasks within their bounded shutdown policy.
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.cancellation.cancel();
         let handles = std::mem::take(
             &mut *self

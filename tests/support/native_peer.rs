@@ -533,11 +533,14 @@ impl Inspection {
             .unwrap();
     }
     pub async fn departed(&self) {
+        self.departed_node(SOURCE, FRONT).await;
+    }
+    pub async fn departed_node(&self, departed: &str, active: &str) {
         self.domain
             .run(async {
                 tokio::time::timeout(Duration::from_secs(25), async {
                     let expired = loop {
-                        let lease = self.observer.read_node_lease(SOURCE).await.unwrap();
+                        let lease = self.observer.read_node_lease(departed).await.unwrap();
                         let now = cellar::ownership_store::now_ms();
                         if lease.as_ref().is_none_or(|lease| lease.expires_ms <= now) {
                             break lease.map_or(now, |lease| lease.expires_ms);
@@ -549,10 +552,10 @@ impl Inspection {
                             && at >= expired
                             && peers
                                 .iter()
-                                .all(|peer| peer.node != SOURCE || peer.expires_ms <= at)
+                                .all(|peer| peer.node != departed || peer.expires_ms <= at)
                             && peers
                                 .iter()
-                                .any(|peer| peer.node == FRONT && peer.expires_ms > at)
+                                .any(|peer| peer.node == active && peer.expires_ms > at)
                         {
                             break;
                         }

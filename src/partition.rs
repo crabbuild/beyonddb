@@ -12,7 +12,7 @@ mod ttl;
 mod update_batch;
 
 pub use indexes::*;
-pub use key::{data_key_hash, ordered_data_key};
+pub use key::{data_key_hash, ordered_data_key, ordered_index_key};
 pub use query::*;
 pub use scan::*;
 pub use transaction::*;
