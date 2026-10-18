@@ -289,7 +289,13 @@ reads within one range of a multi-range table, and split GSI ranges independentl
 of the base plan. Token replay, exact stream counts and signed index values
 survive fresh-owner recovery after local-file deletion. SDK factory identities
 and ownership rows prove higher epochs for the restored data/index scopes.
-The current fixture suite passes 130 focused native tests and all nine explicitly
+Native registration publication also holds actual account LTX provider PUTs
+through caller cancellation. Later admission waits for acknowledgement; both
+discovery rows survive native owner replacement without admitting BEGIN.
+Four-way publication coalesces below four durable account commands. Scope and
+batch rejection leave no partial row, while the maximal account/batch encoding
+survives restore. These cases use the SDK's publication and ownership proofs.
+The current fixture suite passes 133 focused native tests and all nine explicitly
 executed RustFS process cases, zero failed/ignored. See the current fingerprint
 and qualification boundaries in [migration evidence](../CELLAR_MIGRATION.md).
 Caller refusal is checked before SDK submission; a native HTTP error remains

@@ -24,18 +24,18 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Current registry qualification
 
-The current native suite passes all **130 focused tests** across twenty
+The current native suite passes all **133 focused tests** across twenty
 SHA-256-verified executable copies, with zero failed/ignored cases and normal
-test parallelism (409.75 seconds summed execution time), including the
-public multi-cell placement port. Production code and the server fingerprint
-are unchanged by that fixture port. The gateway dispatch/registration server
+test parallelism (399.78 seconds summed execution time), including public
+multi-cell placement and coordinator-registration publication. Production code
+and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
 passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 `a155fc7641550013b2fbba695bfa2d05713211f13c83721c22d382adf0e8c79b` throughout that run.
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (53 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (153 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -638,6 +638,54 @@ legacy bodies are retired; their range helper remains for unported callers.
 CI includes the native placement target and retains both aggregate gates.
 Production code, dependency pins, workload sizes and deadlines are unchanged.
 
+### Native coordinator registration publication
+
+Three more contracts from the legacy registration module now execute in
+`cellar_coalescing`: publication cancellation, four-way coalescing, and strict
+batch scope/limits. Native fixtures keep the original 12/16 resident-cell
+budgets, four/two caller threads, two-second publication-entry bound and
+ten-second admission deadline. Public tables still install two ordered ranges.
+
+Cancellation holds actual account LTX PUTs at the ordinary provider boundary.
+The gate derives its prefix from the SDK factory's observed scope; it forwards
+provider options unchanged and never edits lease, CAS or authority records.
+The first registration has entered its SDK publication but cannot acknowledge.
+Canceling its caller does not discard discovery, and a second admission still
+waits for the gated account state. Releasing the real provider request lets the
+healthy admission finish. Both registrations survive local-directory deletion,
+observed native lease/sample departure and account restoration at a higher SDK
+epoch. Neither coordinator has a BEGIN record. A drop guard releases the held
+provider request on fixture failure.
+
+Four concurrent admissions use actual SDK-activated but undiscoverable
+coordinator scopes. Receipt sequences measure account application commands;
+queries do not increment that count. The standalone run uses one durable
+account command, and the combined twelve-case run uses two, both below four.
+All four acknowledged rows survive a fresh SDK owner.
+
+Malformed batches retain empty, 65-entry, out-of-range shard and wrong-account
+cases. The valid prefix shard never appears, including after owner replacement.
+The largest 128-NUL account and 64-entry batch still fit the original 4096-byte
+encoder and register shard 4095. Its real account scope restores at a higher
+SDK epoch with the row intact. Unknown HTTP outcomes remain ambiguous; the
+fixture verifies resulting state rather than treating a status as rollback
+proof.
+
+All three new cases pass together in 15.49 seconds. The full twelve-case
+coalescing target passes in 33.11 seconds with zero failed/ignored cases,
+normal parallelism and a SHA-256-verified executable copy. Selected strict
+Clippy passes. The old three-case module is retired only after those native
+passes. Credential failover remains registered in `cellar_peer`; its duplicate
+registration in the obsolete aggregate is removed. The all-target compiler
+now also reports additional obsolete trait/type uses in that retained aggregate
+(`peer_network`: 153 errors; `elastic_cells`: 27). Both gates stay enabled.
+The rebuilt complete native run passes all 133 focused tests across twenty
+verified executable copies, zero failed/ignored, with normal parallelism and
+399.78 seconds summed execution time. Formatting and diff checks pass.
+Production code and dependency pins are unchanged. The server SHA-256 still
+matches its recorded nine-case RustFS process qualification; these fixture
+changes do not claim another process run.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1062,6 +1110,6 @@ run exits 101 in legacy Cellule fixtures. Unported fixture roots are
 `elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
 The latest registry-release rerun reported 27 errors in `elastic_cells` and
-53 in `peer_network`; the ported `node_log_authority` target is clean.
+153 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

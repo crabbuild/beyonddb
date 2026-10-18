@@ -10,3 +10,11 @@ mod fixture;
 mod native_peer;
 #[path = "cellar_coalescing/registration.rs"]
 mod registration;
+
+#[path = "cellar_coalescing/durable_registration.rs"]
+mod durable_registration;
+#[path = "support/payload_gate.rs"]
+mod payload_gate;
+#[allow(dead_code)] // Registration tests do not inspect seeded item images.
+#[path = "support/residency_fixture.rs"]
+mod residency_fixture;

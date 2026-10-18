@@ -38,10 +38,21 @@ impl Fixture {
         seed_rows: usize,
         max_resident: usize,
     ) -> Self {
+        Self::with_bucket(host, core, seed_rows, max_resident, std::convert::identity).await
+    }
+
+    /// Inject an ordinary provider adapter without editing SDK authority state.
+    pub async fn with_bucket(
+        host: &tokio::runtime::Handle,
+        core: &tokio::runtime::Handle,
+        seed_rows: usize,
+        max_resident: usize,
+        wrap: impl FnOnce(Bucket) -> Bucket,
+    ) -> Self {
         assert!((1..=2).contains(&seed_rows));
         let files = tempfile::tempdir().unwrap();
         let application = native_peer::application();
-        let bucket = Bucket::open_dev(&files.path().join("objects.sqlite")).unwrap();
+        let bucket = wrap(Bucket::open_dev(&files.path().join("objects.sqlite")).unwrap());
         let observed = Arc::new(Mutex::new(Default::default()));
         let node = Peer::start(
             application.clone(),

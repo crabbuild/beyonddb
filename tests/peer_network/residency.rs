@@ -1,11 +1,11 @@
+// Native coordinator registration runs in cellar_coalescing; credential
+// failover is registered once by cellar_peer. Remaining modules await ports.
 mod active_owners;
 mod cell_models;
 mod codec;
 mod coordinator_admission;
 mod coordinator_discovery;
-mod coordinator_registration;
 mod creation;
-mod credential_failover;
 mod deletion;
 mod directories;
 mod discovery;
