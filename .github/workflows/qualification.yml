@@ -55,7 +55,8 @@ jobs:
             --test node_log_authority --test cellar_indexes --test cellar_capacity \
             --test cellar_serving --test cellar_metadata --test cellar_batches \
             --test cellar_images --test cellar_coalescing --test cellar_placement \
-            --test cellar_creation --test cellar_deletion --test embedded --test ranges \
+            --test cellar_creation --test cellar_deletion --test cellar_reclamation \
+            --test embedded --test ranges \
             -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-peer.log" || result=$?
           RUST_MIN_STACK=16777216 cargo test --locked --test elastic_cells \

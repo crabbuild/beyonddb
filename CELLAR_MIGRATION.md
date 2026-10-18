@@ -31,8 +31,9 @@ multi-cell placement and coordinator-registration publication. The subsequent
 fixture-only discovery port passes all three native peer cases in 32.42 seconds,
 including the new worker-only discovery case. The later creation port passes
 five native creation cases in 48.56 seconds. The deletion port adds two native
-cases in 26.37 seconds. These are separate focused runs;
-no combined 141-case run is claimed. Production code
+cases in 26.37 seconds. Four native reclamation cases are also qualified below.
+These are separate focused runs; the complete 133-case run remains the latest
+combined evidence. Production code
 and the server fingerprint are unchanged by those fixture ports. The gateway dispatch/registration server
 passes all nine explicitly executed RustFS process
 cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
@@ -40,7 +41,7 @@ cases, zero failed/ignored, in 309.12 seconds. Its SHA-256 stayed
 The process executable copy also matched SHA-256 and ran serially with CI's
 `--ignored --test-threads=1 --nocapture` flags. Selected strict Clippy,
 formatting and diff checks pass. The required all-target gate remains red in
-retained legacy `elastic_cells` (27 errors) and `peer_network` (139 errors).
+retained legacy `elastic_cells` (27 errors) and `peer_network` (138 errors).
 Qualification remains incomplete; both gates stay enabled.
 
 ### Earlier registry baseline
@@ -810,6 +811,52 @@ checks remain enabled and red in `elastic_cells` (27 errors) and `peer_network`
 runtime helpers unchanged. Earlier full native and process runs remain separate
 evidence.
 
+### Native reclamation and cold participant restoration
+
+`tests/cellar_reclamation.rs` ports four residency contracts through SDK ingress.
+It keeps two caller threads, disabled AWS retries, scoped Residency IAM, the
+original four/five/eleven-cell resident ceilings and public tables with two
+ordered initial ranges. Read-only SDK capacity-lease observations prove that
+owned cells outnumber the reported full residency. Cellar's Sticky policy may
+retain ownership after eviction; the port does not recreate application-driven
+Cellule owner release. Provider storage lives independently of local owner files.
+
+The first transaction at the five-cell limit updates items in two actual data
+cells, then replays the original token after deleting the prior owner's local
+directory and observing native lease/sample departure. Counts remain exactly
+one, and the coordinator's SDK scope recovers at a higher epoch. The four-cell
+read case adds the original credential blocker, restores the directory and data
+through repeated signed reads, and retains both the directory contract and
+commit sequence through another fresh owner.
+
+The cold participant case stops the source owner and drops its entire local
+fixture directory. A separate five-cell SDK node activates the two original
+credential blockers, then restores both data participants directly. Its observed
+SDK factories prove that no account cell was activated before those restorations.
+The original data scope has a higher epoch and a matching SDK ownership row;
+subsequent signed reads preserve both items. Sampled ownership exceeds residency
+without manually changing authority or placement records.
+
+The split case keeps the eleven-cell limit, splits a base range and an independent
+GSI range, then creates another public table beyond residency. Ordered splitting
+requires two observed full keys, so it retains the seeded values and adds a base
+sibling plus an index sibling; it never substitutes one-cell public tables.
+Both plans grow from two ranges to three. Completed replay runs with admission
+that forbids all ingress to the two historical sources, and its refusal counter
+stays zero. After local-file deletion, both sources retain their durable seals at
+higher SDK epochs, completed replay still avoids their ingress, and signed base
+and exact GSI values remain intact in serving children.
+
+The four cases pass together in 17.93 seconds, zero failed/ignored,
+with default parallelism and a SHA-256-verified executable copy. Strict target
+Clippy, formatting and diff checks pass. CI includes this target. Only the four
+covered legacy bodies are retired: the creation-time metadata/release race and
+its shared legacy builder remain pending. Required aggregate gates remain enabled
+and red in `elastic_cells` (27 errors) and `peer_network` (138).
+Production code, dependency pins and shared runtime fixtures are unchanged;
+earlier complete native, focused ports and nine-process runs remain separate
+evidence.
+
 ## Current state
 
 The new `crates/bdb-cellar-runtime` crate implements compiled command/query
@@ -1197,7 +1244,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test cellar_reclamation --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -1218,7 +1265,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test cellar_indexes --test cellar_capacity --test cellar_serving --test cellar_metadata --test cellar_batches --test cellar_images --test cellar_coalescing --test cellar_placement --test cellar_creation --test cellar_deletion --test cellar_reclamation --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
