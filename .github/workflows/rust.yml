@@ -28,9 +28,12 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Build server
         run: cargo build --bin beyonddb --locked
+      - name: Transaction recovery
+        # Each fixture retains its internal concurrency; isolate large stores.
+        run: cargo test --locked --test cellar_transactions -- --test-threads=1
       - name: Cellar libraries and domain fixtures
         run: >-
           cargo test --workspace --lib --test account_cell --test cellar_sdk
-          --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer
+          --test cellar_domain --test cellar_directories --test cellar_peer
           --test node_log_authority --test cellar_indexes
           --test embedded --test ranges --locked

@@ -68,7 +68,12 @@ and unchanged durability deadlines; other native targets retain normal test
 parallelism. A parallel local run with the new cap passed both reported prepare
 contracts (49 commands each) but reproduced the deadline in the separate wide
 read fixture, so dependency optimization and batch bounding alone do not isolate
-that fixture's resource demand.
+that fixture's resource demand. A subsequent Linux Rust run reproduced the
+mixed-participant large-payload deadline while the transaction target still ran
+independent fixtures in parallel. Both CI workflows therefore isolate the
+`cellar_transactions` target too. The coalescing and transaction targets each
+run once per qualification workflow; remaining native targets retain normal
+parallelism.
 
 ### Local registry baseline at `9789f50`
 

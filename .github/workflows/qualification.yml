@@ -41,14 +41,15 @@ jobs:
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           docker info
-      - name: Transaction prepare batching
+      - name: Transaction batching and recovery
         shell: bash
         run: |
           set -euo pipefail
           # Each fixture runs concurrent clients and multiple SDK nodes. Give
           # each store the runner's CPU/IO budget; retain its internal workload.
-          cargo test --locked --test cellar_coalescing -- --test-threads=1 --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/prepare-batching.log"
+          cargo test --locked --test cellar_coalescing --test cellar_transactions \
+            -- --test-threads=1 --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/transaction-contracts.log"
       - name: Signed SDK and owner recovery
         shell: bash
         run: |
@@ -58,7 +59,7 @@ jobs:
             -- --ignored --test-threads=1 --nocapture \
             2>&1 | tee "$RUNNER_TEMP/beyonddb-logs/cellar-process.log" || result=$?
           cargo test --locked --workspace --lib \
-            --test account_cell --test cellar_sdk --test cellar_transactions \
+            --test account_cell --test cellar_sdk \
             --test cellar_domain --test cellar_directories --test cellar_peer \
             --test node_log_authority --test cellar_indexes --test cellar_capacity \
             --test cellar_serving --test cellar_metadata --test cellar_batches \
