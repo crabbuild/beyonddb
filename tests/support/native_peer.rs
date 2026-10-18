@@ -148,6 +148,26 @@ impl Drop for Network {
     }
 }
 
+/// Explicit native host policy shared by peer and log integration fixtures.
+pub struct PeerPolicy {
+    pub route_cache: bool,
+    pub fleet_durability: bool,
+    pub lease_ttl_ms: u64,
+    pub lease_bucket: Option<Bucket>,
+    pub log: LogOptions,
+}
+impl From<bool> for PeerPolicy {
+    fn from(route_cache: bool) -> Self {
+        Self {
+            route_cache,
+            fleet_durability: false,
+            lease_ttl_ms: 10_000,
+            lease_bucket: None,
+            log: LogOptions::default(),
+        }
+    }
+}
+
 pub struct Peer {
     pub node: Option<Node>,
     pub client: CellClient,
@@ -159,10 +179,11 @@ impl Peer {
         path: &Path,
         bucket: Bucket,
         observed: Observations,
-        route_cache: bool,
+        policy: impl Into<PeerPolicy>,
         host: &tokio::runtime::Handle,
         core: &tokio::runtime::Handle,
     ) -> Self {
+        let policy = policy.into();
         let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (network, address) = Network::start(listener.local_addr().unwrap()).await;
@@ -179,7 +200,7 @@ impl Peer {
             ActorOptions {
                 core: ActorPolicy {
                     max_resident: 32,
-                    max_cached_routes: if route_cache { 128 } else { 0 },
+                    max_cached_routes: if policy.route_cache { 128 } else { 0 },
                     max_activations: 8,
                     max_evictions: 4,
                     max_releases: 8,
@@ -194,7 +215,7 @@ impl Peer {
                     idle_evict_ms: None,
                     pressure: Default::default(),
                 },
-                lease_ttl_ms: 10_000,
+                lease_ttl_ms: policy.lease_ttl_ms,
                 placement_weight: 1,
                 generation: signer.public_key_hex(),
                 resume_generation: None,
@@ -220,7 +241,7 @@ impl Peer {
             peer_auth: auth.clone(),
             probe_signer: signer,
             fleet: Some(NodeFleet {
-                lease_bucket: bucket.clone(),
+                lease_bucket: policy.lease_bucket.unwrap_or_else(|| bucket.clone()),
                 replica_storage: ReplicaStorage::new(
                     bucket.store.clone(),
                     ReplicaStorageOptions {
@@ -240,8 +261,8 @@ impl Peer {
                     http,
                     auth,
                 )),
-                log: LogOptions::default(),
-                fleet_durability: false,
+                log: policy.log,
+                fleet_durability: policy.fleet_durability,
             }),
             containers: None,
             metrics: None,

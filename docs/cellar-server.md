@@ -164,6 +164,14 @@ without caching credential, authorization or item values. Commands keep their
 single-attempt transport contract, including transaction read-image capture;
 HTTP status still does not prove a mutation was unstarted. Separate policy
 checks cover read retry hints, deadline failure and mutation non-retry.
+Eight `tests/node_log_authority.rs` cases exercise the native single lease
+writer and folded log through real storage faults. They cover normal and slow
+renewals, an applied CAS reply lost before delivery, delayed/stalled ordinary
+reads, graceful sealing, natural expiry after sustained renewal failure and
+closed ingress after fencing. An expired unavailable follower cannot prove a
+new write while both bundle and LTX publication are withheld; that same signed
+request completes when publication resumes. The fixtures never edit authority
+records or require epoch rotation from TTL expiry alone.
 Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
 generation fencing, and usage counters against the compiled data schema.
 Directory fixtures exercise full-contract transfer, immutable initial-count

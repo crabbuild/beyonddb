@@ -24,17 +24,20 @@ recorded separately; those earlier results remain evidence for that Git build.
 
 ### Registry qualification
 
-All 77 focused tests pass on crates.io `0.1.0`: twelve adapter units, two embedded
-fixtures, nine keyspace cases, 17 root units, one account fixture, nine directory
-cases, two domain cases, two native peer cases, one signed local SDK case and
-22 transaction cases. The eleven rebuilt focused test executables were checked
-for SHA-256 equality before running from the internal SSD, with unchanged parallelism, assertions
-and deadlines.
+All 85 focused tests pass on crates.io `0.1.0`: twelve adapter units, two
+embedded fixtures, nine keyspace cases, 17 root units, one account fixture,
+nine directory cases, two domain cases, two native peer cases, one signed
+local SDK case, 22 transaction cases and eight native lease/log cases. The
+twelve rebuilt focused test executables were checked for SHA-256 equality
+before running from the internal SSD, with unchanged parallelism, assertions
+and deadlines. The native lease/log target passed all eight cases in 46.67
+seconds during this complete rerun.
 Strict Clippy passes for workspace libraries/binaries and all selected migrated
 integration/process targets. The same registry build, including the frontend
 read policy, passed all nine explicitly executed RustFS process cases in
 450.73 seconds, with zero failures or ignored cases. They cover the broad signed
-SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards beyond residency, native follower recovery
+SDK/restart scenario, measured capacity and peer identity, 70 coordinator shards
+beyond residency, native follower recovery
 with bundle and LTX publication withheld, GSI recovery, large transactional
 reads, metadata caching, LSI pagination and retained Streams after hard restart.
 The process test executable was also copied and checked for SHA-256 equality;
@@ -77,9 +80,38 @@ dependency; no package versions or lockfile entries changed. Temporary probes
 were removed. The full nine-process run also passed after this frontend policy
 change, as recorded in the registry qualification above.
 
-All-target Clippy still exits 101 in the retained legacy roots: 65 errors in
-`elastic_cells`, 12 in `node_log_authority` and 60 in `peer_network`. These
-fixtures still depend on Cellule APIs; no gates were disabled.
+All-target Clippy still exits 101 in two retained legacy roots: 65 errors in
+`elastic_cells` and 60 in `peer_network`. The native `node_log_authority` target
+now compiles and passes selected strict Clippy. No gates were disabled.
+
+### Native lease and folded-log qualification
+
+`tests/node_log_authority.rs` replaces the old application-owned
+`NodeLeasePublisher` fixture with eight integration cases over real Cellar
+nodes and signed AWS SDK requests. Ordinary storage and the lease safety lane
+share the same backing store through distinct observed clients. Faults delay
+real reads/writes, lose an applied CAS reply or withhold payload admission;
+they never construct or edit lease, ownership or enrollment records.
+
+| Former publisher concern | Native SDK evidence |
+| --- | --- |
+| Log transitions and heartbeat reconciliation | The open ensemble and first-ack marker survive successive renewals in the same lineage/generation. A complete Preserve shutdown seals that epoch, closes ingress and starts no later lease work. |
+| Expired enrolled follower | A real TCP cut and forced SDK cancellation remove the only follower; its lease expires naturally. With both bundle and LTX payload paths withheld, a new signed write cannot finish. The same request finishes after publication resumes and its value is readable. |
+| Completed local log version | Successive successful lease CAS operations need no safety-lane readback and produce no stale-guard conflict. |
+| Unseen durable version | Losing the reply after an actual applied lease CAS triggers an authoritative safety-lane readback; later renewals and signed writes retain the folded log. |
+| Slow CAS | Two successful 1.5-second CAS tails preserve authority without readback or conflicts. Cellar caps renewal attempts at 2.5 seconds, so the old publisher's 6.5-second successful-tail assumption does not apply. |
+| Delayed authority observation | Delivering a captured older ordinary capacity response after a renewal cannot regress the lease writer's CAS guard or folded log. |
+| Stalled log discovery | An ordinary record read remains blocked beyond that captured record's expiry while native heartbeats, signed writes and the lease safety lane continue. |
+| Sustained renewal failure | The SDK reports `NodeLeaseExpired`, joins its domain, and closes both typed ingress and signed frontend access. |
+
+Cellar retains historical ensemble membership after a follower expires; TTL
+alone does not promise immediate epoch rotation. The port therefore checks
+durability proof rather than reproducing the removed publisher's explicit
+`rotation_required` API. The read-stall fixtures wait for the SDK's real
+30-second maintenance cadence before asserting the fault is active. All
+per-record state assertions and waits after fault entry remain bounded.
+Production source is unchanged by this fixture port; the nine process results
+above remain evidence from commit `c635e39`.
 
 ## Current state
 
@@ -458,7 +490,7 @@ ordered-router unit now includes the frontend Query budget assertions described
 above. Run them with:
 
 ```sh
-cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test embedded --test ranges --locked
+cargo test --workspace --lib --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test embedded --test ranges --locked
 ```
 
 That 68-case runtime verification executed all ten built test programs
@@ -479,7 +511,7 @@ Clippy for workspace libraries/binaries and the transaction target. Those are
 the affected targets rerun for this change. Run the selected library, binary and integration checks:
 
 ```sh
-cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
+cargo clippy --workspace --lib --bins --test account_cell --test cellar_sdk --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer --test node_log_authority --test embedded --test ranges --test cellar_process --test server_binary --locked -- -D warnings
 ```
 
 Run the separate bucket-backed process target explicitly:
@@ -492,9 +524,9 @@ The full legacy all-target suite still needs its Cellule host fixtures ported.
 These results do not establish fleet capacity or complete DynamoDB compatibility.
 The 2026-10-17 `cargo clippy --workspace --all-targets --locked -- -D warnings`
 run exits 101 in legacy Cellule fixtures. Unported fixture roots are
-`elastic_cells`, `node_log_authority` and `peer_network`;
+`elastic_cells` and `peer_network`;
 they still import Cellule host/lease APIs and older object-store interfaces.
-The registry-release rerun reported 65 errors in `elastic_cells`, 12 in
-`node_log_authority` and 60 in `peer_network`.
+The latest registry-release rerun reported 65 errors in `elastic_cells` and
+60 in `peer_network`; the ported `node_log_authority` target is clean.
 The selected Cellar targets above pass. No CI checks or legacy fixtures have
 been disabled to hide this failure.

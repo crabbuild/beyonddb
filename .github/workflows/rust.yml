@@ -32,4 +32,5 @@ jobs:
         run: >-
           cargo test --workspace --lib --test account_cell --test cellar_sdk
           --test cellar_transactions --test cellar_domain --test cellar_directories --test cellar_peer
+          --test node_log_authority
           --test embedded --test ranges --locked
