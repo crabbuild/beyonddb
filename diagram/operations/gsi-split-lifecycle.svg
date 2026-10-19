@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 1100" role="img" aria-labelledby="title desc">
+<title id="title">GSI split: verify before publication, open before finish</title>
+<desc id="desc">The controller durably reserves one exact directory transfer plan. Children enter importing and the source seals. Export copies full keys, original projection versions, images and tombstones. Both children activate only after their complete fingerprints match, while still blocking serving traffic. The directory publishes replacement routes before the controller opens both children. Only after verifying both opened states does it finish the plan and release reservations. An interrupted plan stays discoverable across publication. Base journals retain work while GSI routes are stale.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="1100" fill="#0f172a"/>
+<rect width="1120" height="1100" fill="url(#grid)"/>
+<text x="40" y="53" class="title">GSI split: verify before publication, open before finish</text>
+<text x="40" y="88" class="note">The source version survives transfer; directory cutover does not invent a new projected value.</text>
+<path d="M640 222V257" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<path d="M640 342V377" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<path d="M640 462V497" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M640 582V617" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M640 702V737" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M640 822V857" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="190" y="137" width="890" height="85" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<circle cx="232" cy="179" r="21" fill="#22d3ee"/>
+<text x="232" y="186" class="heading" style="fill:#0f172a" text-anchor="middle">1</text>
+<text x="270" y="170" class="heading">Persist the exact directory plan</text>
+<text x="270" y="199" class="note">Reserve the source and both child identities before transfer.</text>
+<rect x="190" y="257" width="890" height="85" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<circle cx="232" cy="299" r="21" fill="#22d3ee"/>
+<text x="232" y="306" class="heading" style="fill:#0f172a" text-anchor="middle">2</text>
+<text x="270" y="290" class="heading">Prepare children; seal the source</text>
+<text x="270" y="319" class="note">Children enter IMPORTING; sealed source rejects serving traffic.</text>
+<rect x="190" y="377" width="890" height="85" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<circle cx="232" cy="419" r="21" fill="#a78bfa"/>
+<text x="232" y="426" class="heading" style="fill:#0f172a" text-anchor="middle">3</text>
+<text x="270" y="410" class="heading">Copy full transfer records</text>
+<text x="270" y="439" class="note">Keep keys, original versions, images and deletion tombstones.</text>
+<rect x="190" y="497" width="890" height="85" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<circle cx="232" cy="539" r="21" fill="#a78bfa"/>
+<text x="232" y="546" class="heading" style="fill:#0f172a" text-anchor="middle">4</text>
+<text x="270" y="530" class="heading">Verify fingerprints; activate children</text>
+<text x="270" y="559" class="note">Both imports must match. ACTIVATED still blocks client traffic.</text>
+<rect x="190" y="617" width="890" height="85" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<circle cx="232" cy="659" r="21" fill="#34d399"/>
+<text x="232" y="666" class="heading" style="fill:#0f172a" text-anchor="middle">5</text>
+<text x="270" y="650" class="heading">Publish replacement directory routes</text>
+<text x="270" y="679" class="note">Keep the plan discoverable through the routed children.</text>
+<rect x="190" y="737" width="890" height="85" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<circle cx="232" cy="779" r="21" fill="#34d399"/>
+<text x="232" y="786" class="heading" style="fill:#0f172a" text-anchor="middle">6</text>
+<text x="270" y="770" class="heading">Open and verify both children</text>
+<text x="270" y="799" class="note">Controller observes publication before opening either child.</text>
+<rect x="190" y="857" width="890" height="85" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<circle cx="232" cy="899" r="21" fill="#34d399"/>
+<text x="232" y="906" class="heading" style="fill:#0f172a" text-anchor="middle">7</text>
+<text x="270" y="890" class="heading">Finish plan; release split reservations</text>
+<text x="270" y="919" class="note">Only after both OPENED states are verified.</text>
+<text x="40" y="170" class="eyebrow" style="fill:#22d3ee">PLAN</text>
+<text x="40" y="410" class="eyebrow" style="fill:#a78bfa">COPY</text>
+<text x="40" y="650" class="eyebrow" style="fill:#34d399">CUT OVER</text>
+<rect x="40" y="997" width="1040" height="70" rx="12" fill="#352b20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="62" y="1027" class="body">During the pause, stale-route responses keep base journals available for retry.</text>
+<text x="62" y="1054" class="note">Finishing a split does not authorize deletion of historical storage or tombstones.</text>
+</svg>

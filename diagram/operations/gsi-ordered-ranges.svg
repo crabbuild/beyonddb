@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 818" role="img" aria-labelledby="title desc">
+<title id="title">A table and its GSI use separate ordered ranges</title>
+<desc id="desc">Table metadata refers to independent base and GSI directories. Base ranges order the complete base primary key. GSI ranges order the GSI partition key and sort key followed by the complete base key. The base-key suffix keeps duplicate GSI keys distinct. The displayed three-range plans are illustrative, not a fixed range count or a mapping of one table to one Cell. Cellar owns physical placement and fenced ownership.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="818" fill="#0f172a"/>
+<rect width="1120" height="818" fill="url(#grid)"/>
+<text x="40" y="53" class="title">A table and its GSI use separate ordered ranges</text>
+<text x="40" y="88" class="note">Separate directories, range identities and owners; one table spans multiple Cells.</text>
+<path d="M560 204V244" class="edge" stroke="#a78bfa"/>
+<path d="M285 244H835" class="edge" stroke="#a78bfa"/>
+<path d="M285 244V284" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M835 244V284" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<rect x="300" y="132" width="520" height="72" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="560" y="163" class="heading" text-anchor="middle">Table generation + index specification</text>
+<text x="560" y="190" class="note" text-anchor="middle">Account metadata anchors each independent directory.</text>
+<rect x="40" y="284" width="490" height="386" rx="16" fill="#111c30" stroke="#34d399" stroke-width="1.3" stroke-dasharray="7 6"/>
+<text x="60" y="324" class="eyebrow" style="fill:#34d399">BASE DIRECTORY</text>
+<text x="60" y="355" class="note">Order: base PK, then base SK when present</text>
+<rect x="590" y="284" width="490" height="386" rx="16" fill="#111c30" stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="7 6"/>
+<text x="610" y="324" class="eyebrow" style="fill:#a78bfa">GSI DIRECTORY</text>
+<text x="610" y="355" class="note">Order: GSI PK/SK, then complete base key</text>
+<rect x="60" y="385" width="450" height="50" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="285" y="417" class="body" text-anchor="middle">Base Cell A     [−∞, b1)</text>
+<rect x="60" y="475" width="450" height="50" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="285" y="507" class="body" text-anchor="middle">Base Cell B     [b1, b2)</text>
+<rect x="60" y="565" width="450" height="50" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="285" y="597" class="body" text-anchor="middle">Base Cell C     [b2, +∞)</text>
+<rect x="610" y="385" width="450" height="50" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="835" y="417" class="body" text-anchor="middle">GSI Cell X     [−∞, g1)</text>
+<rect x="610" y="475" width="450" height="50" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="835" y="507" class="body" text-anchor="middle">GSI Cell Y     [g1, g2)</text>
+<rect x="610" y="565" width="450" height="50" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="835" y="597" class="body" text-anchor="middle">GSI Cell Z     [g2, +∞)</text>
+<text x="40" y="716" class="body">Duplicate GSI keys remain separate rows because the full base key breaks ties.</text>
+<text x="40" y="750" class="note">b1/b2 and g1/g2 are unrelated ordered boundaries; the three-range plans are illustrative.</text>
+<text x="40" y="780" class="note">Cellar assigns physical owners. Several Cells on one node still share that node’s failure domain.</text>
+</svg>

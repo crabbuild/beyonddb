@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 870" role="img" aria-labelledby="title desc">
+<title id="title">Replay compares source versions, not arrival order</title>
+<desc id="desc">For one complete index and base key, compare lexicographic source epoch and source sequence. If stored version is (7,42) with a tombstone, incoming old (7,41) image is superseded; identical (7,42) tombstone replays; different content at (7,42) is a version conflict; (8,1) is newer and applies if valid. Tombstones prevent old images from resurrecting removed entries. Scheduling deferral never changes the immutable projection version. Import uses stricter exact-replay rules.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="870" fill="#0f172a"/>
+<rect width="1120" height="870" fill="url(#grid)"/>
+<text x="40" y="53" class="title">Replay compares source versions, not arrival order</text>
+<text x="40" y="88" class="note">Version = (source epoch, source sequence), compared lexicographically for one full key.</text>
+<rect x="40" y="130" width="1040" height="80" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="62" y="163" class="heading">Stored row: version (7, 42), tombstone</text>
+<text x="62" y="192" class="note">A tombstone retains the deletion version even though Query and Scan omit the row.</text>
+<text x="40" y="256" class="eyebrow" style="fill:#22d3ee">INCOMING DELIVERY</text>
+<text x="650" y="256" class="eyebrow" style="fill:#34d399">RESULT AT THIS KEY</text>
+<path d="M470 326H650" class="edge" stroke="#94a3b8" marker-end="url(#arrow-slate)"/>
+<rect x="40" y="286" width="430" height="80" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="60" y="332" class="body">(7, 41) · old projected image</text>
+<rect x="650" y="286" width="430" height="80" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="670" y="318" class="heading">Superseded</text>
+<text x="670" y="347" class="note">Keep the newer tombstone.</text>
+<path d="M470 446H650" class="edge" stroke="#94a3b8" marker-end="url(#arrow-slate)"/>
+<rect x="40" y="406" width="430" height="80" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="60" y="452" class="body">(7, 42) · identical tombstone</text>
+<rect x="650" y="406" width="430" height="80" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="670" y="438" class="heading">Replay</text>
+<text x="670" y="467" class="note">Same version and content are idempotent.</text>
+<path d="M470 566H650" class="edge" stroke="#94a3b8" marker-end="url(#arrow-slate)"/>
+<rect x="40" y="526" width="430" height="80" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="60" y="572" class="body">(7, 42) · different content</text>
+<rect x="650" y="526" width="430" height="80" rx="12" fill="#3b2036" stroke="#fb7185" stroke-width="1.6"/>
+<text x="670" y="558" class="heading">VersionConflict</text>
+<text x="670" y="587" class="note">Reject; equal version cannot change content.</text>
+<path d="M470 686H650" class="edge" stroke="#94a3b8" marker-end="url(#arrow-slate)"/>
+<rect x="40" y="646" width="430" height="80" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="60" y="692" class="body">(8, 1) · valid newer image</text>
+<rect x="650" y="646" width="430" height="80" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="670" y="678" class="heading">Applied</text>
+<text x="670" y="707" class="note">A higher source epoch wins before sequence.</text>
+<text x="40" y="794" class="note">Deferral changes retry scheduling, not this version. Full tombstone retirement remains unqualified.</text>
+<text x="40" y="830" class="note">Split import requires exact replay and rejects conflicting versions instead of replacing them.</text>
+</svg>
