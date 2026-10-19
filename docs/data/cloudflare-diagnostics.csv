@@ -1,0 +1,49 @@
+group,probe,context,successful_samples,failed_samples,min_ms,median_ms,max_ms
+sdk,get-front1-owner1,external signed SDK; zero retries,5,0,74.596,81.817,797.26
+sdk,get-front1-owner2,external signed SDK; zero retries,5,0,90.383,124.861,1346.623
+sdk,get-front1-owner3,external signed SDK; zero retries,5,0,102.252,110.211,317.752
+sdk,get-front2-owner1,external signed SDK; zero retries,5,0,329.517,387.279,1957.56
+sdk,get-front2-owner2,external signed SDK; zero retries,5,0,278.865,342.997,1549.962
+sdk,get-front2-owner3,external signed SDK; zero retries,5,0,360.747,411.991,3056.631
+sdk,get-front3-owner1,external signed SDK; zero retries,5,0,396.47,411.216,1178.847
+sdk,get-front3-owner2,external signed SDK; zero retries,5,0,349.551,582.962,1984.024
+sdk,get-front3-owner3,external signed SDK; zero retries,5,0,375.103,636.501,1919.083
+sdk,put-front1-owner1,external signed SDK; zero retries,5,0,1397.249,1656.76,2459.129
+sdk,put-front1-owner2,external signed SDK; zero retries,5,0,1394.978,1806.153,2221.646
+sdk,put-front2-owner2,external signed SDK; zero retries,5,0,1593.8,1858.799,2466.898
+sdk,transact_get_items-one-cell,external signed SDK; zero retries,6,0,52.961,58.405,89.084
+sdk,transact_get_items-two-cells-one-node,external signed SDK; zero retries,4,1,14043.453,16076.62,16697.18
+sdk,transact_write_items-one-cell,external signed SDK; zero retries,3,0,11109.042,11171.21,13662.105
+sdk,transact_write_items-one-cell-same-token-replay,external signed SDK; zero retries,3,0,53.442,66.037,1119.083
+sdk,transact_write_items-two-cells-one-node,external signed SDK; zero retries,3,0,12219.288,12769.19,13504.997
+sdk,transact_write_items-two-cells-one-node-same-token-replay,external signed SDK; zero retries,3,0,50.757,63.871,1441.638
+sdk,transact_write_items-two-nodes,external signed SDK; zero retries,3,0,13020.83,13108.76,14026.475
+sdk,transact_write_items-two-nodes-same-token-replay,external signed SDK; zero retries,3,0,53.571,60.11,682.751
+sdk,transact_get_items-two-nodes,external signed SDK; zero retries,3,0,13372.038,16655.411,18379.082
+probe-control,node3-health-,diagnostic activation/startup failure; no timing sample,0,1,,,
+probe-control,node1-health-,diagnostic activation/startup failure; no timing sample,0,5,,,
+probe-control,node3-forward-health,diagnostic activation/startup failure; no timing sample,0,1,,,
+forward,node1-TransactWriteItems,Worker YVR through DO and Container; no external client segment; client token omitted,3,0,1139,1263,1914
+forward,node3-Query,Worker YVR through DO and Container; no external client segment,10,0,302,349.5,1870
+ddb,node3-GetItem,Container loopback signed DDB; node3 post-recovery; remote data owner,10,0,289.688,324.166,2101.047
+r2front,node1-s3_unconditional_put,Worker YVR direct S3; same-key updates,10,0,1113,1410.5,1492
+r2front,node1-s3_conditional_put,Worker YVR direct S3; same-key updates,10,0,1329,1405.0,1761
+r2front,node1-s3_get,Worker YVR direct S3; same-key updates,10,0,301,326.0,523
+r2binding,node1-binding_unconditional_put,Worker YVR native R2 binding; same-key updates,10,0,1019,1245.0,1509
+r2binding,node1-binding_conditional_put,Worker YVR native R2 binding; same-key updates,10,0,1161,1251.0,1563
+r2binding,node1-binding_get,Worker YVR native R2 binding; same-key updates,10,0,195,216.0,511
+forward,node1-GetItem,Worker YVR through DO and Container; no external client segment,10,0,23,28.5,34
+forward,node2-health,Worker YVR through DO and Container; no external client segment,10,0,35,37.0,51
+r2fresh,node1-s3_fresh_put,Worker YVR; new unique key per PUT,10,0,962,1021.5,1135
+r2fresh,node1-binding_fresh_put,Worker YVR; new unique key per PUT,10,0,890,993.5,1114
+forward,node1-health,Worker YVR through DO and Container; no external client segment,10,0,11,12.0,17
+forward,node2-Query,Worker YVR through DO and Container; no external client segment,10,0,282,300.0,1762
+forward,node1-Query,Worker YVR through DO and Container; no external client segment,10,0,28,33.5,45
+health,node3-local_health,Container loopback HTTP; node3 post-recovery,10,0,0.2,0.242,4.001
+forward,node2-GetItem,Worker YVR through DO and Container; no external client segment,10,0,295,308.0,1603
+r2,node3-r2_conditional_put,Container LAX direct S3; same-key conditional updates,10,0,1198.845,1315.775,1375.81
+r2,node3-r2_get,Container LAX direct S3; same-key conditional updates,10,0,215.64,302.717,497.137
+read-proof-correlation,no-proof-inflight,external signed node1 Get; node-wide proof counter before call,72,0,48.656,58.615,1499.373
+read-proof-correlation,proof-inflight,external signed node1 Get; node-wide proof counter before call,8,0,641.224,1328.542,4016.599
+coordinator-warmth,warm-existing-shard,two data Cells across nodes1/2; distinct fresh tokens; alternating test,3,0,8815.47,9214.045,9278.759
+coordinator-warmth,cold-unregistered-shard,two data Cells across nodes1/2; distinct fresh tokens; alternating test,3,0,12697.992,14909.572,17205.823
