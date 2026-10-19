@@ -32,7 +32,7 @@ below to evaluate a deployment; these guides do not establish a production SLA.
 | Streams and retention | [Streams](streams-contract.md) |
 | Follower acknowledgement and recovery | [Follower durability](follower-durability.md) |
 | Capacity planning | [Scaling](scaling.md) |
-| Tests, open gates and historical evidence | [Implementation status](implementation-status.md) |
+| Tests, open gates and historical evidence | [Qualification workflow](../.github/workflows/qualification.yml) · [Server evidence](cellar-server.md#detailed-qualification-record) |
 
 ## Reading conventions
 

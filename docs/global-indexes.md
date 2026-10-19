@@ -281,7 +281,7 @@ the same `status` and `created_at` remain distinct because `order_id` breaks the
 | Delivery, pagination and owner visits | [worker](../src/backend/global_index.rs), [read path](../src/global_index/read.rs) |
 | Ordered range transfer | [controller](../src/provision/global_indexes.rs), [lifecycle commands](../src/global_index/transfer.rs) |
 | Current registered native cases | [Cellar index target](../tests/cellar_indexes.rs) |
-| Signed process scenario | [GSI process fixture](../tests/server_binary/global_indexes.rs); see [current targets](implementation-status.md#current-verified-slice) |
+| Signed process scenario | [GSI process fixture](../tests/server_binary/global_indexes.rs); see [qualification workflow](../.github/workflows/qualification.yml) |
 
 ```sh
 cargo test --locked --test cellar_indexes -- --test-threads=1

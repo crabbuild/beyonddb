@@ -292,7 +292,7 @@ observe later committed writes and does not replay the earlier write's token.
 | Read capture and cleanup | [read adapter](../src/backend/transaction_read.rs), [durable release](../src/transaction_coordinator/read_release.rs) |
 | Recovery and discovery | [resolver](../src/backend/recovery.rs), [account maintenance](../src/cellar/server.rs) |
 | Native signed transaction and batch regressions | [transaction suite](../tests/cellar_transactions.rs), [coalescing suite](../tests/cellar_coalescing.rs) |
-| Process evidence and commands | [server qualification](cellar-server.md#qualification-still-required), [registered targets](implementation-status.md#current-verified-slice) |
+| Process evidence and commands | [server qualification](cellar-server.md#qualification-still-required), [qualification workflow](../.github/workflows/qualification.yml) |
 
 ```sh
 cargo test --locked --test cellar_transactions -- --test-threads=1

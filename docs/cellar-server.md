@@ -274,8 +274,8 @@ mutation rollback from cancellation or a lost reply.
 
 ## Qualification still required
 
-[Current registered targets](implementation-status.md#current-verified-slice) are
-the source for checks to run now. The expandable record below preserves older
+The [qualification workflow](../.github/workflows/qualification.yml) defines
+current native and process checks. The expandable record below preserves older
 measurements and fault cases; it is not a report of the latest CI run.
 
 | Evidence available | Still not established |
@@ -299,8 +299,8 @@ cargo test --locked --test cellar_transactions -- --test-threads=1
 cargo test --locked --test cellar_process -- --ignored --test-threads=1
 ```
 
-See the [CI workflows](../.github/workflows) and
-[current target commands](implementation-status.md#current-verified-slice) for the full matrix.
+See the [Rust workflow](../.github/workflows/rust.yml) and
+[signed SDK workflow](../.github/workflows/qualification.yml) for the full matrix.
 
 ## Detailed qualification record
 

@@ -60,4 +60,4 @@ retained generations without a proven collection contract.
 In-place storage upgrades are unqualified. Retain the source/binary/configuration
 for existing roots; validate compatibility in a disposable clone or explicitly
 migrate to a fresh prefix. Reusing an incompatible development root is not an
-upgrade plan. See [qualification gates](implementation-status.md#open-qualification-gates).
+upgrade plan. See [qualification gates](cellar-server.md#qualification-still-required).

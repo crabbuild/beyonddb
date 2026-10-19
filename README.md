@@ -203,7 +203,7 @@ cargo test --locked --test server_binary -- --include-ignored --test-threads=1
 
 See [contributor invariants](AGENTS.md),
 [server qualification boundaries](docs/cellar-server.md#qualification-still-required) and
-[independent protocol qualification](docs/implementation-status.md#independent-client-qualification).
+[independent protocol runner](scripts/qualify-upstream.py).
 
 ## Documentation
 

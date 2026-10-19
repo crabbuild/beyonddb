@@ -188,7 +188,7 @@ Qualify the exact binary, storage service, filesystem, failure domains and clien
 workload. Exercise owner loss, ambiguous mutations, capacity limits and restore
 from retained state. Backups/PITR, supported in-place upgrades and bounded fleet
 recovery are still open gates; a copied live data directory is not a table backup.
-Use [implementation status](implementation-status.md) to select current tests.
+Use the [qualification workflow](../.github/workflows/qualification.yml) to select current tests.
 
 ## State and credential retention
 
@@ -216,5 +216,6 @@ signed endpoint, correct generation and durable result, then exercise restart:
 5. Repeat the relevant transaction/index/Streams cases and record failures and
    the exact binary/storage/configuration. A local restart is not machine-loss proof.
 
-[Implementation status](implementation-status.md) retains detailed fault evidence,
-current target commands and the distinction between historical and current runs.
+The [server qualification guide](cellar-server.md#qualification-still-required)
+provides test commands, detailed fault evidence and the distinction between
+historical and current runs.

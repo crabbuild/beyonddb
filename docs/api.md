@@ -3,7 +3,7 @@
 See the [server guide](cellar-server.md#qualification-still-required) for current
 Cellar qualification boundaries.
 The matrix describes implemented paths and their limits. Use the current
-[registered targets](implementation-status.md#current-verified-slice) to select
+[qualification workflow](../.github/workflows/qualification.yml) to select
 evidence; a historical fixture count is not a new qualification result.
 
 Use this page to decide whether a DynamoDB operation fits your workload. BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but a protocol handler alone does not establish Cell-backed support. A **verified path** has a signed AWS SDK or CLI request, a durable Cell commit, and a result checked after owner or process restart. Each fixture proves only its stated cases, not every DynamoDB option or error response.
@@ -14,7 +14,7 @@ Use this page to decide whether a DynamoDB operation fits your workload. BeyondD
 | **Partial** | Some options work, but the named alternatives are rejected or unqualified. |
 | **Unsupported** | No compatible Cell path is available through the public endpoint. |
 
-The [AWS CLI guide](user-guide.md) shows requests you can try. The [implementation record](implementation-status.md) contains the test evidence and open qualification gates.
+The [AWS CLI guide](user-guide.md) shows requests you can try. The [server guide](cellar-server.md#qualification-still-required) records focused test evidence and open qualification gates.
 
 ## Tables, items, and reads
 
@@ -30,9 +30,9 @@ Core table, item, read, and transaction operations have Cell paths. Read the bou
 | `TransactWriteItems`, `TransactGetItems` | Durable coordinator and participant paths; cross-Cell SDK hard-restart coverage | Conflict and capacity behavior at sustained fleet load is unqualified. GSI propagation remains asynchronous after base commit. |
 | `TagResource`, `UntagResource`, `ListTagsOfResource` | Cell-backed; signed SDK restart coverage | Table deletion removes tag rows in bounded generation cleanup. |
 
-The [implementation record](implementation-status.md#current-verified-slice)
-maps these paths to tests. The full upstream protocol suite remains an
-[acceptance gate](implementation-status.md#acceptance-proof-for-a-server-claim).
+The [qualification workflow](../.github/workflows/qualification.yml) selects the
+registered native and process fixtures. Full upstream protocol compatibility
+remains an open [qualification gate](cellar-server.md#qualification-still-required).
 
 ### Creation-time Cell model extension
 
@@ -70,7 +70,7 @@ The serving worker configures a fixed expiry index in data Cells, backfills
 older items in bounded commands, and conditionally removes expired items.
 Settings and sweep progress survive owner restart. Expiry is asynchronous.
 The global TTL listing traits remain unsupported; the worker enumerates each
-configured account directly. [TTL implementation status](implementation-status.md#running-the-current-server)
+configured account directly. [Account maintenance](cellar-server.md#account-maintenance)
 
 ## Streams
 
@@ -87,7 +87,7 @@ change the view type. Bounded retention sweeps cover active routed owners and
 catalog-discovered dormant or deleted data Cells. Expired stream catalog rows,
 full split-lineage and iterator qualification, and fleet-scale retention work
 remain open. See [Streams contract](streams-contract.md) and
-[implementation status](implementation-status.md#streams-dependency-contract).
+[recorded restart evidence](cellar-server.md#detailed-qualification-record).
 
 ## Authentication and administration
 
@@ -138,5 +138,5 @@ Use the same evidence path for each new operation or option:
    and verify idempotent participant resolution.
 
 Until those checks pass, describe a path as implemented or partial rather than
-generally compatible. The current [independent qualification runner](implementation-status.md#independent-client-qualification)
+generally compatible. The current [independent qualification runner](../scripts/qualify-upstream.py)
 supports unchanged ExtendDB Python client tests.

@@ -10,7 +10,7 @@ LSI invariants, split/replay analysis and acceptance work packages remain below.
 
 The delivery-plan sections record the implementation sequence and acceptance
 criteria. A work package is not proof of completion; consult current source and
-[registered targets](implementation-status.md#current-verified-slice).
+[qualification workflow](../.github/workflows/qualification.yml).
 
 ## Detailed design and recorded evidence
 
