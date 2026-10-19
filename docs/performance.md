@@ -1,42 +1,155 @@
 # Measure BeyondDB performance
 
+Use this guide to read the recorded results and choose a benchmark. Follow the
+[local setup guide](local-benchmark.md#reproduce) for the complete VM, disk,
+server and client preparation steps.
+
+| I need to… | Start here |
+| --- | --- |
+| Read the Cellar measurements and their limits | [Recorded result](#current-local-result) |
+| Choose a harness and run a comparison | [Run a benchmark](#run-a-benchmark) |
+| Understand throughput, tail latency and errors | [Read the report](#read-the-report) |
+| Investigate an earlier optimization or release | [Detailed evidence](#detailed-design-and-recorded-evidence) |
+
 ## Current Cellar reference
 
-## Current local result
+### Current local result
 
-The [local benchmark](local-benchmark.md) records source `674e377`, Cellar `=0.1.0`,
-three nodes at 1 vCPU / 3 GiB / 5 GiB each, and one table with ten data cells per
-node. The separate object store and client are outside those node budgets.
+**Recorded October 18, 2026, at source `674e377` with Cellar `=0.1.0`.** This is a
+local characterization. BeyondDB has no qualified production throughput or
+latency target.
 
-| API at eight clients | Successful requests/s | p99 ms |
-| --- | ---: | ---: |
-| GetItem | 293.8 | 70.9 |
-| Query | 150.2 | 335.7 |
-| PutItem | 204.0 | 214.0 |
-| TransactGetItems | 16.5 | 1193.0 |
-| TransactWriteItems | 23.7 | 1002.0 |
+![Recorded fixture: one table across three resource-limited nodes, with a separate object store](../diagram/operations/benchmark.svg)
 
-![Measured throughput and p99; failed windows are marked](../diagram/perf-throughput-latency.svg)
+| Condition | Recorded fixture |
+| --- | --- |
+| Database nodes | Three; **1 vCPU / 3 GiB RAM / 5 GiB disk each**; metadata and coordinator Cells share those limits |
+| Table placement | **30 ordered data ranges**, ten per node; balancing paused and ownership verified |
+| Shared infrastructure | One VM and physical disk; client and **1 CPU / 4 GiB RustFS** outside node budgets |
+| Workload | Signed SDK calls, retries disabled, uniform **1 KiB payloads**, strong point/range reads |
+| Request size | Get/Put: one item; Query: two items; transactions: two items on different nodes |
+| Durability | Writes wait for bucket publication; follower durability disabled |
+| Sweep | **1, 8, 30, 60 clients**; 30-second windows after five seconds of separate warmup |
 
-All 20 windows covered all 30 data cells. The sweep retained 65,276 successes,
-101 measured errors and 16 warmup errors; transaction APIs failed at 30/60 clients.
-Internal shared-account admission refusals were recorded separately from public
-errors. At eight clients, transaction p99 has fewer than 1,000 successful samples.
+All five eight-client windows completed without public request errors. Rates and
+latencies below count successful calls; samples are successful completions:
 
-These short closed-loop windows share VM/storage and evolving state. They do not
-measure independent-machine fleet capacity or an open-loop latency SLO. Earlier
-failed trials and raw artifacts remain local; the guide records their limits.
+| API | Requests/s | p99 ms | Samples |
+| --- | ---: | ---: | ---: |
+| `GetItem` | 293.8 | 70.9 | 9,064 |
+| `Query` | 150.2 | 335.7 | 4,586 |
+| `PutItem` | 204.0 | 214.0 | 6,125 |
+| `TransactGetItems` | 16.5 | 1193.0 | 500 |
+| `TransactWriteItems` | 23.7 | 1002.0 | 715 |
 
-For new experiments, use [scripts/perf](../scripts/perf) and the
-[current reproduction guide](local-benchmark.md). The full optimization rationale,
-release comparisons, failure counts, hardware conditions and original
-reproduction steps are retained below. No earlier runtime sample
-is a current Cellar capacity or SQLite-parity claim.
+![Measured throughput and p99 across the client sweep; failed windows are marked](../diagram/perf-throughput-latency.svg)
+
+**Higher-concurrency transaction qualification failed.** Across all 20 windows,
+the sweep retained **65,276 successes, 101 measured errors and 16 warmup errors**.
+Both transaction APIs returned 503s at 30 and 60 clients. Every window covered all
+30 data Cells, but coverage alone does not make a failed window healthy capacity.
+The eight-client transaction tails have fewer than 1,000 successful samples.
+
+The shared account Cell also logged **3,723 internal admission refusals**. These
+include paced reads and are separate from public API errors. Shared VM/storage,
+substantial host swap use and evolving table/coordinator state limit comparisons.
+The run does not establish fleet capacity, automatic balancing performance or an
+arrival-rate latency SLO. See the [full record](local-benchmark.md#measured-result--october-18-2026)
+for resource observations, retained failed attempts and write read-back checks.
+
+## Run a benchmark
+
+| Harness | Use it for | Boundary |
+| --- | --- | --- |
+| [`scripts/perf`](../scripts/perf) | Configurable node/range placement; read, write and cross-Cell transaction sweep | Verifies every range and records ownership, resource counters, errors and samples |
+| [`scripts/bench.py`](../scripts/bench.py) | Broader API comparisons against an existing disposable table | Requires string `pk`; optional numeric SK; does not prove traffic covered every Cell |
+
+### Choose the topology once
+
+Follow [Reproduce](local-benchmark.md#reproduce) to provision a dedicated fixture,
+build the release server with `--locked`, install client dependencies and size the
+VM for the database nodes **plus** the separate object store. The setup script
+owns fixed fixture names; only one topology can occupy that fixture at a time.
+
+For example, initialize a **fresh private run directory** with four nodes and
+eight data Cells per node:
+
+```sh
+python3 scripts/perf/setup.py init --run-dir /path/to/fresh-run \
+  --nodes 4 --cells-per-node 8
+```
+
+The product `nodes × cells-per-node` must be **2–256**. Later actions load this
+saved topology. The recorded result above uses three nodes and ten Cells per node;
+other topologies have not been performance-qualified. Never rerun `init` over
+retained keys or data. Complete store/node startup before preparing the table.
+
+### Measure and report
+
+After fixture startup, use the client Python environment and paths from the
+[setup guide](local-benchmark.md#reproduce). Run `prepare` once for a fresh table;
+it intentionally rejects an existing table. For a repeat measurement, retain the
+same manifest/output directory and use a new label without running `prepare` again.
+
+```sh
+"$PERF_PY" scripts/perf/bench.py prepare \
+  --run-dir "$PERF_RUN" --output "$PERF_OUT"
+"$PERF_PY" scripts/perf/bench.py measure \
+  --run-dir "$PERF_RUN" --output "$PERF_OUT" \
+  --operations transact_write transact_get put get query \
+  --clients 1 8 30 60 --seconds 30 --warmup 5 --label main
+"$PERF_PY" scripts/perf/report.py \
+  --input "$PERF_OUT/results-main.json" --output "$PERF_OUT" --summary-clients 8
+```
+
+Use the same source/dependency pins, durability, resources, payload, key
+distribution, client settings and background features for a comparison. Capture
+resource observations throughout the run. The [plot and report steps](local-benchmark.md#generate-the-report-and-charts)
+retain failed cases; keep raw artifacts and fixture credentials local.
+
+## Read the report
+
+| Read together | Interpretation |
+| --- | --- |
+| Successful requests/s + actual elapsed time | Completed API calls divided by elapsed time, including in-flight drain; failed calls are not successes |
+| Items/s + request shape | Two-item Query/transactions perform two item operations per successful API call |
+| p50/p95/p99 + sample count | End-to-end **successful-call** latency, including SDK/signing, routing and durability; inspect error latencies separately |
+| Errors + warmup errors | Warmup is retained separately; workers stop after three errors, so failed windows cannot establish healthy capacity |
+| Range coverage + ownership | Every range needs successful traffic; verify placement before and after the sweep |
+| Memory, disk, CPU + metadata inventory | Include system/coordinator Cells; throttled-period percentage is not lost wall time |
+| Acknowledged write read-backs | Sampled correctness evidence; a failed mutation can still have an uncertain outcome |
+
+The two harnesses calculate percentiles differently. [`scripts/perf/bench.py`](../scripts/perf/bench.py)
+uses nearest rank; [`scripts/bench.py`](../scripts/bench.py) selects sorted sample
+index `floor(p × (n − 1))`. Both use successful calls only. Small transaction
+samples do not establish a reliable tail-latency distribution.
+
+This is a **closed-loop concurrency sweep**: clients wait for replies before
+sending more work. It does not correct for coordinated omission or measure an
+open-loop arrival-rate SLO. Sustained mixed load, hot keys, background work,
+splits and owner recovery need separate qualification before capacity planning.
 
 ## Detailed design and recorded evidence
 
-> **Revision scope:** The current Cellar measurement is above. The optimization analyses and release comparisons below retain their original runtime, revision, durability, hardware and failures. In these records, “current”, “latest” and “now” mean current at that recorded revision, not the present server. Do not reuse their old configuration or single-cell creation instructions.
+The complete optimization journal follows, grouped by topic. Expand a section
+for its original rationale, tables, failures and reproduction steps.
+
+> **Revision scope:** Earlier “current”, “latest” and “now” describe the recorded
+> revision. Historical Cellule results, old configuration and single-Cell fixtures
+> are not current Cellar qualification or SQLite-parity claims. Use the setup guide
+> above for new experiments.
 > Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/performance.md).
+
+| Topic | Includes |
+| --- | --- |
+| Context and owner recovery | Original scope, active-owner lookup, restoration and placement |
+| Durability and optimization rationale | SQLite cost boundary, heartbeat writes, prepare batching, replay and reply sizing |
+| Release qualification | Failed coalesced-prepare release and earlier revision-scoped comparisons |
+| Early fixtures and request costs | Object-publication samples, SQLite comparisons and local-node experiments |
+| Diagnostics and reproduction | Runtime observations, counter limits, earlier commands and percentile interpretation |
+
+<details>
+<summary><strong>Original context, owner lookup and recovery</strong></summary>
 
 The current Cellar `=0.1.0` three-node characterization is documented in
 [the local benchmark](local-benchmark.md). It verifies ten table
@@ -81,6 +194,11 @@ A focused transaction regression installs discovery before coordinator registrat
 Authentication also restores a cataloged credential shard after its owner expires. This uses the existing fenced takeover path and requires a published root and fresh lease evidence. The regression covers enabled and disabled peer caches, refusal to replace a live owner, and an unknown access key that creates neither a catalog entry nor authority.
 
 The reviewed Cellule EOF fix keeps observed object streams finished after completion. Both new regressions reproduce the original panic before the fix. With the updated pin, the original follower durability process test passes, including withheld object publication, owner process kill, recovery, and graceful shutdown. This closes that local failure; full fleet recovery and sustained performance still require qualification.
+
+</details>
+
+<details>
+<summary><strong>Durability costs and optimization rationale</strong></summary>
 
 ## Why writes and transactions cost more than SQLite
 
@@ -199,6 +317,11 @@ A large image returns an explicit `WideRequired` marker, then uses the existing 
 
 This reduces reserved reply memory for small items. The HTTP peer receiver also retains its own request buffer, so total in-flight memory exceeds the 64 KiB reply alone. End-to-end throughput, large-item latency and SQLite parity require separate release measurements. Existing query opcodes and persisted transaction/image formats remain available; upgrades of roots created by older application releases still need separate qualification.
 
+</details>
+
+<details>
+<summary><strong>Release qualification: failed coalesced prepares and scoped-read releases</strong></summary>
+
 <a id="latest-release-verification"></a>
 
 ## Recorded release verification
@@ -262,6 +385,11 @@ The regression proves stalled log I/O held the heartbeat's shared mutex. The fix
 **The fix does not resolve every fencing failure.** Four-Cell logs retain terminal Fenced errors; the precise remaining renewal phase is not yet isolated. SDK-window host load is single **33.50→28.05**, four Cells **52.76→69.93**, SQLite **69.45→54.44**, on 12 CPUs with about 36 GiB of swap. No local build, test or provider probe overlaps measurement. All ten fixture PIDs and three containers are absent; no forced cleanup is needed. Changing contention prevents attribution of an end-to-end speedup. Full recovery, larger single-Cell budgets, live conversion, sustained capacity and SQLite parity remain unfinished. The preceding source's [full SDK CI](https://github.com/crabbuild/beyonddb/actions/runs/37040618370) fails: native 48/48, peers 74/75 with missing GSI ownership, processes 7/8 with the observed-stream EOF shutdown panic.
 
 The follow-up renewal-phase diagnostic repeats the original four-Cell workload at source `7cba575`, adding operational failure observations with unchanged deadlines and durability. All 24 cases run: 8,502 completions, **six timeouts** (five transaction reads, one transaction write). No renewal warning or terminal Fenced error occurs; the earlier endpoint loss is not reproduced and remains unresolved. Eight-client transaction writes complete eight requests at 0.60 req/s with successful p95 7,613.65 ms. This is a diagnostic, with no fresh SQLite comparison or speedup claim. SDK-window load is 74.40→49.94 on 12 CPUs, with about 37 GiB of swap. Three PIDs and one container are absent without forced cleanup. A retained mailbox refusal and incomplete-resolution warning do not establish the cause of a specific timeout.
+
+</details>
+
+<details>
+<summary><strong>Earlier release verification: member expiry through placement</strong></summary>
 
 ### Previous Cellule member-expiry release verification
 
@@ -467,6 +595,11 @@ Single mode returned 1,691 eight-client transaction reads, while the four-Cell s
 Host load was 17.93→16.75 for single, 17.46→23.30 for partitioned, and 24.15→26.65 for SQLite. No task-local build/test/provider probe overlapped measurement. Every new fixture PID/container is absent; volumes and scratch data are retained. Partitioned logs retain deferred recovery and mailbox-byte pressure in maintenance workers. Zero SDK errors does not qualify those workers' convergence.
 
 The placement verification passes three signed model tests, five creation/lifecycle tests, two statistics tests, 27 library tests, formatting and strict Clippy. The original record captured Rust CI success and SDK CI pending. Subsequent production-equivalent SDK CI failed as described above; full recovery and older-root upgrades remain unqualified. The new Single variant requires matching compiled peers.
+
+</details>
+
+<details>
+<summary><strong>Earlier release pairs: native volumes through resident routing</strong></summary>
 
 ### Previous native-volume release pair
 
@@ -788,6 +921,11 @@ process CI passed, but one long peer recovery test failed; full qualification
 remains open. The approved one-read follower append change is not included in
 this measured release.
 
+</details>
+
+<details>
+<summary><strong>Earlier release pairs: runtime upgrade and instrumented diagnostics</strong></summary>
+
 ### Previous Cellule upgrade release pair
 
 The Cellule `70bd25f` release rerun
@@ -968,6 +1106,11 @@ handle authority reads, refreshes after expiry, and rejects unauthorized or
 drained-owner requests. That focused proof does not establish end-to-end
 SQLite parity.
 
+</details>
+
+<details>
+<summary><strong>Early fixtures, refreshed samples and pinned SQLite comparison</strong></summary>
+
 ## Earlier object-publication fixture
 
 The release repeat after the peer read fix
@@ -1043,6 +1186,11 @@ need to measure publication I/O and evaluate Cellule's follower durability
 path before expecting local SQLite write latency from this RustFS fixture. The
 [follower durability design](follower-durability.md) lists the BeyondDB
 integration and recovery gates required before that mode can be benchmarked.
+
+</details>
+
+<details>
+<summary><strong>Request stages and local-node release experiments</strong></summary>
 
 ## What a request waits for
 
@@ -1137,6 +1285,11 @@ The pinned ExtendDB `BatchWriteItem` handler awaits each item mutation in a requ
 
 Temporary stage timings on a separate instrumented fixture put typical credential, IAM, table record, and data Cell reads around 3–4 ms each, while each route traversal took around 6–7 ms. The requests perform several of these operations in sequence. The instrumented write fixture differed materially from the clean fixture, so its write timings are not a publication-cost estimate. A temporary S3 proxy disrupted publication and its counts were discarded.
 
+</details>
+
+<details>
+<summary><strong>Diagnostic counters, timing scopes and durability acknowledgements</strong></summary>
+
 ## Observe runtime costs and durability acknowledgements
 
 For a diagnostic run, add an absolute path to the server's JSON configuration:
@@ -1200,6 +1353,11 @@ change in `total_us` by the change in `count` to estimate a phase's mean duratio
 Phases can overlap and cover different events; do not sum them into SDK latency.
 Use the signed SDK harness for end-to-end latency and foreground errors.
 
+</details>
+
+<details>
+<summary><strong>Earlier reproduction commands and result interpretation</strong></summary>
+
 ## Run a repeatable point-operation sample
 
 > The commands in this recorded section reproduce the earlier experiment.
@@ -1248,3 +1406,5 @@ The current [harness](../scripts/bench.py) sorts **successful** request duration
 Short, closed-loop runs are useful for comparing code changes under the *same* fixture. They are not a peak TPS rating. Report at least the build profile and Git revision; server and client CPU; object-store latency and request counts; table partitions; item size and key distribution; Streams/index settings; client concurrency; errors; p99; and recovery after owner loss. Test hot keys separately from evenly spread keys. Run sustained mixed read/write load, table creation, splits, transactions, and restarts before using a result for capacity planning. A healthy `/health` response alone does not prove that background work is keeping up.
 
 Do not use a debug build or a node reporting mailbox exhaustion to set a capacity target. Fix readiness and background-work errors before comparing throughput.
+
+</details>
