@@ -23,6 +23,10 @@ allocation above is 3 GiB, rather than 3 decimal GB. Guest CPU count and
 `MemTotal` include platform details and are not the allocation proof. See the
 [platform limits](https://developers.cloudflare.com/containers/platform/limits/).
 
+The follow-up [API bottleneck investigation](cloudflare-bottlenecks.md) isolates
+R2 latency, metadata overhead and transaction phase costs, with diagnostic
+measurements and a prioritized improvement plan.
+
 ## Throughput and response latency
 
 Each API runs in its own closed-loop window. The reference sweep uses eight
