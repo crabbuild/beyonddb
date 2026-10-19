@@ -1,13 +1,13 @@
 # Configurable local benchmark: nodes and table cells
 
-`scripts/perf30` supports `--nodes N --cells-per-node C` on `setup.py init`.
+`scripts/perf` supports `--nodes N --cells-per-node C` on `setup.py init`.
 The total table range count is `N * C`, between **2 and 256**, matching the
 server's bootstrap limit. Both values must be positive. The defaults remain
-three nodes and ten data cells per node; the directory, container and table
-names retain `perf30` for compatibility with the original fixture.
+three nodes and ten data cells per node. Container, VM and table names retain
+`perf30` for compatibility with the original fixture.
 
 ```sh
-python3 scripts/perf30/setup.py init --run-dir /path/to/fresh-run \
+python3 scripts/perf/setup.py init --run-dir /path/to/fresh-run \
   --nodes 4 --cells-per-node 8
 ```
 
@@ -113,7 +113,7 @@ stop after three errors. Failed windows are not healthy capacity measurements.
 
 ## Placement and correctness
 
-`scripts/perf30/control.py` is a fixture client for the pinned **Cellar 0.1.0**
+`scripts/perf/control.py` is a fixture client for the pinned **Cellar 0.1.0**
 private query and management protocols. It authenticates every connection with
 the fixture's private peer key. It never edits authority records or SQLite
 files. All measured operations use ordinary signed boto3 requests.
@@ -179,7 +179,7 @@ For a Linux build on macOS, stage the tracked source under the shared Workspace
 volume, mount it read-only into the pinned Rust 1.98.1 Bookworm container, and
 run `cargo build --release --locked --bin beyonddb`. Keep the build process
 stopped throughout measurement. The runtime and RustFS image digests are pinned
-in `scripts/perf30/setup.py`.
+in `scripts/perf/setup.py`.
 
 Create three separate filesystems in the dedicated VM. Each image is
 5,368,709,120 bytes; ext4 metadata reduces usable application space. Sparse
@@ -207,16 +207,16 @@ measurement run used boto3 1.43.114, botocore 1.43.114 and blake3 1.0.8.
 
 ```sh
 python3 -m venv benchmarks/perf30-venv
-benchmarks/perf30-venv/bin/pip install -r scripts/perf30/requirements.txt
+benchmarks/perf30-venv/bin/pip install -r scripts/perf/requirements.txt
 
 PERF_PY="$PWD/benchmarks/perf30-venv/bin/python"
 PERF_RUN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-run
 PERF_BIN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-linux/release/beyonddb
 PERF_OUT="$PWD/benchmarks/2026-10-18-three-node-30-cell"
 
-"$PERF_PY" scripts/perf30/setup.py init --run-dir "$PERF_RUN" \
+"$PERF_PY" scripts/perf/setup.py init --run-dir "$PERF_RUN" \
   --nodes "$PERF_NODES" --cells-per-node "$PERF_CELLS_PER_NODE"
-"$PERF_PY" scripts/perf30/setup.py store --run-dir "$PERF_RUN"
+"$PERF_PY" scripts/perf/setup.py store --run-dir "$PERF_RUN"
 ```
 
 The store action creates bucket `beyonddb-perf30` using the generated credentials.
@@ -225,15 +225,15 @@ remaining nodes. Public endpoints start at `18001`; peer ports start at `19001`
 and skip `19100`, which belongs to the local object store.
 
 ```sh
-"$PERF_PY" scripts/perf30/setup.py node --node 1 --bootstrap \
+"$PERF_PY" scripts/perf/setup.py node --node 1 --bootstrap \
   --run-dir "$PERF_RUN" --binary "$PERF_BIN"
 for ((i=2; i<=PERF_NODES; i++)); do
-  "$PERF_PY" scripts/perf30/setup.py node --node "$i" \
+  "$PERF_PY" scripts/perf/setup.py node --node "$i" \
     --run-dir "$PERF_RUN" --binary "$PERF_BIN"
 done
 
-"$PERF_PY" scripts/perf30/bench.py prepare --run-dir "$PERF_RUN" --output "$PERF_OUT"
-"$PERF_PY" scripts/perf30/bench.py measure --run-dir "$PERF_RUN" --output "$PERF_OUT" \
+"$PERF_PY" scripts/perf/bench.py prepare --run-dir "$PERF_RUN" --output "$PERF_OUT"
+"$PERF_PY" scripts/perf/bench.py measure --run-dir "$PERF_RUN" --output "$PERF_OUT" \
   --operations transact_write transact_get put get query \
   --clients 1 8 30 60 --seconds 30 --warmup 5 --label main
 ```
@@ -249,7 +249,7 @@ Stop the owned nodes before stopping their object store. Preserve the data and
 raw reports for inspection:
 
 ```sh
-"$PERF_PY" scripts/perf30/setup.py stop --run-dir "$PERF_RUN"
+"$PERF_PY" scripts/perf/setup.py stop --run-dir "$PERF_RUN"
 ```
 
 ## Interpret the report
@@ -272,10 +272,10 @@ The report keeps failed cases and labels short-sample tail estimates. Plotting
 is optional and runs after measurement:
 
 ```sh
-python3 scripts/perf30/report.py \
+python3 scripts/perf/report.py \
   --input "$PERF_OUT/results-main.json" --output "$PERF_OUT" --summary-clients 8
-"$PERF_PY" -m pip install -r scripts/perf30/requirements-plot.txt
-"$PERF_PY" scripts/perf30/plot.py \
+"$PERF_PY" -m pip install -r scripts/perf/requirements-plot.txt
+"$PERF_PY" scripts/perf/plot.py \
   --input "$PERF_OUT/results-main.json" --output "$PERF_OUT"
 ```
 
@@ -294,5 +294,5 @@ environment; they validate topology limits, bootstrap key boundaries, placement,
 cross-node transactions, coverage and report compatibility without starting a VM:
 
 ```sh
-"$PERF_PY" -m unittest discover -s scripts/perf30 -p 'test_*.py'
+"$PERF_PY" -m unittest discover -s scripts/perf -p 'test_*.py'
 ```
