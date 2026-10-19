@@ -2,9 +2,8 @@
 
 > **Historical Cellule baseline:** this page records the earlier host and its
 > qualification. The current server embeds Cellar, pinned to the crates.io
-> `cellar-main =0.1.0` release. Read [Cellar migration status](../CELLAR_MIGRATION.md)
-> for current evidence and open gates, and [the server guide](cellar-server.md)
-> for current startup and deployment behavior.
+> `cellar-main =0.1.0` release. Read [the server guide](cellar-server.md)
+> for current startup, deployment behavior and qualification boundaries.
 
 This is the detailed engineering and qualification record for BeyondDB. It explains what each path does, which tests exercise it, and which claims remain open. Start with the [API coverage table](api.md) for a workload decision, the [architecture guide](architecture.md) for Cell ownership, the [user guide](user-guide.md) for requests, or the [deployment guide](deployment.md) for a local node. Run commands on this page from the repository root. Some historical results used earlier dependency pins; check [Cargo.toml](../Cargo.toml) for the current revisions.
 
@@ -729,8 +728,8 @@ earlier binaries is unqualified.
 The descriptions below retain historical Cellule fixture details. The unported
 `elastic_cells` and `peer_network` targets were removed on 2026-10-18 at the
 user's request; [their source and coverage inventory](retired-cellule-tests.md)
-records what is no longer gated. Current native Cellar results are recorded in
-[the migration report](../CELLAR_MIGRATION.md).
+records what is no longer gated. Current native Cellar fixtures are described in
+[the server guide](cellar-server.md#qualification-still-required).
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,

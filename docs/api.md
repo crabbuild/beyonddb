@@ -1,6 +1,7 @@
 # Check DynamoDB API coverage
 
-Cellar qualification is tracked in [the migration record](../CELLAR_MIGRATION.md).
+See the [server guide](cellar-server.md#qualification-still-required) for current
+Cellar qualification boundaries.
 The detailed coverage labels below record the earlier Cellule fixtures. Each
 path needs equivalent Cellar evidence before those labels apply to this branch.
 

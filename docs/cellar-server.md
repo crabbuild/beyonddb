@@ -357,8 +357,8 @@ SHA-256-verified executables with normal parallelism, zero failed/ignored. This
 includes all native discovery, creation, deletion, reclamation and admission
 ports and the stale-owner/competing-claim regressions. All nine explicitly
 executed RustFS process cases also pass on the rebuilt server, zero failed/ignored,
-with its SHA-256 unchanged throughout the run. See the current fingerprint and qualification boundaries
-in [migration evidence](../CELLAR_MIGRATION.md).
+with its SHA-256 unchanged throughout the run. Current dependency pins are recorded
+in [Cargo.toml](../Cargo.toml).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. The caller/provider faults qualify their stated local contracts;
 they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the
