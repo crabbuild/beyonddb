@@ -97,11 +97,14 @@ def prepare(control, output):
         manifest["ranges"].append({"ordinal": ordinal, "node": topology.owner(ordinal),
                                     "partition": partition.hex(), "scope": scope})
         print(f"Warmed range {ordinal:02d} on {topology.node_names[topology.owner(ordinal)]}", flush=True)
+    save(output / "table-plan.json", manifest)
     control.sdk().create_table(TableName=TABLE, BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"},
                               {"AttributeName": "sk", "AttributeType": "N"}],
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"},
                    {"AttributeName": "sk", "KeyType": "RANGE"}])
+    manifest["creation_returned"] = True
+    save(output / "table-plan.json", manifest)
     clients = [control.sdk(i) for i in topology.indices]
     for row in manifest["ranges"]:
         _, state = control.query(row["node"], DATA_NS, bytes.fromhex(row["partition"]), 4, None)

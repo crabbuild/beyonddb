@@ -46,7 +46,7 @@ def anchors(text):
 
 def main():
     paths = sorted([ROOT / 'README.md', ROOT / 'AGENTS.md', *ROOT.glob('docs/**/*.md'),
-                    *ROOT.glob('crates/*/README.md')])
+                    *ROOT.glob('crates/*/README.md'), *ROOT.glob('deploy/**/*.md')])
     errors, counts = [], Counter()
     for path in paths:
         relative = path.relative_to(ROOT)

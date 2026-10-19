@@ -18,7 +18,7 @@ below to evaluate a deployment; these guides do not establish a production SLA.
 | Send signed requests | [AWS CLI guide](user-guide.md) |
 | Check an operation or option | [API coverage](api.md) |
 | Inspect failures and operational limits | [Operations](operations.md) |
-| Measure a workload | [Performance](performance.md) · [Local benchmark](local-benchmark.md) |
+| Measure a workload | [Performance](performance.md) · [Local benchmark](local-benchmark.md) · [Cloudflare + R2](cloudflare-benchmark.md) |
 
 ## Design and evidence
 
