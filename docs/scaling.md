@@ -1,9 +1,27 @@
 # BeyondDB elastic Cell topology
 
-The Cellar migration now requires ordered `(PK, SK)` ranges and multiple data
+## Current Cellar reference
+
+The current server uses ordered ranges, defaulting to four initial cells per
+table (2–256 supported). `auto` and `partitioned` use the configured multiple
+ranges; `single` is rejected. Native Cellar owns physical placement and balancing.
+
+The original capacity model, controller boundaries, split/recovery mechanisms,
+acceptance gates and measured regressions remain below. Metadata/coordinator
+cells count against `max_active_cells`; old JSON resource knobs are not accepted.
+See [server configuration](cellar-server.md#configuration) and the
+[current local result](local-benchmark.md) before applying any sizing advice.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current server uses ordered multi-cell tables and native Cellar placement. Hash layouts, one-cell creation, application-owned placement loops and old resource settings in the recorded sections describe earlier revisions, not supported deployment options. The target capacity and acceptance criteria remain design goals.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/scaling.md).
+
+The Cellar contract requires ordered `(PK, SK)` ranges and multiple data
 cells for every table. See [ordered cell partitioning](ordered-cell-partitioning.md)
 for the new contract and delivery gates. The HASH routing and optional single-cell
-models below describe the existing Cellule server, not the intended Cellar layout.
+models in the recorded sections describe the earlier runtime, not the current
+Cellar layout.
 
 ## At a glance
 
@@ -36,7 +54,9 @@ evidence.
 Later sections retain the historical qualification record for their
 stated revisions.
 
-## Current status
+<a id="current-status"></a>
+
+## Recorded status
 
 Current base/GSI routing uses directory leaves. The historical qualification
 sections below describe the revisions on which they ran, including retired
@@ -51,7 +71,12 @@ throughput, and index-owner fleet recovery remain open scale gates. See
 
 ## Choose a table's Cell model
 
-Choose placement when you create a table with the `beyonddb:cell-model` tag. This BeyondDB extension uses the standard DynamoDB `CreateTable.Tags` field, so AWS CLI and SDK clients need no custom request format.
+> **Historical selector policy:** The table and sizing analysis below record the
+> earlier one-cell/hash layout. Current Cellar tables start with 2–256 ordered
+> ranges; `single` is rejected and `auto` no longer means one initial cell.
+> Use [current configuration](cellar-server.md#configuration) for new deployments.
+
+The earlier server selected placement at creation with the `beyonddb:cell-model` tag. This BeyondDB extension uses the standard DynamoDB `CreateTable.Tags` field, so AWS CLI and SDK clients need no custom request format.
 
 | Value | Initial base data Cells | Base splitting | Use when |
 | --- | ---: | --- | --- |
@@ -76,7 +101,11 @@ The choice persists in the table generation. Changing or removing the tag later 
 
 Table size and write load both matter. A smaller table with heavy writes may need several Cells. One Cell serializes mutations and remains subject to node admission, disk budgets, and recovery costs. `single` suppresses splitting; it does not remove resource limits. Hash-range splitting also does not solve every hot partition-key workload; see the delivery gates below.
 
-Start with `auto` when you want one base data Cell today and room to split later. Choose `single` when fixed placement matters and you can keep the complete Cell within its resource budget. Choose `partitioned` when measured write load needs several independent owners from the beginning. Labels such as “medium” or “large” do not determine placement: both stored bytes and write demand matter.
+The earlier recommendation used `auto` for one-cell growth, `single` for fixed
+placement within a cell budget, and `partitioned` for independent initial owners.
+Those selector semantics are historical. The sizing rationale remains: stored
+bytes and write demand both matter; labels such as “medium” or “large” do not
+determine placement. Current tables always start with multiple ordered ranges.
 
 **Current sizing limit:** the compiled base data Cell has a **512 MiB SQLite database budget** and a **64 MiB capture budget**. The database budget includes items, local indexes, stream records, transaction state and other Cell metadata; usable item storage is smaller. The creation tag does not raise these limits. A table that will exceed this budget needs `auto` or `partitioned` in the current release. Configurable larger single-Cell budgets and live placement conversion are unfinished.
 
@@ -735,7 +764,7 @@ cached table identities. No dependency patch or new setting is required.
 | Peer proof | Signed SDK recreation with the account on another owner, followed by existing transaction recovery and restart assertions. |
 | Baseline | The earlier draft retained deleted data/index owners and cached old table IDs. Current main includes deleted-table reclamation but retains sealed split sources. |
 
-**Is this the best fix?** Reclaim residency through the runtime's existing
+Reclaim residency through the runtime's existing
 fenced release contract, using immutable table-generation absence as product
 proof. Increasing the slot limit only delays exhaustion. Deleting Cell history
 would break recovery, while a new eviction mechanism would duplicate runtime
@@ -806,7 +835,7 @@ not HTTP bodies, caller-owned typed inputs, transport codecs, or result memory.
 | Regressions | Full-mailbox Describe, overlapping calls and FIFO, shared-budget cleanup, wait expiry, exact pending-mutation evidence; signed SDK burst and restart. |
 | Baseline | `origin/main` has no BeyondDB subtree; its CellClient immediately returns owner capacity errors. The preceding draft failed 47 of 50 writes. |
 
-**Is this the best fix?** The encoded client boundary owns reusable waiting,
+The encoded client boundary owns reusable waiting,
 while HTTP composition owns its budget. Matching each transport operation to
 its actual runtime resource avoids both unbounded buffering and an unrelated
 metadata queue. About 280 production lines provide this opt-in mechanism;
@@ -898,7 +927,7 @@ and log closure finish; no new lifecycle owner is added.
 | Regression | `stalled_lease_refresh_yields_to_shutdown_and_fencing` fails before the change and passes after it. Ordinary successful renewal and current-deadline preservation also pass. |
 | Baseline | Main has no BeyondDB. The preceding draft awaited refresh directly and registered renewal as ordinary work. |
 
-**Is this the best fix?** One cancellation boundary reuses the existing guard
+One cancellation boundary reuses the existing guard
 and host drain phase. It removes duplicated cancellation branches without
 changing the lease, retry interval, admission budget, or decision authority.
 This addresses shutdown liveness; it does not fix sustained write throughput.
@@ -963,7 +992,7 @@ exercise that boundary.
 | Siblings | Coordinator operations/abort reasons and participant staged images share `transaction_payload`; capacity claims use the resulting chunk count. Item storage and GSI outboxes keep their independent bounds. |
 | Baseline | Main has no BeyondDB. The preceding draft used 256-KiB upload and payload pieces; the reduced escaped-input workload exceeded their fixed lifetime. |
 
-**Is this the best fix?** Keep bounded SQL and durable phase ownership, but use
+Keep bounded SQL and durable phase ownership, but use
 more of the existing call budget for data. One shared chunk bound prevents the
 recovery reader and stored-payload writer from disagreeing. This improves the
 measured transfer case; it is not proof against arbitrary object-store latency,
@@ -1902,7 +1931,7 @@ admission; the initial
 regression passed after adding reclamation. Deleted-table and existing split
 regressions cover the shared admission callers.
 
-**Is this the best fix?** Extend the existing product proof and runtime release
+Extend the existing product proof and runtime release
 boundary. No new eviction mechanism, schema, dependency, or capacity setting is
 needed. Discovery is bounded by local residency; metadata sharding and distributed
 rebalancing remain separate scaling gates. This increment adds about 80 net
@@ -1966,7 +1995,7 @@ Evidence map:
 | Baseline | Main and the previous PR head consume base intent at CommitSplit and cannot rediscover a published unopened child. |
 | SDK regression | Inject loss before the first or second child opens, release all participants/account, resume from a fresh sweep, preserve an intervening write, reject a nested plan until completion, then delete a table with a later pending plan. |
 
-**Is this the best fix?** Retain discoverable intent through the last required
+Retain discoverable intent through the last required
 cross-Cell side effect. This follows the existing GSI protocol and avoids
 heuristic scans of historical sources or opening children without verifying
 imports. Split metadata handlers now live beside their state queries, bringing

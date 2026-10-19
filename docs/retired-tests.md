@@ -1,6 +1,6 @@
-# Retired Cellule test targets
+# Retired runtime test coverage
 
-At the user's request on 2026-10-18, the unported `elastic_cells` and
+Historical record: on 2026-10-18, the unported Cellule-runtime `elastic_cells` and
 `peer_network` targets and their exclusive fixture modules were removed.
 Their CI invocations were removed too. The general all-target build and strict
 Clippy gates remain enabled. Passing native Cellar tests and their shared
@@ -9,8 +9,8 @@ helpers remain registered.
 This is removal of unqualified coverage, not evidence that these contracts now
 pass on Cellar. In particular, the physical SQLite FULL case and the remaining
 legacy placement, admission, hydration, rebalance and recovery faults are no
-longer release gates. Existing native and process coverage is recorded in
-[the migration report](../CELLAR_MIGRATION.md).
+longer release gates. Existing native and process coverage is described in
+[the server guide](cellar-server.md#qualification-still-required).
 
 The complete retired source is available at commit
 `3b03ebb520cc0e08b6ea48bb6beffd339d973fba`. For example:

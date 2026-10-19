@@ -1,5 +1,43 @@
 # Measure BeyondDB performance
 
+## Current Cellar reference
+
+## Current local result
+
+The [local benchmark](local-benchmark.md) records source `674e377`, Cellar `=0.1.0`,
+three nodes at 1 vCPU / 3 GiB / 5 GiB each, and one table with ten data cells per
+node. The separate object store and client are outside those node budgets.
+
+| API at eight clients | Successful requests/s | p99 ms |
+| --- | ---: | ---: |
+| GetItem | 293.8 | 70.9 |
+| Query | 150.2 | 335.7 |
+| PutItem | 204.0 | 214.0 |
+| TransactGetItems | 16.5 | 1193.0 |
+| TransactWriteItems | 23.7 | 1002.0 |
+
+![Measured throughput and p99; failed windows are marked](../diagram/perf-throughput-latency.svg)
+
+All 20 windows covered all 30 data cells. The sweep retained 65,276 successes,
+101 measured errors and 16 warmup errors; transaction APIs failed at 30/60 clients.
+Internal shared-account admission refusals were recorded separately from public
+errors. At eight clients, transaction p99 has fewer than 1,000 successful samples.
+
+These short closed-loop windows share VM/storage and evolving state. They do not
+measure independent-machine fleet capacity or an open-loop latency SLO. Earlier
+failed trials and raw artifacts remain local; the guide records their limits.
+
+For new experiments, use [scripts/perf](../scripts/perf) and the
+[current reproduction guide](local-benchmark.md). The full optimization rationale,
+release comparisons, failure counts, hardware conditions and original
+reproduction steps are retained below. No earlier runtime sample
+is a current Cellar capacity or SQLite-parity claim.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current Cellar measurement is above. The optimization analyses and release comparisons below retain their original runtime, revision, durability, hardware and failures. In these records, “current”, “latest” and “now” mean current at that recorded revision, not the present server. Do not reuse their old configuration or single-cell creation instructions.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/performance.md).
+
 The current Cellar `=0.1.0` three-node characterization is documented in
 [the local benchmark](local-benchmark.md). It verifies ten table
 data cells per node under 1 vCPU / 3 GiB / 5 GiB data limits, and records both
@@ -74,7 +112,7 @@ Cross-Cell transactions add a durable coordinator admission, preparation, decisi
 | One durable publication per independent mutation | Coalesce mutations targeting the same Cell. | Individual conditions, results, stream records and durable acknowledgements. |
 | Transaction prepare publications | Coalesce independent participant prepares targeting the same Cell. | Separate transaction identities, locks and coordinator decisions; atomic rollback of a rejected batch. |
 | Fresh coordinator admission | Reuse admitted owners and coalesce discovery/catalog work. | Account-scoped token replay and mismatch checks, owner fencing and recovery discovery. |
-| Several participants for a small table | Start with one data Cell using `single` or `auto`. | Disk and write budgets, index placement and recovery time. |
+| Several participants for a request | Group eligible operations that naturally route to one participant; current tables still start with multiple ranges. | Disk/write budgets, LSI locality and recovery time. Historical single-cell creation is not a current option. |
 | Follower/object I/O | Measure and reduce transport, authority lookup and storage latency. | The chosen durability contract and restart survival. |
 
 These changes address different parts of the request. A single data Cell can remove participant fan-out, but tokenized transaction writes still have several serial durability barriers. Lower SQL execution time alone cannot remove those barriers.
@@ -161,7 +199,9 @@ A large image returns an explicit `WideRequired` marker, then uses the existing 
 
 This reduces reserved reply memory for small items. The HTTP peer receiver also retains its own request buffer, so total in-flight memory exceeds the 64 KiB reply alone. End-to-end throughput, large-item latency and SQLite parity require separate release measurements. Existing query opcodes and persisted transaction/image formats remain available; upgrades of roots created by older application releases still need separate qualification.
 
-## Latest release verification
+<a id="latest-release-verification"></a>
+
+## Recorded release verification
 
 ### Coalesced prepares: release qualification fails
 
@@ -1079,7 +1119,11 @@ The route-cache lock path is now synchronous: the process-local route and accoun
 
 The node now exposes `max_active_cells` instead of fixing the runtime admission ceiling at 64. A clean 64-partition table could be provisioned with `max_active_cells: 128`, whereas the previous ceiling left the table in `CREATING` after capacity exhaustion. On the 64-partition fixture, random-key `PutItem` reached 20.4/48.3/58.8 requests/s at 1/8/32 clients and fell to 46.8 at 64 clients; `UpdateItem` reached 14.3/14.1/54.8 requests/s at 1/8/32 clients, and the 64-client run returned five `ServiceUnavailable` errors. More resident Cells remove the admission ceiling but do not remove the 16-worker and durable-publication bottlenecks, so this is a capacity-control improvement rather than evidence of SQLite-parity throughput.
 
-The serving binary now accepts an optional `sql_workers` override. Without it, Cellule derives the worker count from host parallelism and caps it at sixteen; setting it explicitly is useful on a multi-partition node when the host has spare CPU and memory. Workers own their SQLite connections and improve scheduling between independent Cells, but each Cell still executes commands in order and publishes one durable root at a time. This knob therefore addresses partition fan-out and worker undersizing, not the per-Cell object-publication ceiling. Record the chosen value with benchmark results and verify resident memory before increasing it.
+**Historical configuration:** `sql_workers` was accepted by the recorded
+server; it is rejected by the current executable. The original worker-sizing
+analysis follows; use [current fields](cellar-server.md#configuration).
+
+The recorded serving binary accepted an optional `sql_workers` override. Without it, Cellule derives the worker count from host parallelism and caps it at sixteen; setting it explicitly is useful on a multi-partition node when the host has spare CPU and memory. Workers own their SQLite connections and improve scheduling between independent Cells, but each Cell still executes commands in order and publishes one durable root at a time. This knob therefore addresses partition fan-out and worker undersizing, not the per-Cell object-publication ceiling. Record the chosen value with benchmark results and verify resident memory before increasing it.
 
 A matched exploratory comparison on fresh four-partition RustFS fixtures (256-byte items, signed boto3, five-second cases) did not show a consistent write gain from forcing sixteen workers over the host-derived twelve: `PutItem` was 29.4/79.5 versus 38.2/62.1 requests/s at 1/8 clients, `UpdateItem` was 35.4/41.0 versus 28.8/75.7, and `BatchWriteItem` was 9.9/15.9 versus 13.7/26.0. The fixtures are too short to establish a capacity target; retain the override for measured multi-Cell workloads, not as a general single-Cell write optimization.
 
@@ -1157,6 +1201,9 @@ Phases can overlap and cover different events; do not sum them into SDK latency.
 Use the signed SDK harness for end-to-end latency and foreground errors.
 
 ## Run a repeatable point-operation sample
+
+> The commands in this recorded section reproduce the earlier experiment.
+> Use [the current benchmark tooling](local-benchmark.md#reproduce) for Cellar runs.
 
 Build an optimized server with `cargo build --release`, start it using [the deployment guide](deployment.md), and create a dedicated table. The commands below use test credentials already configured for that server.
 

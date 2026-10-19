@@ -1,5 +1,22 @@
 # Ordered table ranges on Cellar
 
+## Current Cellar reference
+
+The current Cellar executable uses encoding-v1 ordered ranges with 2–256 initial
+cells, default four. The complete original ordering rationale, directory and
+LSI invariants, split/replay analysis and acceptance work packages remain below.
+
+![Logical ordered ranges mapped to physical owners](../diagram/operations/ordered-ranges.svg)
+
+The delivery-plan sections record the implementation sequence and acceptance
+criteria. A work package is not proof of completion; consult current source and
+[registered targets](implementation-status.md#current-verified-slice).
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current ordered-key contract is above. The complete original encoding rationale, directory/split invariants, work packages and acceptance criteria follow. Delivery instructions and unresolved items reflect the design revision; use current source and the test matrix to determine completion.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/ordered-cell-partitioning.md).
+
 Status: ordered routing is implemented in the Cellar-backed executable and
 passes the local signed SDK/process-restart fixture. The root serving-router
 fixture puts one PK in three actual cells, queries across them, splits the

@@ -1,5 +1,44 @@
 # Cross-Cell transaction protocol
 
+## Current Cellar reference
+
+BeyondDB uses durable prepare/decision/resolution records and immutable participant
+identities. The original protocol explanations, safety arguments, capacity
+analysis, regression cases and reproduction steps remain below.
+
+| Current Cellar boundary | Contract |
+| --- | --- |
+| Public table layout | Multiple ordered data cells; `single` creation is rejected |
+| Local fast paths | Eligible operations can still resolve to one participant |
+| Retry | Submitted errors are ambiguous; preserve mutation/token identity |
+| Decision | Durable COMMIT/ABORT and idempotent participant resolution |
+| Recovery | Resume immutable work; a fresh BEGIN is not aborted merely because startup ran |
+
+## Retry and capacity rules
+
+| Observation | What it proves |
+| --- | --- |
+| Explicit caller-side refusal before SDK submission | That attempt was not started |
+| Durable rejected receipt | The recorded rejection for that mutation |
+| Complete committed receipt | Result covered by the configured durability gate |
+| HTTP error, timeout, lost body or driver cancellation | Outcome may be ambiguous after submission |
+
+Retain the original mutation/client-token identity and request content when
+resolving uncertainty. Do not turn a submitted error into a fresh mutation or
+assume it rolled back. Token mismatch must reject changed content; retries may
+not reroute an existing decision to a different participant set.
+
+Prepare budgets include staged data, index/stream intent and physical apply
+reservations. Encoded request size alone does not bound publication or memory
+cost. Multipart uploads and replies are bounded separately. Coalescing must
+preserve each caller's identity, admission and result; current batching limits
+are in [prepare_batch.rs](../src/backend/prepare_batch.rs).
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The ordered range adapter and Cellar SDK are current. Runtime-specific admission mechanics, old transport tests, numerical costs and pass counts below belong to their recorded revisions; they are not new Cellar qualification. The original protocol invariants and failure analyses remain available in full.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/cross-cell-transactions.md).
+
 ## At a glance
 
 | Boundary | Contract | Present limit |
@@ -82,7 +121,9 @@ competing drivers, and lost replies.
 
 ### One Cell and multiple Cell requests
 
-A table created with `beyonddb:cell-model=single` keeps its base items in one dedicated Cell. Small transaction reads whose operations all resolve to that Cell use one atomic query. Cross-table requests and reads requiring saved images can still need coordination. GSIs remain asynchronous and separate.
+The recorded `beyonddb:cell-model=single` layout used one base Cell; that
+creation option is rejected by the current server. A request can still route
+all its keys to one participant in a multi-range table. Small transaction reads whose operations all resolve to that Cell use one atomic query. Cross-table requests and reads requiring saved images can still need coordination. GSIs remain asynchronous and separate.
 
 Two write keys in the same Cell share one prepare and one resolution. Without a
 client token, a write whose operations all route to one Cell uses one atomic
@@ -166,7 +207,7 @@ decision evidence tied to the transaction, participant set, and fenced authority
 | Admission | A 100-operation participant reserves about 278 MiB at 4-KiB pages before index/journal claims and payload allowance | Qualify the allocation bound and contention cost; add WAL, disk, and heap admission. Coordinator progress also needs capacity to record decisions and receipts. Never reclaim an unresolved participant's claim on timeout. |
 | Latency | Up to eight prepares and four terminal resolutions overlap. Prepare receipts and COMMIT share one coordinator command; provisioning, payload uploads, resolution receipts, and read-result cleanup add work. | Measure cold admission separately from warm phase execution, by participant count. The combined decision removes one publication; end-to-end SQLite parity still requires measurement and further work. |
 | Fleet recovery | 4,096 fixed coordinator shards per account; the worker selects one shard per 250-ms tick | Integrate placement and recovery scheduling with bounded concurrency and backlog metrics. A nominal pass over 4,096 known shards already takes about 17 minutes before slow work; this is arithmetic, not measured RTO. |
-| Data distribution | HASH-key siblings share one Cell with a finite database budget | Qualify skew, hot keys, split headroom, and oversized item collections. More Cells do not distribute one key's lock or split a single HASH group in the current layout. |
+| Data distribution | Current ordered ranges can divide a PK by SK when no LSI requires collection locality | Qualify skew, hot keys, split headroom and large collections. Historical HASH-only fixtures do not establish ordered-layout coverage. |
 | API completion | ALL-projection LSIs share participant resolution; initial GSIs use a durable asynchronous journal; committed writes append stream records locally. Non-ALL LSIs, online GSI lifecycle, Streams policy transitions, and aggregate evaluated Update-size semantics remain incomplete or unqualified. | Complete the engine read contract, index lifecycle, and Streams qualification; compare size and error semantics with AWS before claiming compatibility. |
 
 With 10,000 data Cells at a 256-MiB live-data split target, the arithmetic storage
@@ -193,7 +234,9 @@ it was not rerun for this documentation update.
 Neither run qualifies 10,000 active Cells or multi-TB storage. Detailed
 failure reproductions follow below.
 
-## Contract and current boundary
+<a id="contract-and-current-boundary"></a>
+
+## Contract and recorded boundary
 
 This document describes the implemented write and read protocols and the
 remaining recovery and scale qualification work. Public `TransactWriteItems`
@@ -276,14 +319,16 @@ Coordinator B: reserve -> authority CAS -> bootstrap + publish -> register B -> 
 Each request waits for its own published coordinator root and durable account
 registration before BEGIN. Concurrency does not change lease fences, authority
 CAS, initial publication, participant prepare, or coordinator decision rules.
-The [SDK regression](../tests/peer_network/residency/coordinator_admission.rs)
+The [SDK regression](https://github.com/crabbuild/beyonddb/blob/3b03ebb520cc0e08b6ea48bb6beffd339d973fba/tests/peer_network/residency/coordinator_admission.rs)
 checks overlapping distinct Cells, serialized token replay, last-slot admission,
 cancellation, durable registration, and restoration.
 
 On startup, the server pages that account-owned registry,
 recovers idle shards and shards whose owner lease expired, including when the
-replacement uses a different endpoint, then aborts unfinished
-`BEGIN` records and completes terminal decisions before accepting traffic.
+replacement uses a different endpoint. The recorded startup policy aborted
+unfinished `BEGIN` records before accepting traffic. **Current Cellar startup
+resumes fresh BEGINs through immutable coordinator input; startup alone does not
+authorize an abort.** Terminal decisions retain idempotent resolution.
 
 It first reacquires the participants named by those records, including retained
 split sources absent from the current table route. Participant payloads are
@@ -320,7 +365,7 @@ and its [100-item, 4-MiB, ten-minute token limits](https://docs.aws.amazon.com/a
 
 ## Why this protocol
 
-**Is this the best fix for the current architecture?** Reusing the durable
+Reusing the durable
 coordinator and participant state machine is the bounded choice for the
 existing single-writer SQLite Cells. Local commands already atomically stage
 images, locks, and phase records; object-store publication and owner fencing
@@ -1560,7 +1605,7 @@ of which bytes the public API counts.
    bytes, recovery backlog age/drain rate, and owner-replacement time at 1,000
    and 10,000 active Cells with multi-TB data.
 
-**Is this the best fix?** Keep the existing two-phase commit and shared-lock
+Keep the existing two-phase commit and shared-lock
 foundation for the single-writer Cell architecture. Correct its bounded payload
 layout, admission accounting, and recovery lifecycle before optimizing phase
 parallelism. The current evidence supports those mechanisms under tested
@@ -1622,7 +1667,7 @@ historical shards exceed resident capacity without continual reacquisition.
 | Decision | Existing `resume_cross_cell_transaction` drives BEGIN and terminal resolution; COMMIT cannot become ABORT. |
 | Capacity sibling | Foreground coordinator admission still reclaims only proven settled work; discovery skips only a matching empty Idle root. |
 | Tests | Two-owner signed SDK failover, local failed-participant cursor fairness, released read recovery, history exceeding three resident slots, and process restart. |
-| Main | Current `origin/main` has no BeyondDB implementation; this remains a draft feature branch. |
+| Main | At that review, `origin/main` had no BeyondDB implementation and the work was a draft feature branch. |
 
 Verification: the network regression passed in 89.06 seconds after the
 45-second failure-window timeout reproduced the gap. The 19 account/elastic
@@ -1747,7 +1792,7 @@ Streams were unsupported; the current journal and read path are described in
 The SQLite reference backend likewise returns an old image only when requested.
 
 The new Cell input field is required, with all repository callers updated;
-BeyondDB is unpublished and absent from current main, so there is no shipped
+At that review, BeyondDB was unpublished and absent from main, so there was no shipped
 wire format requiring a fallback reader. No dependency or SQL schema changed.
 
 **Is this the best fix here?** Successful result selection belongs in the
@@ -1973,7 +2018,7 @@ The added serialized reason is in the unpublished BeyondDB application.
 | Race and ambiguity | Driver fixture refuses upload before submission, lets another driver commit before a prepare refusal arrives, and loses a published prepare reply with capacity as its nested cause. |
 | Signed SDK | Three real prepared claims in the second data Cell leave too little capacity for another participant. Write and read cancellations report the correct original index; raw participant reads check lock cleanup without invoking public read-triggered recovery, unrelated holders stay prepared, and token reuse succeeds after releasing those holders. Retried values and replay are checked after owner replacement. |
 
-**Is this the best fix?** A participant cannot safely turn every allocation
+A participant cannot safely turn every allocation
 failure into a durable business rejection: that rejection itself needs receipt
 space. The transaction driver already owns the authoritative decision and can
 resolve both previously prepared participants and abort-before-prepare
@@ -2010,7 +2055,7 @@ pages remain content addressed, with digest and tenant identity validation
 unchanged. Local routing and peer routing both use `CellCatalog`, so they inherit
 one fix instead of separate adapters or relaxed validation.
 
-**Is this the best fix?** The catalog is already tenant scoped; its mutable
+The catalog is already tenant scoped; its mutable
 storage authority must carry that scope too. Adding the missing identity to the
 head path fixes the owning boundary. Changing account identities, suppressing
 digest errors, or special-casing credentials would leave the shared invariant
@@ -2100,7 +2145,7 @@ and [SQLite result codes](https://www.sqlite.org/rescode.html#full).
 | Other consumer | Crab HTTP command adapters already preserve `NotStarted(Capacity)` as a Cell error; `app.rs` maps that existing variant to HTTP 429 with retry guidance. No new wire code or consumer branch is required. |
 | Main | BeyondDB is absent from current main; its peer converter treats SQLite failures generically. |
 
-**Is this the best fix?** Classification belongs at the boundaries that know
+Classification belongs at the boundaries that know
 whether command execution was refused. Changing SQLite rollback, inventing a
 new decision authority, or treating every SQLite error as capacity would widen
 the change without proof. The shared peer error converter deliberately remains
@@ -2172,7 +2217,7 @@ retry completes.
 | Admission boundary | The subsequent admission-progress change below lets already-decided work resolve healthy participants after another admission fails. Fenced takeover and startup readiness remain required. A live remote owner is left in place and reached through the peer client. |
 | Previous behavior | Current main has no BeyondDB. The preceding draft returned immediately on the first resolution error; the regression observed the second participant still PREPARED. |
 
-**Is this the best fix?** Keep per-participant completion in one helper and
+Keep per-participant completion in one helper and
 retain the existing decision authority. A failed participant does not invalidate
 another participant's instruction to resolve the already-published decision.
 Continuing that bounded list improves recovery without introducing a second
@@ -2252,7 +2297,7 @@ possible when those authorities are unavailable.
 | Completion | Startup still returns an error during the outage; serving leaves BEGIN undecided and does not prepare its unprepared healthy participant. After restoring reads, both paths finish. A newer write on a resolved participant survives retry. |
 | Baseline | Main has no BeyondDB. The preceding draft exits before healthy resolution when owner admission fails. |
 
-**Is this the best fix?** Keep admission and resolution owned by their existing
+Keep admission and resolution owned by their existing
 layers. Continuing bounded work and preserving errors closes this failure path
 without a new authority, retry service, timeout-based decision, or wire format.
 The per-record startup helper allows error retention across a page while
@@ -2344,7 +2389,7 @@ with the original 16-MiB node budget. The binary defaults to 256 MiB. These test
 establish functional progress under those budgets, not a fleet memory-admission
 guarantee.
 
-**Is this the best fix?** A durable terminal decision permits independent apply.
+A durable terminal decision permits independent apply.
 Bounded futures reuse the existing idempotent resolution and receipt paths,
 including their error handling. Tight receipt limits belong in the application
 descriptor that knows their actual shape. No new worker, decision authority,
@@ -2511,7 +2556,7 @@ development fixtures need reprovisioning. This is not a rolling-upgrade proof.
 | Regression | `tests/elastic_cells/coordinator_checkpoints.rs` commits three tokenized writes, records settled observations, then prepares a new read after one observation. After owner restart, unchanged history must stay Idle without an epoch increase, while the changed shard must be acquired and its BEGIN aborted. Raw participant state proves cleanup before reads can help. A newer write and old-token replay prove lock release and no duplicate apply. |
 | Baseline | Main has no BeyondDB. On `841529fc834`, the new regression fails because an unchanged settled shard's epoch advances from 1 to 2 during startup. |
 
-**Is this the best fix?** Reuse the bounded account discovery registry and
+Reuse the bounded account discovery registry and
 existing recovery client. A separate object-store cache would add a storage and
 retention contract; writing from reclamation would add account-owner routing to
 local capacity admission. One durable representation removes the memory-only

@@ -1,5 +1,9 @@
 # Local secondary index read contract
 
+The current server still admits creation-time `ALL` LSIs only. The detailed
+selection/capacity rationale and proposed shared contract below are retained;
+none of the proposal removes the public creation gate.
+
 ## At a glance
 
 | Projection | CreateTable status | Read behavior |

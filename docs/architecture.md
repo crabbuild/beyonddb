@@ -1,21 +1,17 @@
 # Understand BeyondDB's architecture and durability
 
-For `beyonddb-cellar`, the current runtime is described in
-[the embedded server guide](cellar-server.md), and table ownership follows
-[ordered cell partitioning](ordered-cell-partitioning.md). The Cellule runtime
-details and HASH placement described below record the earlier implementation.
+This page explains how a signed request becomes durable, which Cell owns each kind of state, and how another node recovers that state. BeyondDB uses two pinned projects: ExtendDB owns the DynamoDB protocol and security boundary; Cellar owns fenced execution and durable publication. BeyondDB connects them through Cell schemas, adapters, routing, provisioners, a transaction coordinator, and serving workers. The design does not establish fleet-scale performance.
 
-This page explains how a signed request becomes durable, which Cell owns each kind of state, and how another node recovers that state. BeyondDB uses two pinned projects: ExtendDB owns the DynamoDB protocol and security boundary; Cellule owns fenced execution and durable publication. BeyondDB connects them through Cell schemas, adapters, routing, provisioners, a transaction coordinator, and serving workers. The design does not establish fleet-scale performance.
+![The layers from AWS clients through ExtendDB, BeyondDB, and Cellar to the object store](../diagram/architecture.svg)
 
-![The layers from AWS clients through ExtendDB, BeyondDB, and Cellule to the object store](../diagram/beyonddb-architecture/layers.svg)
-
-The [full-size PNG](../diagram/beyonddb-architecture/layers@2x.png) is useful when a Markdown viewer does not render SVG. Read from top to bottom: ExtendDB validates the request, BeyondDB chooses an owner, and Cellule executes and publishes the result.
+Read the diagram from protocol validation through ordered routing to native
+execution and durability. Every node embeds these layers.
 
 | Term | Meaning in this design |
 | --- | --- |
-| **Cell** | A single-writer, durable unit of state executed by Cellule. |
+| **Cell** | A single-writer, durable unit of state executed by Cellar. |
 | **Owner** | The node currently authorized to execute a Cell. |
-| **Route** | The table generation, hash range, and owner information used to find a Cell. |
+| **Route** | The table generation, ordered interval, cell identity and range epoch used to find a Cell. |
 | **LTX** | The published SQLite change format that lets a new owner restore a Cell. |
 | **Fence** | An authority check that prevents an old owner or route from writing. |
 
@@ -23,61 +19,47 @@ The [full-size PNG](../diagram/beyonddb-architecture/layers@2x.png) is useful wh
 
 The request path separates protocol work from state execution. The Cell types below have different ownership and recovery policies, even when they run on the same node.
 
-```mermaid
-flowchart TB
-    subgraph Ingress["Public request path"]
-      SDK["AWS SDK or CLI"] --> HTTP["ExtendDB HTTP + SigV4"]
-      HTTP --> Engine["ExtendDB validation + operation engine"]
-    end
-    Engine --> Adapter["BeyondDB StorageEngine / CatalogStore"]
-    Adapter --> Peer["Cell client + authenticated peer transport"]
-    subgraph Fleet["Leased BeyondDB nodes"]
-      Peer --> Account["Account Cell: table catalog, policy, TTL settings"]
-      Peer --> Directory["Directory Cells: base and GSI routes"]
-      Peer --> Credential["Credential Cells: encrypted keys"]
-      Peer --> Coordinator["Coordinator Cells: transaction decisions"]
-      Peer --> Data["Data Cells: items, LSIs, journals, streams"]
-      Peer --> GSI["GSI Cells: projected entries"]
-    end
-    Account & Directory & Credential & Coordinator & Data & GSI --> LTX["Cellule SQLite + LTX"]
-    LTX --> ObjectStore["Conditional object store"]
-```
+![Components and ownership: detailed diagram retained from the original guide](../diagram/reference/architecture-1.svg)
 
-The server uses an S3, GCS, or Azure object store and a separate scratch directory for each node session. The object store needs strict create and conditional updates for Cell authority. A public node can forward a signed request to a remote owner over mutual TLS (mTLS); the receiver still checks its authority. Preserve the encryption key file across restarts because it protects stored access secrets.
+Fleet mode configures an S3-compatible bucket with conditional create/update
+semantics. Each node retains its own local data directory. Native peer requests
+are authenticated; peer mTLS is not a JSON option in this executable. Isolate and
+encrypt the private deployment network. Preserve the credential-encryption key
+and peer key with their deployment state. See [deployment](deployment.md).
 
 | State | Authority and atomic boundary |
 | --- | --- |
 | Account metadata and IAM policies | One account Cell command for each account-local mutation. The account still owns the table-name catalog and publication anchors. |
-| Base items and LSIs | One data-range Cell owns a partition-key hash interval. A write, its LSI changes, GSI journal entry, and stream intent share one command. |
+| Base items and LSIs | One data-range Cell owns a full-primary-key ordered interval. A write, its LSI changes, GSI journal entry, and stream intent share one command. |
 | GSIs | Separate range Cells receive journal projections asynchronously and idempotently. Their read view can lag a base write. |
 | Transactions | One durable coordinator records a participant set and COMMIT or ABORT decision. Each account/data participant stores prepare state and resolves that decision idempotently. |
 | Credentials | Key-derived credential Cells store encrypted secrets and session tokens. |
 
 ## Single-item write sequence
 
-The owner commits the base mutation and its dependent records together. The client receives success after Cellule publishes the committed state.
-
-![A signed PutItem moves through validation, routing, one Cell command, and durable publication](../diagram/beyonddb-architecture/durable-write.svg)
+The owner commits the base mutation and its dependent records together. The client receives success after the configured Cellar durability gate. Fleet
+mode defaults to bucket publication; eligible follower proofs can be enabled.
 
 ```mermaid
 sequenceDiagram
-    participant Client as AWS SDK
-    participant HTTP as ExtendDB endpoint
-    participant Route as BeyondDB router
-    participant Owner as Data Cell owner
-    participant Store as Object store
-    Client->>HTTP: Signed PutItem
-    HTTP->>HTTP: SigV4, IAM, validation, expressions
-    HTTP->>Route: StorageEngine.put_item
-    Route->>Owner: Command for table generation and range epoch
-    Owner->>Owner: Check condition and update item, LSI, journal, stream
-    Owner->>Store: Publish LTX and current root
-    Store-->>Owner: Conditional publication succeeds
-    Owner-->>HTTP: Committed result
-    HTTP-->>Client: DynamoDB JSON response
+    participant Client as AWS client
+    participant Front as ExtendDB frontend
+    participant App as BeyondDB adapter
+    participant Cell as Cellar owner
+    participant Proof as Durability provider
+    Client->>Front: Signed PutItem
+    Front->>App: Validated and authorized operation
+    App->>Cell: Scoped command and mutation identity
+    Cell->>Cell: Commit item, result, index and stream intents
+    Cell->>Proof: Establish configured durability proof
+    Proof-->>Cell: Proof covers committed sequence
+    Cell-->>App: Complete gated result and receipt
+    App-->>Front: Operation result
+    Front-->>Client: DynamoDB response
 ```
 
-A rejected command rolls back its SQLite transaction. The router uses the current table generation, range, and owner epoch; the owner rejects stale routes so the router can refresh them. `GetItem`, `Query`, and `Scan` read the owning Cell and respect unresolved transaction intents.
+A rejected command rolls back its application changes and preserves the recorded
+rejection under the command contract. The router uses the current table generation, range, and owner epoch; the owner rejects stale routes so the router can refresh them. `GetItem`, `Query`, and `Scan` read the owning Cell and respect unresolved transaction intents.
 
 ## Cross-Cell transaction sequence
 
@@ -119,15 +101,7 @@ The original coordinator and participant identities survive routing changes. If 
 
 Splitting changes a route only after the source has sealed and both children have copied and verified its contents. Global secondary index (GSI) projection follows a different path: a base write commits a journal entry, then an index worker applies it asynchronously.
 
-```mermaid
-flowchart LR
-    Source["Serving source range"] --> Plan["Durable split plan"]
-    Plan --> Seal["Seal source after intents and journals drain"]
-    Seal --> Copy["Copy and verify two child ranges"]
-    Copy --> Publish["Publish replacement directory route"]
-    Publish --> Open["Open children for serving"]
-    Open --> Retire["Retire source residency when safe"]
-```
+![Range split and GSI projection: detailed diagram retained from the original guide](../diagram/reference/architecture-2.svg)
 
 Split plans are durable and replayable. The source cannot seal while prepared
 transactions or pending GSI projection work would be lost. Directory
@@ -138,14 +112,7 @@ under qualification; see [metadata ownership](metadata-sharding.md).
 
 For a GSI, the base command writes an immutable projection journal entry. A worker applies a versioned entry or tombstone to the index Cell. It removes the journal entry only after every required index acknowledges it durably. An unavailable index delays its own projection while healthy indexes can advance. GSI reads are therefore eventually consistent with base writes; a base transaction does not produce an atomic GSI view. See the [GSI design and limits](global-indexes.md).
 
-```mermaid
-flowchart LR
-    Base["Base data Cell<br/>item + projection journal"] -->|"durable base commit"| Ack["Acknowledge write"]
-    Base -->|"worker reads journal"| Worker["Projection worker"]
-    Worker -->|"idempotent update"| Index["GSI Cell"]
-    Index -->|"durable receipt"| Worker
-    Worker -->|"after all required receipts"| Prune["Prune journal entry"]
-```
+![Failure recovery and current limits: detailed diagram retained from the original guide](../diagram/reference/architecture-3.svg)
 
 ## Failure recovery and current limits
 

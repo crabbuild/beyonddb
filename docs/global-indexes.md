@@ -1,5 +1,22 @@
 # Global secondary indexes
 
+## Current Cellar reference
+
+Creation-time GSIs use independent ordered ranges and asynchronous versioned
+projection. `ALL`, `KEYS_ONLY` and `INCLUDE` are implemented; online lifecycle
+changes remain rejected. No index read implies an atomic cross-index base view.
+
+![Atomic source journal and asynchronous versioned delivery](../diagram/operations/projection.svg)
+
+The original journal schema/rationale, reservations, split protocol, replay and
+transfer investigations remain below. Hash-layout and retired-fixture results
+are scoped to their recorded implementation.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current GSI boundary is above. The original journal/version protocol, split analysis, transfer evidence and regression records follow. Older hash-layout and retired-test evidence remains historical; it does not qualify the present ordered runtime.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/global-indexes.md).
+
 ## At a glance
 
 | Question | Current contract |
@@ -13,7 +30,9 @@ Follow [durable asynchronous maintenance](#durable-asynchronous-maintenance)
 for the write path, [splits and recovery](#splits-and-recovery) for owner changes,
 and the [evidence map](#evidence-map) for code and tests.
 
-## Current implementation
+<a id="current-implementation"></a>
+
+## Recorded implementation
 
 CreateTable installs independent index range Cells before publishing the base
 route. The table and each index have separate HASH distributions and range
@@ -205,7 +224,7 @@ qualification.
 | Index directory | `src/global_index/routing.rs`, `src/directory.rs`, `src/directory/`, `src/directory/schema.sql`; fixed-size account anchors in `src/schema.sql` |
 | Server worker and peer reachability | `src/bin/beyonddb.rs`, `src/cellar/server.rs`; SDK peer transport |
 | Focused recovery fixture | `tests/elastic_cells/global_indexes.rs` |
-| Retired Cellule peer-owner recovery | [Removed coverage and source revision](retired-cellule-tests.md); no current gate |
+| Retired Cellule peer-owner recovery | [Removed coverage and source revision](retired-tests.md); no current gate |
 | Signed SDK process fixture | `tests/server_binary/global_indexes.rs` |
 
 The focused fixture interrupts a key move after the old index entry is removed,
@@ -253,7 +272,7 @@ It passed in 92.47 seconds. The initial
 attempt failed because the new fixture table was absent from its IAM policy;
 the fixture now grants only that table and index alongside its existing tables.
 
-**Is this the best fix?** Use the existing projection sweep to discover index
+Use the existing projection sweep to discover index
 owners and the existing provisioner to recover them. The server supplies its
 provisioner and NodeDirectory; transaction recovery and startup retain their
 current authority boundary. This adds no second ownership or lease mechanism.

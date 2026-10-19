@@ -45,21 +45,7 @@ that interrupted matrix remains retained. All containers
 share one local VM and its physical disk. These are local measurements, not
 independent machine or fleet capacity qualification.
 
-```mermaid
-flowchart LR
-    SDK[Signed SDK load generator] --> A[Node 1: 1 CPU / 3 GiB]
-    SDK --> B[Node 2: 1 CPU / 3 GiB]
-    SDK --> C[Node 3: 1 CPU / 3 GiB]
-    A --- R1[Table ranges 0–9 / 5 GiB disk]
-    B --- R2[Table ranges 10–19 / 5 GiB disk]
-    C --- R3[Table ranges 20–29 / 5 GiB disk]
-    A <--> B
-    B <--> C
-    C <--> A
-    A --> S[Local RustFS object store]
-    B --> S
-    C --> S
-```
+![Measured three-node fixture with ten data cells per node and an external object store](../diagram/operations/benchmark.svg)
 
 ## Measured result — October 18, 2026
 
@@ -101,10 +87,13 @@ range, for 240 consistent read-backs. Failed mutations retain uncertain outcomes
 
 Raw results, all successful latency samples, failures, ownership snapshots,
 resource counters, logs and the exact measured harness are retained locally in
-`benchmarks/2026-10-18-three-node-30-cell/attempt4/`. Earlier attempts are retained
+`benchmarks/2026-10-18-local-benchmark/attempt4/`. Earlier attempts are retained
 beside it: the original file-descriptor failure, the 128-resident-cell failure,
 and the 60-second matrix interrupted by object-store OOM. The local report
-includes every measured window and a CSV export.
+includes every measured window and a CSV export. Result directory names use
+`YYYY-MM-DD-local-benchmark`; node and cell counts belong in the saved topology
+and ownership artifacts. Raw samples and the archived measured harness stay
+unchanged when a result directory is renamed.
 
 This is a local characterization on a shared VM, with substantial pre-existing
 host swap use. It does not establish independent-machine capacity or a production
@@ -206,13 +195,13 @@ Install the benchmark's client dependencies in an isolated environment. The
 measurement run used boto3 1.43.114, botocore 1.43.114 and blake3 1.0.8.
 
 ```sh
-python3 -m venv benchmarks/perf30-venv
-benchmarks/perf30-venv/bin/pip install -r scripts/perf/requirements.txt
+python3 -m venv benchmarks/perf-venv
+benchmarks/perf-venv/bin/pip install -r scripts/perf/requirements.txt
 
-PERF_PY="$PWD/benchmarks/perf30-venv/bin/python"
+PERF_PY="$PWD/benchmarks/perf-venv/bin/python"
 PERF_RUN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-run
 PERF_BIN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-linux/release/beyonddb
-PERF_OUT="$PWD/benchmarks/2026-10-18-three-node-30-cell"
+PERF_OUT="$PWD/benchmarks/2026-10-18-local-benchmark"
 
 "$PERF_PY" scripts/perf/setup.py init --run-dir "$PERF_RUN" \
   --nodes "$PERF_NODES" --cells-per-node "$PERF_CELLS_PER_NODE"

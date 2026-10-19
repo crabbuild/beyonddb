@@ -1,8 +1,10 @@
 # Check DynamoDB API coverage
 
-Cellar qualification is tracked in [the migration record](../CELLAR_MIGRATION.md).
-The detailed coverage labels below record the earlier Cellule fixtures. Each
-path needs equivalent Cellar evidence before those labels apply to this branch.
+See the [server guide](cellar-server.md#qualification-still-required) for current
+Cellar qualification boundaries.
+The matrix describes implemented paths and their limits. Use the current
+[registered targets](implementation-status.md#current-verified-slice) to select
+evidence; a historical fixture count is not a new qualification result.
 
 Use this page to decide whether a DynamoDB operation fits your workload. BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but a protocol handler alone does not establish Cell-backed support. A **verified path** has a signed AWS SDK or CLI request, a durable Cell commit, and a result checked after owner or process restart. Each fixture proves only its stated cases, not every DynamoDB option or error response.
 
@@ -34,7 +36,11 @@ maps these paths to tests. The full upstream protocol suite remains an
 
 ### Creation-time Cell model extension
 
-`CreateTable.Tags` accepts `beyonddb:cell-model` with `single`, `auto`, or `partitioned`. `single` fixes the base table to one data Cell; `auto` starts at one and permits splitting; `partitioned` starts at the configured count, with a minimum of two. Omitting the tag retains existing behavior. The choice is durable table-generation metadata, not an AWS DynamoDB setting.
+`CreateTable.Tags` accepts `beyonddb:cell-model` with `auto` or `partitioned`;
+both use the configured multiple-range policy and permit applicable splitting.
+`single` is rejected. Omitting the tag uses `initial_partitions`, four by default
+and constrained to 2–256. The policy is durable table-generation metadata, not
+an AWS DynamoDB setting.
 
 Later tag operations change metadata only. They do not change placement, and `UpdateTable` does not convert models. GSIs stay separate; LSIs stay with their base items. Read [Cell model limits](scaling.md#choose-a-tables-cell-model) and the [CLI creation example](user-guide.md#create-a-table-and-wait-for-it).
 
@@ -93,8 +99,9 @@ credential Cells. Inline user/role policies and user/role permission boundaries
 are Cell-backed; signed tests cover denial and owner restart. BeyondDB does
 not issue STS credentials. Group policies, session policies and tags, and the
 management APIs for accounts, users, roles, policies, and keys are unfinished.
-The server uses a pass-through authorization cache so policy removal takes
-effect without a stale cached grant. [Catalog implementation](../src/catalog.rs)
+Caching is disabled by default. Enabling `auth_cache_enabled` can delay
+cross-node visibility until cache expiry; local invalidation is not a fleet-wide
+immediate-revocation contract. See [cache behavior](cellar-server.md#serving-and-caching). [Catalog implementation](../src/catalog.rs)
 
 ## Explicitly unsupported or incomplete
 
@@ -118,13 +125,7 @@ see its [differences from DynamoDB](https://github.com/ExtendDB/extenddb/blob/ma
 
 Use the same evidence path for each new operation or option:
 
-```mermaid
-flowchart LR
-    Compare["Compare ExtendDB SQLite<br/>and protocol behavior"] --> Signed["Send signed AWS SDK<br/>request"]
-    Signed --> Commit["Verify durable<br/>Cell result"]
-    Commit --> Restart["Restart or replace<br/>the owner"]
-    Restart --> Replay["Check result,<br/>replay, and errors"]
-```
+![How to qualify a new API claim: detailed diagram retained from the original guide](../diagram/reference/api-1.svg)
 
 1. Compare the backend result with ExtendDB's SQLite backend and the upstream
    protocol suite, including validation and error responses.

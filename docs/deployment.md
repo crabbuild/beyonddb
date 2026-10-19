@@ -1,120 +1,51 @@
-# Deploy a BeyondDB node
+# Deploy BeyondDB
 
-For `beyonddb-cellar`, use [the embedded Cellar server guide](cellar-server.md).
-It describes the current executable, configuration and fresh ordered storage
-roots. The Cellule configuration and runtime qualification recorded below are
-historical and still require migration.
+Start with a disposable deployment and qualify your workload against
+[API coverage](api.md) and the [operational limits](operations.md). The executable
+supports local persistence or an S3-compatible fleet; it does not provide a
+qualified backup, upgrade or production availability contract.
 
-This guide builds and bootstraps one BeyondDB node, then explains the requirements for adding peers. The serving binary has restart-tested process fixtures, but table backup and point-in-time recovery (PITR), upgrades of older roots, unattended fleet recovery, and sustained load remain unqualified. Preserve the encryption key and object-store root as durable state.
+![Deployment boundaries: public TLS, private authenticated peers and persistent storage](../diagram/operations/deployment.svg)
 
-```mermaid
-flowchart LR
-    Client["AWS CLI or SDK<br/>DynamoDB credentials"] -->|"signed HTTPS or loopback HTTP"| Public["Public listener"]
-    Public --> Node["BeyondDB node<br/>ExtendDB + Cellule"]
-    Node <-->|"private mTLS"| Peer["Other Cell owners"]
-    Node -->|"conditional writes + LTX"| Store["Durable object store"]
-    Node --> Scratch["Session scratch directory"]
-```
+## Prepare the deployment
 
-The object store and encryption key must survive a node restart. Scratch storage belongs to one node session. The [architecture guide](architecture.md) explains the authority and recovery steps behind this diagram.
+| Resource | Requirement |
+| --- | --- |
+| Binary | Build the reviewed checkout with Rust 1.97+ and the committed lockfile |
+| Node identity | Unique `node_name`, peer address and persistent `data_dir` per running node |
+| Public listener | Loopback HTTP, or a certificate/private-key pair and HTTPS for external serving |
+| Private network | Isolate the authenticated peer listener; the executable does not configure peer TLS |
+| Keys | Two separate 32-byte raw files: shared fleet peer key and stable credential-encryption key |
+| Fleet storage | S3-compatible bucket with conditional create/update semantics; a dedicated nonempty prefix |
+| Credentials | Server-side object-store credentials are separate from client DynamoDB credentials |
 
-## Requirements
+Protect peer traffic with the deployment's private encrypted network. Shared-key
+peer authentication is not transport encryption. Do not expose the peer listener
+to public clients or forward the internal command gateway through the public API.
 
-Prepare these resources before starting the server:
+## Build and provision
 
-- Rust 1.97 or newer to build this checkout; `cargo` and a unique
-  `CARGO_TARGET_DIR` if the workstation has the mounted Workspace volume.
-- An S3, GCS, or Azure object store with strict create and conditional update
-  semantics. Local `file://` storage cannot provide Cell authority. Configure
-  that provider's credentials outside `config.json` for the server process.
-- OpenSSL (or an equivalent CA workflow) for peer mTLS. Peers require an
-  Ed25519 leaf with both client and server authentication, signed by the
-  configured CA, with a SAN matching `peer_server_name`.
-- A 32-byte binary encryption key file. Losing it makes stored access-key
-  secrets unreadable. It is shared by nodes in one fleet.
-- A writable scratch directory and enough RAM and disk for the configured
-  Cell and capture budgets. `disk_budget_bytes`, `node_retained_bytes`, and
-  `split_threshold_bytes` must be positive. `node_retained_bytes` bounds
-  in-flight Cell command and publication state; it defaults to 1 GiB so a
-  write-heavy node does not hit the runtime mailbox ceiling before durable
-  publication catches up. Lower it on a memory-constrained node or raise it
-  for a larger workload after measuring memory use.
-
-### Local object-store fixture
-
-Use this fixture only for a local exercise. It starts RustFS and creates the bucket used by the configuration example below.
-
-The ignored server-process test uses the same digest-pinned RustFS image. The credentials below are test-only S3 credentials. Set them in the server's shell; use a separate shell for the bootstrapped DynamoDB key in the [client guide](user-guide.md#connect).
+Run from the repository root. On workstations with a mounted Workspace volume,
+first choose a checkout-specific `CARGO_TARGET_DIR` as described in
+[AGENTS.md](../AGENTS.md).
 
 ```sh
-docker run --detach --name beyonddb-rustfs \
-  --publish 127.0.0.1:9000:9000 \
-  --env RUSTFS_ACCESS_KEY=crab \
-  --env RUSTFS_SECRET_KEY=crab \
-  --env RUSTFS_CONSOLE_ENABLE=false \
-  --volume beyonddb-rustfs:/data \
-  ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
+cargo build --release --locked --bin beyonddb
 
-export AWS_ACCESS_KEY_ID=crab
-export AWS_SECRET_ACCESS_KEY=crab
-export AWS_DEFAULT_REGION=us-east-1
-export AWS_ALLOW_HTTP=true
-export AWS_ENDPOINT_URL_S3=http://127.0.0.1:9000
-export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
-aws --endpoint-url "$AWS_ENDPOINT_URL_S3" s3api create-bucket --bucket my-bucket
-```
-
-Wait for RustFS to accept S3 requests before creating the bucket. Keep its
-named volume for restart testing; removing it removes this fixture's data.
-Use a service with qualified conditional writes for any nonlocal deployment.
-
-On macOS with Colima, this named volume keeps provider data inside the VM.
-A direct S3 diagnostic
-measured faster 1-KiB conditional writes on native volumes than host file
-sharing in both repetitions. GET results and host load differed; this is a
-local fixture observation, not a production capacity guarantee. Record the
-storage mount when comparing performance.
-
-## Prepare keys, policy, and configuration
-
-The example uses `/etc/beyonddb` for secrets and `/srv/beyonddb` for scratch files. Run the provisioning commands with an account that can write those paths, and run the server with read access to the key and certificate files. For a local account without that access, change every path in the commands and JSON to directories it owns.
-
-Create the credential encryption key with restricted permissions:
-
-```sh
-install -d -m 700 /etc/beyonddb
+umask 077
+install -d -m 700 /etc/beyonddb /var/lib/beyonddb
+openssl rand -out /etc/beyonddb/peer.key 32
 openssl rand -out /etc/beyonddb/encryption.key 32
-chmod 600 /etc/beyonddb/encryption.key
+cp config/cellar.example.json /etc/beyonddb/config.json
 ```
 
-For a local single-node exercise, issue an Ed25519 peer certificate for
-`localhost`. For a fleet, use a managed private CA and issue a distinct leaf
-per node. The CA certificate must be the same trust root on every node.
+These paths require a provisioning account with write access. Give the service
+account read access to its keys/configuration and ownership of its data directory.
+For a local exercise, use paths owned by your current account instead.
 
-```sh
-openssl genpkey -algorithm ED25519 -out /etc/beyonddb/peer-ca.key
-openssl req -new -x509 -key /etc/beyonddb/peer-ca.key \
-  -out /etc/beyonddb/peer-ca.crt -days 365 \
-  -subj '/CN=BeyondDB Peer CA' \
-  -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,keyCertSign,cRLSign'
-openssl genpkey -algorithm ED25519 -out /etc/beyonddb/peer.key
-openssl req -new -key /etc/beyonddb/peer.key \
-  -out /etc/beyonddb/peer.csr -subj '/CN=localhost'
-cat > /etc/beyonddb/peer.ext <<'EOF'
-basicConstraints=critical,CA:FALSE
-keyUsage=critical,digitalSignature
-extendedKeyUsage=serverAuth,clientAuth
-subjectAltName=DNS:localhost
-EOF
-openssl x509 -req -in /etc/beyonddb/peer.csr \
-  -CA /etc/beyonddb/peer-ca.crt -CAkey /etc/beyonddb/peer-ca.key \
-  -CAcreateserial -out /etc/beyonddb/peer.crt \
-  -days 365 -extfile /etc/beyonddb/peer.ext
-chmod 600 /etc/beyonddb/peer-ca.key /etc/beyonddb/peer.key
-```
-
-Save the following bootstrap policy as `/etc/beyonddb/operator-policy.json`. It grants table access to the example account; narrow its actions and resources for your workload.
+Save an operator policy at `/etc/beyonddb/operator-policy.json`. This example
+allows table operations only in the example account and region; tailor it to the
+actual client workload before exposing the endpoint.
 
 ```json
 {
@@ -123,170 +54,167 @@ Save the following bootstrap policy as `/etc/beyonddb/operator-policy.json`. It 
     {
       "Effect": "Allow",
       "Action": "dynamodb:*",
-      "Resource": ["arn:aws:dynamodb:us-east-1:123456789012:table/*"]
+      "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "dynamodb:ListTables",
+      "Resource": "*"
     }
   ]
 }
 ```
 
-Save the next JSON block as `config.json` in the repository root. Replace its object-store URL and local paths as needed. The public listener is loopback-only without TLS; the peer listener always uses mTLS.
+Set a real `bootstrap.access_key_id`, confirm `bootstrap.account_id` is in
+`accounts`, and check all paths in the copied configuration. Leave `fleet` absent
+for local persistence. For a fleet, merge this object into the configuration:
 
 ```json
 {
-  "storage_url": "s3://my-bucket/beyonddb",
-  "node_id": "01994f26-5966-7b20-8b58-2fddf198a321",
-  "data_dir": "/srv/beyonddb/scratch",
-  "disk_budget_bytes": 107374182400,
-  "node_retained_bytes": 1073741824,
-  "max_active_cells": 128,
-  "sql_workers": 12,
-  "encryption_key_file": "/etc/beyonddb/encryption.key",
-  "region": "us-east-1",
-  "peer_bind": "127.0.0.1:9001",
-  "peer_endpoint": "https://localhost:9001",
-  "peer_certificate": "/etc/beyonddb/peer.crt",
-  "peer_private_key": "/etc/beyonddb/peer.key",
-  "peer_ca": "/etc/beyonddb/peer-ca.crt",
-  "peer_server_name": "localhost",
-  "public_bind": "127.0.0.1:8000",
-  "public_endpoint": "http://127.0.0.1:8000",
-  "owned_accounts": ["123456789012"],
-  "owned_access_keys": ["AKIAIOSFODNN7EXAMPLE"],
-  "initial_partitions": 4,
-  "split_threshold_bytes": 268435456,
-  "auth_cache_enabled": false,
-  "bootstrap": {
-    "account_id": "123456789012",
-    "access_key_id": "AKIAIOSFODNN7EXAMPLE",
-    "principal_name": "operator",
-    "policy_name": "tables",
-    "policy_file": "/etc/beyonddb/operator-policy.json"
+  "fleet": {
+    "bucket": "my-beyonddb-bucket",
+    "prefix": "beyonddb/ordered-v1",
+    "follower_durability": false
   }
 }
 ```
 
-`auth_cache_enabled` is disabled in the example because credentials and table
-generations can be changed by another node. Set it to `true` only when the
-cache's 60-second cross-node visibility window is acceptable. Local management
-mutations invalidate cached credentials, policies, boundaries, and table
-metadata immediately; changes made through another node become visible after
-the cache TTL. Enabling the flag also caches complete routed directory pages
-for point operations. The owning data Cell rejects a stale epoch and the
-server drops that route entry, so a split is refreshed on the next request. It
-also caches immutable catalog proofs. Resident Cell handles are cached for
-500 ms on both public request resolution and private peer invocation. After
-expiry, the runtime resolves a still-resident actor without reading object
-storage. Cached handles are checked against the current resident actor before
-reuse, and dispatch fences drained handles. Remote routing, local admission
-and recovery still use exact authority checks. Peer enrollment and
-authorization are checked for every private request.
+Create the bucket first and provide its authorized credentials through the server
+process environment. `fleet.endpoint` optionally selects an S3-compatible
+endpoint; HTTP endpoints are for isolated local fixtures. Preserve the prefix,
+keys and retained node data. Do not reuse a prefix from another deployment or an
+incompatible runtime format. See [server reference](cellar-server.md#configuration).
 
-The parser rejects unknown fields. `initial_partitions` defaults to one and accepts powers of two from 1–256. It sets the initial base and GSI range count when a new table omits the placement selector. A creation-time `beyonddb:cell-model` tag overrides that count: `single` and `auto` start with one; `partitioned` uses at least two. The model is stored with the table generation, so later node configuration changes do not repartition existing tables. See [choose a table's Cell model](scaling.md#choose-a-tables-cell-model). `max_active_cells` defaults to 128 and reserves the Cell runtime capacity for account, coordinator, management, and data Cells together; size it for the number of simultaneously resident Cells on the node and the available memory. `sql_workers` is optional; when omitted, the runtime derives the worker count from host parallelism, capped at sixteen. Set it explicitly when a node serves many partitions and you have measured enough CPU and memory headroom. Each worker owns its SQLite connections, so increasing the value does not make one hot Cell publish concurrently. The split threshold defaults to 256 MiB of occupied SQLite pages. `node_id` identifies a physical node; each running node needs a distinct ID and scratch path.
+| Server environment variable | Use |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Object-store access identity, when using static environment credentials |
+| `AWS_SESSION_TOKEN` | Token when the object-store credentials require one |
 
-`follower_store_bytes` is an optional positive disk budget for persistent
-follower lanes under `data_dir/follower-store`. Reserve it in addition to
-`disk_budget_bytes`, and retain the directory across process restart. By
-itself, it opens the authenticated receiver for recovery and advertises zero
-follower capacity; writes still wait for object publication.
+Keep these in the service's secret environment. Client shells use the separately
+bootstrapped DynamoDB key; changing client credentials must not change the
+server's object-store identity.
 
-Experimental `follower_durability_enabled: true` requires a follower-store
-budget of at least 64 MiB. It installs the host provider during startup, gates
-recruitment until configured-account recovery completes, and advertises actual
-remaining follower bytes only after the private listener starts. Each enrolled
-member must fsync before a follower proof; absent an eligible ensemble, the
-object-publication path remains available. Use separate node IDs, certificates,
-and data directories for every server. The three-process crash test exercises
-same-partition item mutations, transaction replay, and stream records;
-independent-host failure, cross-partition transaction faults, rotation under
-load, and sustained throughput still need qualification. See the
-[follower durability guide](follower-durability.md).
+## Local object-store fixture
 
-The S3 serving path uses Cellule's provider builder, including multipart
-conditional copy support needed to pin recovery overlays. The URL-only builder
-previously left that operation unconfigured, which the real RustFS process-kill
-test exposed. GCS and Azure retain their URL-based configuration paths.
+Use a disposable local store to exercise fleet mode before configuring a remote
+provider. This fixture is not a production storage or backup recommendation.
+Its port avoids the default private peer listener on 9000.
 
-| Credential or file | Used by | Keep across restart? |
-| --- | --- | --- |
-| Object-store credentials | Server process to read and write Cell roots | Yes, or replace with equivalent authorized credentials |
-| Encryption key file | Server process to decrypt stored access secrets | Yes; losing it makes those secrets unreadable |
-| Peer CA and leaf certificate | Nodes to authenticate private traffic | Preserve a common trust root; rotate leaves deliberately |
-| Bootstrapped access key and secret | AWS CLI or SDK client to sign DynamoDB requests | Preserve until you rotate or revoke the key |
+```sh
+docker run --detach --name beyonddb-docs-store \
+  --publish 127.0.0.1:19100:9000 \
+  --env RUSTFS_ACCESS_KEY=localdocs \
+  --env RUSTFS_SECRET_KEY=local-docs-store-secret \
+  --env RUSTFS_CONSOLE_ENABLE=false \
+  --volume beyonddb-docs-objects:/data \
+  ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
 
-## Build and bootstrap
+export AWS_ACCESS_KEY_ID=localdocs
+export AWS_SECRET_ACCESS_KEY=local-docs-store-secret
+export AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:19100 s3api create-bucket \
+  --bucket beyonddb-docs
+```
 
-Build the checked-out revision, enter the bootstrap secret at the hidden prompt, and keep the process running. The first command uses a target directory unique to this checkout on workstations with the mounted Workspace volume.
+Wait for the store to accept S3 requests before creating the bucket. Use these
+credentials in the **server** environment; keep the DynamoDB client shell
+separate. Configure `fleet.bucket` as `beyonddb-docs`, `fleet.endpoint` as
+`http://127.0.0.1:19100`, and a fresh dedicated prefix. The named volume preserves
+objects across container restart. Do not delete it while retained experiments
+or acknowledged state depend on it. A new test deployment needs its own namespace.
+
+Record storage type and mounts with measurements: a VM-native volume and a
+host-shared filesystem can have different publication latency. That local
+observation is not evidence of production capacity or storage correctness.
+
+## Bootstrap and start
+
+In Bash, read the first DynamoDB secret without adding it to shell history:
 
 ```bash
-export CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23"
-cargo build --locked --bin beyonddb
-printf 'Bootstrap secret: '
-read -rs BOOTSTRAP_SECRET
+read -r -s -p 'Bootstrap secret: ' BOOTSTRAP_SECRET
 printf '\n'
 printf '%s' "$BOOTSTRAP_SECRET" | \
-  "$CARGO_TARGET_DIR/debug/beyonddb" config.json --bootstrap
+  "${CARGO_TARGET_DIR:-target}/release/beyonddb" /etc/beyonddb/config.json --bootstrap
 unset BOOTSTRAP_SECRET
 ```
 
-Enter the secret at the hidden `read` prompt and press Enter. Bootstrap reads
-the secret from stdin, encrypts it in a credential Cell, and commits the inline
-policy in the account Cell. The process remains serving after bootstrap; stop
-it normally to restart. Subsequent starts omit `--bootstrap`:
+Bootstrap persists the encrypted credential and inline policy, then serves in the
+foreground. It is initial provisioning, not a credential rotation workflow.
+Subsequent starts omit `--bootstrap`:
 
 ```sh
-"$CARGO_TARGET_DIR/debug/beyonddb" config.json
+"${CARGO_TARGET_DIR:-target}/release/beyonddb" /etc/beyonddb/config.json
+curl --fail http://127.0.0.1:8000/health
 ```
 
-The server writes warnings and errors to stderr. Use the [AWS CLI connection example](user-guide.md#connect) from a separate shell to test the signed public endpoint. A supervisor should keep the server in the foreground and provide the configured scratch budget.
+The health example assumes the default loopback HTTP configuration and runs from
+another terminal. Follow it with a signed `ListTables` and a write/read check;
+a healthy listener does not establish table durability or fleet capacity.
 
-## Expose the public listener or add nodes
+## Expose HTTPS and add nodes
 
-Once the local node works, set the public TLS identity and peer addresses for any non-loopback deployment. Every node must agree on the durable storage and trust configuration.
+Set both `public_certificate` and `public_private_key` to PEM files, change
+`public_bind` to the intended address and set `public_endpoint` to the matching
+`https://` URL. Use a certificate trusted by clients. The server rejects external
+plaintext HTTP and a TLS/endpoint scheme mismatch.
 
-For a non-loopback `public_bind`, supply both `public_certificate` and
-`public_private_key` in `config.json` and use an `https://` public endpoint.
-The certificate must match the hostname clients use; distribute its CA bundle
-to AWS CLI/SDK clients. The peer endpoint must always use HTTPS with the
-configured mTLS identity and an address reachable by other nodes.
+Merge these fields into the node configuration after provisioning the certificate:
 
-All nodes in one fleet must use the same CA, object-store root, compiled
-release, and encryption key. Configure each account and access key on the node
-that recovers its Cell; a public node without local account or credential
-ownership can forward signed requests to the live owner. A replacement must
-fence an expired node session before claiming its Cells. Reusing a node ID
-after a clean drain is supported; an unclean exit waits for authoritative
-lease expiry. See [architecture](architecture.md#failure-recovery-and-current-limits).
-
-Linux automatic placement requires a visible, complete cgroup-v2 memory
-hierarchy. Unsupported host measurements advertise no placement capacity,
-although configured owned Cells can still serve. Initial data/GSI placement,
-request-driven restoration, and settled-range movement exist; a general
-distributed recovery scheduler and fleet load qualification do not.
-[Measured placement requirements](scaling.md#fleet-controller-boundary)
-
-## Recovery and upgrade limits
-
-Object-store roots are the recovery source. Scratch files are disposable only after a clean drain or a fenced takeover by a new owner.
-A crashed session can leave scratch files for operator cleanup. Preserve the
-encryption key, peer trust root, object-store data, and the exact compiled
-release used to write the roots. Several unreleased schema revisions require
-reprovisioning development roots; there is no qualified in-place migration.
-
-BeyondDB has no supported `CreateBackup`, restore, or PITR API. Independent
-object-store copies are not a consistent multi-Cell table backup. Do not use
-this deployment for data that requires a tested table-wide restore until that
-protocol and its recovery drills exist. [Backup boundary](api.md#explicitly-unsupported-or-incomplete)
-
-## Verification
-
-Check formatting and static diagnostics before running the signed process fixture:
-
-```sh
-cargo fmt --check
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23" \
-  cargo clippy --all-targets -- -D warnings
-CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/beyonddb-node-3c23" \
-  cargo test --test server_binary -- --ignored --test-threads=1
+```json
+{
+  "public_bind": "0.0.0.0:8000",
+  "public_endpoint": "https://ddb.example.com:8000",
+  "public_certificate": "/etc/beyonddb/public.crt",
+  "public_private_key": "/etc/beyonddb/public.key"
+}
 ```
 
-The ignored [`server_binary` process suite](../tests/server_binary.rs) starts RustFS, uses signed SDK requests, kills a server, and checks recovered state. It requires Docker, AWS CLI, and OpenSSL; Colima users can select their daemon with `DOCKER_CONTEXT=colima`. For broader API validation, run unchanged upstream client tests with the [independent qualification runner](implementation-status.md#independent-client-qualification). Passing these fixtures does not establish production-scale capacity.
+For each peer, use the same bucket, deployment prefix, region, peer key and
+credential-encryption key. Assign a unique node name, persistent local directory,
+and reachable `peer_advertise` address (`HOST:PORT`). Configure maintained accounts
+on the serving nodes. Do not independently re-bootstrap a shared credential on
+every node. Cellar owns discovery and physical balancing; adding a process does
+not guarantee immediate movement or an even workload.
+
+Use a supervisor that sends SIGTERM and waits for process exit. `preserve` drains
+and retains same-node reload state; `handoff` requires a fleet with an eligible
+live peer. Do not delete the data directory as a shutdown step. Check exit status
+and logs before restarting; see [operations](operations.md#shutdown-and-replacement).
+
+## Before relying on a deployment
+
+Qualify the exact binary, storage service, filesystem, failure domains and client
+workload. Exercise owner loss, ambiguous mutations, capacity limits and restore
+from retained state. Backups/PITR, supported in-place upgrades and bounded fleet
+recovery are still open gates; a copied live data directory is not a table backup.
+Use [implementation status](implementation-status.md) to select current tests.
+
+## State and credential retention
+
+| State | Who uses it | Retain or replace deliberately |
+| --- | --- | --- |
+| Object-store credentials | Server S3 clients | Equivalent authorized credentials may replace them; keep the prefix accessible |
+| Encryption key | Credential cells | Required to decrypt existing access secrets; not a database-wide SSE setting |
+| Shared peer key | Native authenticated transport | Every participating node must agree; key rotation requires a qualified transition |
+| DynamoDB access key/secret | Signed client | Retain until credential rotation or revocation is implemented and exercised |
+| Node directory | Cellar local state and logs | Preserve across same-node reload and while native recovery needs retained logs |
+| Bucket prefix | Fleet authority and published recovery state | Dedicated to one compatible deployment; arbitrary lifecycle deletion is unsafe |
+
+## Verify startup and recovery
+
+A healthy listener is only one part of the original acceptance path. Check the
+signed endpoint, correct generation and durable result, then exercise restart:
+
+1. Create a disposable multi-range table and wait for ACTIVE.
+2. Write a unique value using a condition; read it consistently.
+3. Stop with SIGTERM, wait for a successful drain, restart without bootstrap and
+   read that value and metadata again.
+4. For fleet qualification, use the registered process fixtures to remove a failed
+   owner's local state and recover under a native lease fence. Do not improvise
+   authority edits or delete a live node directory.
+5. Repeat the relevant transaction/index/Streams cases and record failures and
+   the exact binary/storage/configuration. A local restart is not machine-loss proof.
+
+[Implementation status](implementation-status.md) retains detailed fault evidence,
+current target commands and the distinction between historical and current runs.

@@ -1,5 +1,31 @@
 # BeyondDB metadata ownership
 
+## Current Cellar reference
+
+## Current topology
+
+| State | Scope | Purpose |
+| --- | --- | --- |
+| Account catalog | Account | Names, generations, lifecycle anchors, policies and coordinator registrations |
+| Credentials | Key-derived shard | Encrypted secrets, status and principal/account binding |
+| Range directory | Base table or GSI generation | Bounded ordered routing pages and split publication |
+| Managed-cell inventory | Tenant, 256 fixed shards plus discovery root | Find installed, idle, deleted and sealed range targets |
+| Transaction coordinators | Account-scoped token sharding, 4096 namespace shards | Immutable requests, decisions and participant progress |
+| Data / GSI cells | Range generation | Items, projected rows and range-local durable work |
+
+These are logical shard namespaces, not a requirement that every shard is resident
+at all times. Account, credential, inventory, directory and coordinator cells all
+consume residency and resources when active. Count them when sizing a node.
+
+The detailed publication, lifecycle, cutover, failure and reclamation analyses
+remain below. The account is still a shared control path; proposed catalog
+sharding and scale acceptance are not completion claims.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current topology is described above. The detailed design, cutover investigations and regression records below retain their original revision scope. Proposed topology and old test results must not be read as delivered fleet-scale guarantees.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/metadata-sharding.md).
+
 ## At a glance
 
 ```text
@@ -33,7 +59,9 @@ See [required topology](#required-topology) for tree ownership,
 [publication and lifecycle](#publication-and-lifecycle) for creation and
 deletion, and [base serving cutover](#base-serving-cutover) for verification.
 
-## Current status
+<a id="current-status"></a>
+
+## Recorded status
 
 Base and GSI serving paths use independently owned directory leaves.
 The account retains one fixed-size publication anchor per base/index generation
@@ -44,7 +72,9 @@ broader CI remain incomplete.
 
 Catalog sharding and 10,000-Cell/multi-TB qualification remain open.
 
-## Current atomic boundaries
+<a id="current-atomic-boundaries"></a>
+
+## Recorded atomic boundaries
 
 | Boundary | Current owner and consumers | Contract that must survive |
 | --- | --- | --- |

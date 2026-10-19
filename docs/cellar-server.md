@@ -1,89 +1,98 @@
-# Embedded Cellar server
+# BeyondDB server reference
 
-Status: implemented with a passing local signed SDK/process-restart fixture on
-`beyonddb-cellar`. Root and adapter unit suites also pass. Historical Cellule
-results are not Cellar qualification. Ordered routing is implemented with local
-serving/split checks. Nine bucket-backed process fixtures pass, including owner
-replacement with no previous local state. Legacy fixture migration and the
-broader split, transaction and API/index fault matrices remain unfinished.
-
-The `beyonddb` executable owns its configuration, executors, public listener,
-TLS and ExtendDB frontend. It starts Cellar with `Node::start_external`, using
-only its in-process ingress to execute compiled BeyondDB operations. Cellar
-owns the authenticated private listener, physical placement, owner fencing,
-replication/logs, recovery and node lifecycle. The internal command gateway is
-never exposed on the public listener.
+The `beyonddb` executable embeds ExtendDB and Cellar. BeyondDB owns configuration,
+public TLS and application maintenance. Cellar owns execution, placement,
+ownership, private peer transport and durability. See [deployment](deployment.md)
+for setup and [operations](operations.md) for failure handling.
 
 ## Configuration
 
-Use [the new configuration example](../config/cellar.example.json). Legacy
-Cellule configuration is rejected rather than silently interpreted as Cellar
-state. `data_dir/cellar-ordered-v1` is the new local engine directory. Earlier
-branch HASH state in `cellar-v1` is not opened. Both key files
-contain exactly 32 raw bytes and must be provisioned privately by the operator.
-The encryption key must remain stable to read existing credential ciphertext.
-Peer authentication keys must match across nodes in the same fleet.
+Use [config/cellar.example.json](../config/cellar.example.json). The parser
+rejects unknown fields. Current fields are defined in
+[src/bin/beyonddb.rs](../src/bin/beyonddb.rs).
 
-Without `fleet`, the executable uses local Cellar persistence. This mode
-qualifies local process restart, not bucket durability or node loss. With
-`fleet`, add:
+| Field | Meaning / default |
+| --- | --- |
+| `node_name` | Unique running node identity |
+| `data_dir` | Persistent local directory; engine state is under `cellar-ordered-v1` |
+| `region` | Deployment and request-signing region |
+| `public_bind`, `public_endpoint` | Listener address and advertised public URL |
+| `public_certificate`, `public_private_key` | Optional PEM pair; required for non-loopback public serving |
+| `peer_bind`, `peer_advertise` | Private listener and reachable `HOST:PORT` |
+| `peer_key_file` | Exactly 32 raw bytes; matching key across fleet nodes |
+| `encryption_key_file` | Exactly 32 raw bytes; preserve to decrypt credential secrets |
+| `accounts` | Accounts maintained by this deployment; default empty |
+| `initial_partitions` | Initial base/GSI data-range count, 2–256; default 4 |
+| `max_active_cells` | Positive native residency limit for all cell types; default 128 |
+| `split_threshold_bytes` | Positive threshold supplied to range maintenance; default 268435456 |
+| `auth_cache_enabled` | Credential, authorization, table metadata and route caching; default false |
+| `shutdown_mode` | `preserve` (default) or fleet-only `handoff` |
+| `fleet` | Optional S3-compatible fleet configuration; absent means local persistence |
+| `bootstrap` | Optional account/key/principal/policy settings, used with `--bootstrap` |
+
+The optional fleet object is:
 
 ```json
 {
   "fleet": {
-    "bucket": "my-bdb-bucket",
+    "bucket": "my-beyonddb-bucket",
     "endpoint": "https://s3.example.com",
-    "prefix": "beyonddb-cellar/ordered-v1",
+    "prefix": "beyonddb/ordered-v1",
     "follower_durability": false
   }
 }
 ```
 
-The application constructs S3 clients from operator-supplied AWS configuration
-and passes them into Cellar. The CAS clients disable retries so ownership can
-observe ambiguous outcomes. Data and lease lanes use separate clients. Bucket
-proof is the default. Set `fleet.follower_durability` to `true` to allow native
-follower fsyncs to race bucket publication; bucket fallback remains available.
-Cellar owns ensemble policy, proof selection and recovery. The three-process
-RustFS fixture verifies acknowledged state on a fresh successor after an owner
-kill, deletion of its local directory and withheld bundle/LTX publication. See
-[follower durability](follower-durability.md) for its limits. Never reuse Cellule
-object roots or another Cellar deployment's prefix. Cellar controls physical
-rebalancing in fleet mode.
+`endpoint` may be omitted for the provider's standard endpoint. The server builds
+S3 clients from its environment. It disables conditional-operation retries to
+preserve ambiguous ownership evidence. GCS/Azure URL configuration, peer mTLS
+fields, `storage_url`, `sql_workers`, `disk_budget_bytes` and
+`node_retained_bytes` are not fields in this executable.
 
-Public plaintext HTTP is restricted to loopback. External public serving needs
-both `public_certificate` and `public_private_key`, and a matching HTTPS
-`public_endpoint`. Cellar's private peer transport authenticates its protocol;
-configure network isolation and TLS termination according to the deployment's
-private transport policy.
+The encryption key protects stored credentials; it is not a claim of encryption
+for every application row or storage file. Public TLS and peer authentication
+are separate controls. Isolate and encrypt the private network externally.
 
-The account list drives bounded table, TTL, projection, retention and
-coordinator-discovery maintenance. Configure every account assigned to the
-serving deployment. A sharded application inventory records range targets
-before installation, so idle, deleted and sealed source cells remain
-findable independently of node residency. Its fixed 256 shards per tenant
-avoid one per-account inventory writer. This inventory is discovery metadata;
-Cellar remains the ownership authority.
+## Serving and caching
 
-Every table starts with multiple data cells. `single` placement is rejected;
-`auto` and `partitioned` use the configured initial count, from 2 through 256
-without a power-of-two restriction. Four is the default. Ownership uses ordered
-full-key ranges; the bootstrap template chooses schema-aware PK fences and
-later splits use observed keys. An unknown workload may concentrate in one
-initial interval. A hot PK can split by SK when the table has no LSIs. See
-[ordered cell partitioning](ordered-cell-partitioning.md) for the contracts and
-remaining qualification gates.
+Readiness waits for Cellar startup, optional bootstrap and an initial transaction
+recovery pass for each configured account. A node fence or failed supervised
+maintenance task withdraws public serving. Use `/health` for listener readiness
+and signed requests for application checks.
 
-Cellar publishes measured process load and bounds residency with
-`max_active_cells`. The RustFS process fixture verifies current lease telemetry,
-the signed peer challenge and rejection of a stale generation through the SDK
-management client. This does not qualify Cellule's former disk-budget or
-reserved-job admission policy; resource admission beyond native residency is
-still migration work.
+`accounts` drives table lifecycle, projection, TTL, retention and coordinator
+maintenance. Empty or incomplete account lists do not provide maintenance for
+omitted accounts. Table data remains in separately routed cells.
+
+Caching is off by default. When enabled, the frontend uses the pinned ExtendDB
+cache defaults and BeyondDB's bounded route metadata cache. Cross-node changes
+can remain cached until expiry; local invalidation is not a fleet-wide immediate
+revocation guarantee. Leave caching disabled when testing fresh authorization
+and inspect the pinned implementation before relying on a specific TTL.
+
+The current binary fixes native per-cell concurrency at 16 and the handler budget
+at 30 seconds. These are source settings, not JSON knobs. Pure queries use bounded
+backpressure; commands retain single-attempt submission semantics. More request
+concurrency can worsen latency or cause admission errors.
+
+## Persistence and shutdown
+
+| Mode | Acknowledgement and restart boundary |
+| --- | --- |
+| Local, no `fleet` | Local Cellar persistence; retain node data; does not cover machine loss |
+| Fleet, follower durability false | Bucket-publication proof is the default acknowledgement path |
+| Fleet, follower durability true | Native follower fsync proof may race bucket publication; see [follower durability](follower-durability.md) |
+| `preserve` shutdown | Drain work and local durability; fleet mode also requires clean-reload proof |
+| `handoff` shutdown | Fleet-only transfer to an eligible live peer; cannot complete on the last eligible node |
+
+SIGINT/SIGTERM drains the public server, stops application maintenance and invokes
+Cellar shutdown. A successful exit requires drained work/cells, no pending
+dispatches, quiesced logs, closed local durability and no shutdown deadline failure.
+Keep persistent state after exit; never confuse a process kill with a clean stop.
 
 ## Starting and stopping
 
-Build with `cargo build --bin beyonddb`. Run `beyonddb config.json --bootstrap`
+Build with `cargo build --locked --bin beyonddb`. Run `beyonddb config.json --bootstrap`
 once with the new credential secret supplied on stdin; the bootstrap policy
 must be an operator-authored IAM policy file. Later starts omit `--bootstrap`.
 The bootstrap account must be listed in `accounts`.
@@ -120,6 +129,24 @@ collecting decisions or changing an admitted participant set. Recovery cannot
 infer ABORT from an unavailable owner or an uncertain mutation reply.
 
 ## Qualification still required
+
+[Current test targets](implementation-status.md#current-verified-slice) cover
+selected public operations, native peer/fencing faults, owner restoration and
+process loss. They do not establish full DynamoDB compatibility, automatic fleet
+recovery within a bound, independent-host follower-loss tolerance, sustained
+capacity, backup/PITR or safe upgrades of existing development roots.
+
+Use fresh storage for incompatible formats. Do not open roots from a different
+runtime or reuse an older hash-layout root as ordered-layout state. Capture the
+binary revision, dependency lockfile and configuration with every qualification.
+
+## Detailed qualification record
+
+> **Recorded evidence:** These detailed native and process cases are retained from
+> the [original report](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/cellar-server.md).
+> Counts and timing describe those runs, not the latest CI result. Earlier-runtime
+> comparisons are not additional Cellar coverage. Current configuration remains
+> defined by the reference above.
 
 The new `tests/cellar_sdk.rs` uses signed SDK requests against the real process,
 including typed/large escaped item values, conditional writes, token replay,
@@ -357,8 +384,8 @@ SHA-256-verified executables with normal parallelism, zero failed/ignored. This
 includes all native discovery, creation, deletion, reclamation and admission
 ports and the stale-owner/competing-claim regressions. All nine explicitly
 executed RustFS process cases also pass on the rebuilt server, zero failed/ignored,
-with its SHA-256 unchanged throughout the run. See the current fingerprint and qualification boundaries
-in [migration evidence](../CELLAR_MIGRATION.md).
+with its SHA-256 unchanged throughout the run. Current dependency pins are recorded
+in [Cargo.toml](../Cargo.toml).
 Caller refusal is checked before SDK submission; a native HTTP error remains
 ambiguous. The caller/provider faults qualify their stated local contracts;
 they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the
@@ -366,5 +393,5 @@ specific follower recovery evidence described above. The two unported Cellule
 test targets were removed at the user's request. All-target build and strict
 Clippy gates remain enabled and pass; native and process coverage is retained.
 The removed contracts remain unqualified and are listed with their source
-revision in [the retirement inventory](retired-cellule-tests.md). Further API,
+revision in [the retirement inventory](retired-tests.md). Further API,
 index and fleet fault qualification remains separate from this SDK migration.

@@ -15,7 +15,7 @@ follower proofs with this fleet setting:
 
 All nodes need the same privately provisioned peer authentication key and a
 dedicated deployment prefix. Keep each node's data directory persistent. This
-is the native Cellar protocol; the old Cellule `follower_store_bytes`,
+is the native Cellar protocol; legacy `follower_store_bytes`,
 `follower_durability_enabled` and mTLS configuration fields are rejected.
 
 With the option enabled, the SDK installs its coupled log shipper and bundle
@@ -45,12 +45,31 @@ and prepares the SDK's clean-reload proof. `handoff` requires an eligible live
 peer. A kill or canceled shutdown supplies no graceful proof; recovery must
 follow the retained native records.
 
+```mermaid
+sequenceDiagram
+    participant Owner as Cell owner
+    participant Followers as Native followers
+    participant Bucket as Object store
+    participant Caller as Application
+    Owner->>Followers: Replicate committed sequence
+    Owner->>Bucket: Publish committed state
+    alt First eligible proof is a follower fsync
+        Followers-->>Owner: Validated sequence coverage
+    else First eligible proof is bucket publication
+        Bucket-->>Owner: Published sequence coverage
+    end
+    Owner-->>Caller: Gated durable result
+    Note over Owner: Owner process fails
+    Note over Followers,Bucket: Preserve surviving logs and published state
+    Note over Owner: Replacement waits for native fencing and recovery
+```
+
 ## Verified process boundary
 
 `acknowledged_untiered_item_survives_owner_process_kill` runs three real
 executables against pinned RustFS. It creates a public two-cell table and a
 published warmup under bucket proof, then enables native follower durability.
-The test waits for two enrolled followers and pauses balancing through native
+The recorded test waits for two enrolled followers and pauses balancing through native
 management to select a stable crash target.
 
 An S3 proxy then rejects both node-bundle and per-cell LTX uploads. Admission

@@ -1,10 +1,82 @@
 # Review BeyondDB's implementation evidence
 
+## Current Cellar reference
+
+## Current verified slice
+
+Registered targets exercise the following boundaries. Read the individual cases
+and run results before extending any claim beyond their workload/fault model.
+
+| Contract | Current target / source |
+| --- | --- |
+| Domain commands, table/item semantics | [cellar_domain](../tests/cellar_domain.rs), [account_cell](../tests/account_cell.rs) |
+| Typed SDK/SQL adapter | [cellar_sdk](../tests/cellar_sdk.rs), [runtime crate](../crates/cellar-runtime/src/lib.rs) |
+| Ordered serving, directories and splits | [cellar_serving](../tests/cellar_serving.rs), [cellar_directories](../tests/cellar_directories.rs), [keyspace](../crates/keyspace/src/lib.rs) |
+| Transactions, lost replies and batching | [cellar_transactions](../tests/cellar_transactions.rs), [cellar_coalescing](../tests/cellar_coalescing.rs) |
+| Native peer and owner fencing | [cellar_peer](../tests/cellar_peer.rs), [node_log_authority](../tests/node_log_authority.rs) |
+| Lifecycle, admission and reclamation | [creation](../tests/cellar_creation.rs), [deletion](../tests/cellar_deletion.rs), [admission](../tests/cellar_admission.rs), [reclamation](../tests/cellar_reclamation.rs) |
+| Indexes, images and metadata | [indexes](../tests/cellar_indexes.rs), [images](../tests/cellar_images.rs), [metadata](../tests/cellar_metadata.rs) |
+| Actual executable, signed requests and hard restart | [cellar_process](../tests/cellar_process.rs), [server_binary](../tests/server_binary.rs), [process helper](../tests/support/process_fixture.rs) |
+| Follower-acknowledged owner loss | [follower process case](../tests/server_binary/follower_durability.rs) |
+
+The exact CI matrix is in [Rust CI](../.github/workflows/rust.yml) and
+[signed SDK qualification](../.github/workflows/qualification.yml). An ignored
+process test has not run just because an ordinary `cargo test` succeeded.
+
+## Run the gates
+
+Use the toolchain and target-directory rules in [AGENTS.md](../AGENTS.md).
+
+```sh
+cargo fmt --all --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --locked --bin beyonddb
+cargo test --workspace --lib --locked
+cargo test --locked --test cellar_coalescing --test cellar_transactions -- --test-threads=1
+```
+
+Large transaction fixtures run separately on constrained hosts while retaining
+internal concurrency. Process fixtures require Docker, OpenSSL and AWS CLI:
+
+```sh
+cargo test --locked --test cellar_process -- --ignored --test-threads=1
+cargo test --locked --test server_binary -- --include-ignored --test-threads=1
+```
+
+## Independent client qualification
+
+Run unchanged upstream client tests against an isolated, current server and retain
+the upstream revision and complete result set. Broad protocol compatibility is
+still an open gate.
+
+The existing [convenience runner](../scripts/qualify-upstream.py) emits legacy
+configuration (`storage_url` and certificate-based peer fields). It needs a port
+before it can qualify the current executable. Do not use that runner's historical
+results as Cellar evidence. Current signed process fixtures use the native config.
+
+## Open qualification gates
+
+| Area | Work still required |
+| --- | --- |
+| Compatibility | Complete independent protocol/error matrix, including unsupported options |
+| Recovery | Partitions, simultaneous failures, idle-cell scheduling and a bounded recovery objective |
+| Resources | Sustained admission/fairness, memory/disk pressure and large payload histories |
+| Operations | Coordinated backup/PITR, supported format upgrades and storage-history collection |
+| Scale | Independent-machine throughput/latency and failure-domain evidence |
+
+Current local measurements and their failures are in
+[the benchmark report](local-benchmark.md). They are not a fleet capacity target.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** Use the current target matrix above for this server. The original engineering and qualification record below is retained by revision, including old runtime APIs, commands and test counts. Historical pass counts and references to current main do not describe the present checkout.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/implementation-status.md).
+
 > **Historical Cellule baseline:** this page records the earlier host and its
 > qualification. The current server embeds Cellar, pinned to the crates.io
-> `cellar-main =0.1.0` release. Read [Cellar migration status](../CELLAR_MIGRATION.md)
-> for current evidence and open gates, and [the server guide](cellar-server.md)
-> for current startup and deployment behavior.
+> `cellar-main =0.1.0` release. Read [the server guide](cellar-server.md)
+> for current startup, deployment behavior and qualification boundaries.
 
 This is the detailed engineering and qualification record for BeyondDB. It explains what each path does, which tests exercise it, and which claims remain open. Start with the [API coverage table](api.md) for a workload decision, the [architecture guide](architecture.md) for Cell ownership, the [user guide](user-guide.md) for requests, or the [deployment guide](deployment.md) for a local node. Run commands on this page from the repository root. Some historical results used earlier dependency pins; check [Cargo.toml](../Cargo.toml) for the current revisions.
 
@@ -21,13 +93,7 @@ BeyondDB connects ExtendDB's DynamoDB protocol, validation, expression, authenti
 
 **Evidence vocabulary:** A native Cell test checks a command or recovery path. A signed SDK test checks the public endpoint. A restart test checks that committed state survives owner loss. Passing one fixture does not qualify the full protocol suite or fleet-scale behavior.
 
-```mermaid
-flowchart LR
-    Native["Native Cell behavior"] --> Signed["Signed SDK request"]
-    Signed --> Restart["Durable owner restart"]
-    Restart --> Suite["Full protocol suite<br/>open gate"]
-    Suite --> Fleet["Sustained fleet load<br/>open gate"]
-```
+![Detailed design and recorded evidence: detailed diagram retained from the original guide](../diagram/reference/implementation-status-1.svg)
 
 The diagram orders evidence from a local command to broader compatibility and operations claims. A feature may pass one signed restart fixture while the later gates remain open.
 
@@ -43,9 +109,11 @@ AWS SDK / DynamoDB JSON client
   -> Cell actor, SQLite transaction, LTX publication, object store
 ```
 
-## Running the current server
+<a id="running-the-current-server"></a>
 
-This section records the serving binary's runtime behavior and the process fixtures that exercise it. For a step-by-step setup, use the [deployment guide](deployment.md).
+## Running the recorded server
+
+This section records the earlier serving binary and its process fixtures. For a step-by-step setup, use the [deployment guide](deployment.md).
 
 ### Request admission and node leases
 
@@ -587,13 +655,7 @@ name reuse; a signed DynamoDB SDK write and AWS CLI Streams read survived a hard
 server restart. The signed TTL sweep also emits the DynamoDB service identity on
 its REMOVE record after the owner Cell verifies the configured expiry.
 
-```mermaid
-flowchart LR
-    Change["Item or eligible TTL change"] -->|"one Cell command"| Journal["Stream journal record"]
-    Journal -->|"read before visibility cutoff"| API["Streams read API"]
-    Journal -->|"after 24 hours"| Sweep["Bounded retention sweep"]
-    Sweep --> Local["Active owner or catalog-discovered Cell"]
-```
+![Streams dependency contract: detailed diagram retained from the original guide](../diagram/reference/implementation-status-2.svg)
 
 Supervised sweeps now delete expired account and routed Cell records in bounded
 batches. Active owners are swept locally; a durable per-account cursor scans one
@@ -659,7 +721,7 @@ The backend needs these invariants:
   by account and its fingerprint must distinguish a replay from a different
   request using the same token.
 
-## Current verified slice
+## Recorded verified slice
 
 The cases below describe focused evidence, not blanket API support. The [API matrix](api.md) summarizes the resulting user-facing boundary.
 
@@ -728,9 +790,9 @@ earlier binaries is unqualified.
 
 The descriptions below retain historical Cellule fixture details. The unported
 `elastic_cells` and `peer_network` targets were removed on 2026-10-18 at the
-user's request; [their source and coverage inventory](retired-cellule-tests.md)
-records what is no longer gated. Current native Cellar results are recorded in
-[the migration report](../CELLAR_MIGRATION.md).
+user's request; [their source and coverage inventory](retired-tests.md)
+records what is no longer gated. Current native Cellar fixtures are described in
+[the server guide](cellar-server.md#qualification-still-required).
 
 `tests/account_cell.rs` exercises them through a real
 `CellNodeBuilder` and in-memory object store, including request replay,

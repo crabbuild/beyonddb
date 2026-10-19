@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" role="img" aria-labelledby="title desc">
+<title id="title">GSI delivery is durable and asynchronous</title>
+<desc id="desc">Base acknowledgement does not imply that an index read already includes the change.</desc>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+<marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0L10 4L0 8Z" fill="#94a3b8"/></marker>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#f1f5f9} .title{font-size:25px;font-weight:700} .heading{font-size:18px;font-weight:600} .note{font-size:15px;fill:#cbd5e1} .small{font-size:14px;fill:#94a3b8} .edge{fill:none;stroke:#94a3b8;stroke-width:1.8;marker-end:url(#arrow)}</style>
+</defs>
+<rect width="1000" height="560" rx="16" fill="#0f172a"/>
+<rect width="1000" height="560" rx="16" fill="url(#grid)"/>
+<rect x="30" y="115" width="440" height="140" rx="12" fill="none" stroke="#64748b" stroke-dasharray="7 5"/>
+<path d="M235 197H265" class="edge"/>
+<path d="M455 197H520" class="edge"/>
+<path d="M710 197H760" class="edge"/>
+<path d="M860 240V350H360V240" class="edge"/>
+<rect x="45" y="155" width="190" height="85" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="265" y="155" width="190" height="85" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="520" y="155" width="190" height="85" rx="9" fill="#083344" stroke="#22d3ee" stroke-width="1.4"/>
+<rect x="760" y="155" width="205" height="85" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<text x="35" y="45" class="title" text-anchor="start">GSI delivery is durable and asynchronous</text>
+<text x="35" y="75" class="small" text-anchor="start">Base acknowledgement does not imply that an index read already includes the change.</text>
+<text x="42" y="135" class="small" text-anchor="start">One base-cell command</text>
+<text x="140.0" y="185" class="heading" text-anchor="middle">Base change</text>
+<text x="140.0" y="209" class="note" text-anchor="middle">Item + local indexes</text>
+<text x="360.0" y="185" class="heading" text-anchor="middle">Journal intent</text>
+<text x="360.0" y="209" class="note" text-anchor="middle">Immutable old/new</text>
+<text x="360.0" y="228" class="note" text-anchor="middle">images</text>
+<text x="615.0" y="185" class="heading" text-anchor="middle">Projection worker</text>
+<text x="615.0" y="209" class="note" text-anchor="middle">Bounded retryable</text>
+<text x="615.0" y="228" class="note" text-anchor="middle">delivery</text>
+<text x="862.5" y="185" class="heading" text-anchor="middle">Index range</text>
+<text x="862.5" y="209" class="note" text-anchor="middle">Versioned rows /</text>
+<text x="862.5" y="228" class="note" text-anchor="middle">tombstones</text>
+<text x="600" y="330" class="note" text-anchor="middle">Acknowledge source only after every required index result</text>
+<text x="35" y="430" class="note" text-anchor="start">Lost reply: retain source work. Stale delivery: keep the newer index version.</text>
+<text x="35" y="465" class="note" text-anchor="start">COMMIT emits projection intent; ABORT and split-copy import do not create user changes.</text>
+<text x="35" y="510" class="small" text-anchor="start">Online GSI create/delete/update and complete collection/fleet recovery remain open.</text>
+</svg>

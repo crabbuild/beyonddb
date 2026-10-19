@@ -30,4 +30,4 @@ transactional reads. A status code never establishes non-execution of a write.
 
 The crate is a member of the BeyondDB workspace and shares its pinned Cellar
 dependency and root lockfile. See the repository's
-[migration status](../../CELLAR_MIGRATION.md) for outstanding work and checks.
+[server qualification boundaries](../../docs/cellar-server.md#qualification-still-required) for outstanding work and checks.

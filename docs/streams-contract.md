@@ -1,5 +1,20 @@
 # Streams implementation: closed-shard contract
 
+## Current Cellar reference
+
+Creation-time Streams capture, generation discovery and retained reads are
+implemented. `UpdateTable` policy changes remain unsupported. The pinned
+ExtendDB revision already contains the reviewed explicit continuation contract.
+
+The original record/cursor semantics, lifecycle reasoning, upstream API proposal
+and complete acceptance checklist remain below. Proposed transitions and
+collection work are not implemented merely because the shared type exists.
+
+## Detailed design and recorded evidence
+
+> **Revision scope:** The current public path and limitations are above. The original record format, lifecycle rationale and upstream contract review follow. The proposed continuation contract is already present in the reviewed pin; proposed policy/lifecycle work is not thereby implemented.
+> Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/streams-contract.md).
+
 ## At a glance
 
 ```text
@@ -165,7 +180,7 @@ SQLite pagination, and account isolation. Focused tests passed against the
 fork commit, but PostgreSQL/MongoDB still require their backend integration
 gates; compiling their adapters alone does not establish runtime behavior.
 
-**Is this the best fix?** An explicit continuation state removes the ambiguity
+An explicit continuation state removes the ambiguity
 at the owning contract. It preserves both valid empty-open polling and final
 nonempty pages, without sentinel sequence numbers, error matching, or a second
 HTTP implementation. All three sibling backend producers must change with the
