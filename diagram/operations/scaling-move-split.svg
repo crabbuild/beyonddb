@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 780" role="img" aria-labelledby="title desc">
+<title id="title">Moving a Cell and splitting a range</title>
+<desc id="desc">Moving a logical Cell keeps its identity and ordered interval while native Cellar changes its fenced physical owner. A range split replaces one source with two child identities and intervals and publishes a new application route after verification. Placement is illustrative; this is not a live-copy or zero-downtime claim.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="780" fill="#0f172a"/>
+<rect width="1120" height="780" fill="url(#grid)"/>
+<text x="40" y="53" class="title">Moving a Cell and splitting a range</text>
+<text x="40" y="90" class="note">Logical ownership and physical placement change through different protocols.</text>
+<rect x="40" y="125" width="1040" height="250" rx="16" fill="#111c30" stroke="#34d399" stroke-width="1.3" stroke-dasharray="7 6"/>
+<text x="64" y="167" class="eyebrow" style="fill:#34d399">MOVE</text>
+<text x="64" y="216" class="note">Same Cell ID</text>
+<text x="64" y="246" class="note">Same interval</text>
+<text x="64" y="276" class="note">Native owner fence</text>
+<path d="M620 252H710" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="290" y="197" width="330" height="118" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="314" y="232" class="heading">Node 1 owns Cell A</text>
+<text x="314" y="272" class="body">Interval [a, z)</text>
+<rect x="710" y="197" width="346" height="118" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="734" y="232" class="heading">Node 2 owns Cell A</text>
+<text x="734" y="272" class="body">Interval [a, z)</text>
+<text x="290" y="349" class="note">The application directory still names the same Cell and range.</text>
+<rect x="40" y="420" width="1040" height="277" rx="16" fill="#111c30" stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="7 6"/>
+<text x="64" y="463" class="eyebrow" style="fill:#a78bfa">SPLIT</text>
+<text x="64" y="510" class="note">New child IDs</text>
+<text x="64" y="540" class="note">New range epochs</text>
+<text x="64" y="570" class="note">Replacement route</text>
+<path d="M620 557H660V502H710" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M660 557V613H710" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<rect x="290" y="498" width="330" height="118" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="314" y="533" class="heading">Source Cell A</text>
+<text x="314" y="573" class="body">Interval [a, z)</text>
+<rect x="710" y="462" width="346" height="80" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="734" y="494" class="heading">Child Cell B</text>
+<text x="734" y="524" class="body">Interval [a, m)</text>
+<rect x="710" y="573" width="346" height="80" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="734" y="605" class="heading">Child Cell C</text>
+<text x="734" y="635" class="body">Interval [m, z)</text>
+<text x="290" y="675" class="note">Verify copies before publishing the children; then open them.</text>
+<text x="40" y="749" class="note">Illustrative boundaries. Source sealing can interrupt access; merges remain design work.</text>
+</svg>
