@@ -94,6 +94,39 @@ Keep these in the service's secret environment. Client shells use the separately
 bootstrapped DynamoDB key; changing client credentials must not change the
 server's object-store identity.
 
+## Local object-store fixture
+
+Use a disposable local store to exercise fleet mode before configuring a remote
+provider. This fixture is not a production storage or backup recommendation.
+Its port avoids the default private peer listener on 9000.
+
+```sh
+docker run --detach --name beyonddb-docs-store \
+  --publish 127.0.0.1:19100:9000 \
+  --env RUSTFS_ACCESS_KEY=localdocs \
+  --env RUSTFS_SECRET_KEY=local-docs-store-secret \
+  --env RUSTFS_CONSOLE_ENABLE=false \
+  --volume beyonddb-docs-objects:/data \
+  ghcr.io/rustfs/rustfs:1.0.0-glibc@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
+
+export AWS_ACCESS_KEY_ID=localdocs
+export AWS_SECRET_ACCESS_KEY=local-docs-store-secret
+export AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:19100 s3api create-bucket \
+  --bucket beyonddb-docs
+```
+
+Wait for the store to accept S3 requests before creating the bucket. Use these
+credentials in the **server** environment; keep the DynamoDB client shell
+separate. Configure `fleet.bucket` as `beyonddb-docs`, `fleet.endpoint` as
+`http://127.0.0.1:19100`, and a fresh dedicated prefix. The named volume preserves
+objects across container restart. Do not delete it while retained experiments
+or acknowledged state depend on it. A new test deployment needs its own namespace.
+
+Record storage type and mounts with measurements: a VM-native volume and a
+host-shared filesystem can have different publication latency. That local
+observation is not evidence of production capacity or storage correctness.
+
 ## Bootstrap and start
 
 In Bash, read the first DynamoDB secret without adding it to shell history:
@@ -156,3 +189,32 @@ workload. Exercise owner loss, ambiguous mutations, capacity limits and restore
 from retained state. Backups/PITR, supported in-place upgrades and bounded fleet
 recovery are still open gates; a copied live data directory is not a table backup.
 Use [implementation status](implementation-status.md) to select current tests.
+
+## State and credential retention
+
+| State | Who uses it | Retain or replace deliberately |
+| --- | --- | --- |
+| Object-store credentials | Server S3 clients | Equivalent authorized credentials may replace them; keep the prefix accessible |
+| Encryption key | Credential cells | Required to decrypt existing access secrets; not a database-wide SSE setting |
+| Shared peer key | Native authenticated transport | Every participating node must agree; key rotation requires a qualified transition |
+| DynamoDB access key/secret | Signed client | Retain until credential rotation or revocation is implemented and exercised |
+| Node directory | Cellar local state and logs | Preserve across same-node reload and while native recovery needs retained logs |
+| Bucket prefix | Fleet authority and published recovery state | Dedicated to one compatible deployment; arbitrary lifecycle deletion is unsafe |
+
+## Verify startup and recovery
+
+A healthy listener is only one part of the original acceptance path. Check the
+signed endpoint, correct generation and durable result, then exercise restart:
+
+1. Create a disposable multi-range table and wait for ACTIVE.
+2. Write a unique value using a condition; read it consistently.
+3. Stop with SIGTERM, wait for a successful drain, restart without bootstrap and
+   read that value and metadata again.
+4. For fleet qualification, use the registered process fixtures to remove a failed
+   owner's local state and recover under a native lease fence. Do not improvise
+   authority edits or delete a live node directory.
+5. Repeat the relevant transaction/index/Streams cases and record failures and
+   the exact binary/storage/configuration. A local restart is not machine-loss proof.
+
+[Implementation status](implementation-status.md) retains detailed fault evidence,
+current target commands and the distinction between historical and current runs.

@@ -49,5 +49,6 @@ are the sources of truth for versions, fields and executable checks. Runtime
 settings from earlier implementations are not valid configuration examples.
 
 Architecture and flow visuals are self-contained SVGs in `diagram/`. Mermaid
-blocks contain sequence diagrams only. Historical development discussions are
-available through Git history, outside the operational guides.
+blocks contain sequence diagrams only. Detailed guides retain protocol reasoning, failure analyses and revision-scoped
+evidence in place. Current entry points distinguish those records from supported
+operational instructions; Git history provides the exact original snapshots.

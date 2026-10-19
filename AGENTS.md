@@ -19,8 +19,8 @@ Read [README.md](README.md) for product scope, [architecture](docs/architecture.
 for subsystem boundaries, [the server guide](docs/cellar-server.md) for deployment
 and qualification, and [API coverage](docs/api.md) before changing public behavior.
 The [ordered partitioning contract](docs/ordered-cell-partitioning.md) governs
-routing. Historical design and test results are linked from the implementation-status
-guide; confirm current behavior against source and registered tests.
+routing. Detailed design and revision-scoped evidence remain in the original guides;
+confirm current behavior against source and registered tests.
 
 [Cargo.toml](Cargo.toml), [Cargo.lock](Cargo.lock) and the
 [CI workflows](.github/workflows) define dependency and toolchain versions.
@@ -252,7 +252,10 @@ heavy builds or qualification fixtures against the same host resource budget.
   as passed.
 
 Documentation uses SVG for architecture/flow visuals and Mermaid only for
-sequence diagrams. Keep operational guides current; link historical evidence
-through Git history instead of mixing development logs into deployment instructions.
+sequence diagrams. Preserve the original substantive coverage: contracts, rationale,
+fault cases, measurements and reproduction steps. Tighten wording and navigation
+without replacing detailed guides with summaries. Keep operational instructions
+current and label older evidence by revision; do not relabel historical runtime
+results as Cellar qualification.
 Run `python3 scripts/check-docs.py` after documentation edits; it checks local
 links/headings, shell and JSON examples, SVG structure and the sequence-only rule.

@@ -57,8 +57,6 @@ def main():
             errors.append(f'{relative}: {error}')
             continue
         counts['documents'] += 1
-        if relative != Path('docs/retired-tests.md') and re.search(r'\bcellule\b', text, re.I):
-            errors.append(f'{relative}: legacy runtime name belongs in the retired history record')
         for language, line, body in blocks:
             if language == 'mermaid':
                 significant = [v.strip() for v in body.splitlines() if v.strip() and not v.lstrip().startswith('%%')]
@@ -92,7 +90,7 @@ def main():
             svg = ET.parse(path).getroot()
             if svg.tag != '{http://www.w3.org/2000/svg}svg' or 'viewBox' not in svg.attrib:
                 raise ValueError('SVG needs its namespace and a viewBox')
-            if path.parent.name == 'operations':
+            if path.parent.name in ('operations', 'reference'):
                 for name in ('title', 'desc'):
                     if svg.find(f'{{http://www.w3.org/2000/svg}}{name}') is None:
                         raise ValueError(f'SVG needs accessible {name}')
