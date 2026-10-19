@@ -26,8 +26,10 @@ jobs:
       - name: Check configurable benchmark tooling
         run: |
           python3 -m venv "$RUNNER_TEMP/perf-venv"
-          "$RUNNER_TEMP/perf-venv/bin/pip" install -r scripts/perf/requirements.txt
+          "$RUNNER_TEMP/perf-venv/bin/pip" install -r scripts/perf/requirements-cloudflare.txt
           "$RUNNER_TEMP/perf-venv/bin/python" -m unittest discover -s scripts/perf -p 'test_*.py'
+          "$RUNNER_TEMP/perf-venv/bin/python" -m py_compile deploy/cloudflare/agent.py deploy/cloudflare/provision.py scripts/perf/cloudflare.py scripts/perf/cloudflare_report.py
+          node --check deploy/cloudflare/worker.js
   build:
     runs-on: ubuntu-24.04
     steps:

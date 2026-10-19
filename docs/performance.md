@@ -7,6 +7,7 @@ server and client preparation steps.
 | I need to… | Start here |
 | --- | --- |
 | Read the Cellar measurements and their limits | [Recorded result](#current-local-result) |
+| Inspect the three-node Cloudflare + R2 experiment | [Cloudflare benchmark](cloudflare-benchmark.md) |
 | Choose a harness and run a comparison | [Run a benchmark](#run-a-benchmark) |
 | Understand throughput, tail latency and errors | [Read the report](#read-the-report) |
 | Investigate an earlier optimization or release | [Detailed evidence](#detailed-design-and-recorded-evidence) |
