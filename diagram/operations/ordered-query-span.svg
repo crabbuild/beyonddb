@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 810" role="img" aria-labelledby="title desc">
+<title id="title">One Query can cross multiple Cells of the same PK</title>
+<desc id="desc">An illustrative populated directory has Cell A before (customer-42,10), Cell B from (customer-42,10) to (customer-42,20), Cell C from (customer-42,20) to the start of customer-90, and Cell D beyond that. A Query for customer-42 with numeric sort key BETWEEN 12 and 25 intersects B and C. Forward traversal visits B then C, reverse visits C then B. Only matching logical keys are returned, clipped to the requested span. Boundary widths do not represent data size or load, and the layout is not a bootstrap promise.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="810" fill="#0f172a"/>
+<rect width="1120" height="810" fill="url(#grid)"/>
+<text x="40" y="53" class="title">One Query can cross multiple Cells of the same PK</text>
+<text x="40" y="88" class="note">Illustrative populated layout without LSIs; each range is half-open [lower, upper).</text>
+<rect x="40" y="140" width="1040" height="84" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="560" y="175" class="heading" text-anchor="middle">PK = customer-42 AND numeric SK BETWEEN 12 AND 25</text>
+<text x="560" y="204" class="note" text-anchor="middle">Compile one logical span, then visit only intersecting ranges.</text>
+<path d="M560 224V264" class="edge" stroke="#22d3ee"/>
+<path d="M425 264H695" class="edge" stroke="#22d3ee"/>
+<path d="M425 264V324" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M695 264V324" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="40" y="324" width="230" height="144" rx="12" fill="#1e293b" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="58" y="359" class="heading">Cell A</text>
+<text x="58" y="392" class="note">Earlier logical keys</text>
+<text x="58" y="436" class="note">Outside this Query</text>
+<rect x="310" y="324" width="230" height="144" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="328" y="359" class="heading">Cell B</text>
+<text x="328" y="392" class="note">10 ≤ SK &lt; 20</text>
+<text x="328" y="436" class="note">Read only 12 ≤ SK &lt; 20</text>
+<rect x="580" y="324" width="230" height="144" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="598" y="359" class="heading">Cell C</text>
+<text x="598" y="392" class="note">From (customer-42, 20)</text>
+<text x="598" y="436" class="note">Read only 20 ≤ SK ≤ 25</text>
+<rect x="850" y="324" width="230" height="144" rx="12" fill="#1e293b" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="868" y="359" class="heading">Cell D</text>
+<text x="868" y="392" class="note">customer-90 onward</text>
+<text x="868" y="436" class="note">Outside this Query</text>
+<text x="40" y="515" class="note">Cell C can also hold later logical keys; the Query remains clipped to customer-42.</text>
+<rect x="220" y="565" width="680" height="96" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="560" y="600" class="heading" text-anchor="middle">Forward: B → C   |   Reverse: C → B</text>
+<text x="560" y="631" class="note" text-anchor="middle">One request limit and evaluation budget across every visited Cell.</text>
+<text x="40" y="717" class="body">A PK equality condition does not imply one Cell or one local transaction.</text>
+<text x="40" y="757" class="note">These schematic intervals are not byte/load proportions or workload-derived bootstrap boundaries.</text>
+</svg>
