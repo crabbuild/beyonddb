@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 934" role="img" aria-labelledby="title desc">
+<title id="title">Server lifecycle: readiness and clean shutdown</title>
+<desc id="desc">Startup validates configuration, starts Cellar, optionally bootstraps credentials and policy, completes initial transaction recovery for configured accounts, then starts maintenance and public serving. SIGINT or SIGTERM drains the public listener, cancels and joins maintenance, requests Cellar shutdown, checks the complete drain report and retains state. A fence or maintenance failure withdraws public serving; failures must not be treated as a clean stop.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="934" fill="#0f172a"/>
+<rect width="1120" height="934" fill="url(#grid)"/>
+<text x="40" y="53" class="title">Server lifecycle: readiness and clean shutdown</text>
+<text x="40" y="88" class="note">Read top to bottom. A failed gate does not authorize serving or a clean-exit claim.</text>
+<text x="40" y="141" class="eyebrow" style="fill:#22d3ee">STARTUP</text>
+<text x="590" y="141" class="eyebrow" style="fill:#fbbf24">SIGINT / SIGTERM</text>
+<path d="M285 248V296" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<path d="M285 374V422" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M285 500V548" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M285 626V674" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="40" y="170" width="490" height="78" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="62" y="202" class="heading">Validate configuration</text>
+<text x="62" y="230" class="note">Check fields, paths, key sizes and TLS.</text>
+<rect x="40" y="296" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="62" y="328" class="heading">Start Cellar</text>
+<text x="62" y="356" class="note">Wait for native node readiness.</text>
+<rect x="40" y="422" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="62" y="454" class="heading">Bootstrap when requested</text>
+<text x="62" y="482" class="note">Persist credential and operator policy.</text>
+<rect x="40" y="548" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="62" y="580" class="heading">Initial account recovery</text>
+<text x="62" y="608" class="note">Complete a pass for every listed account.</text>
+<rect x="40" y="674" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="62" y="706" class="heading">Start maintenance + serve</text>
+<text x="62" y="734" class="note">Expose /health and signed requests.</text>
+<path d="M835 248V296" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<path d="M835 374V422" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M835 500V548" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M835 626V674" class="edge" stroke="#fbbf24" marker-end="url(#arrow-amber)"/>
+<rect x="590" y="170" width="490" height="78" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="612" y="202" class="heading">Drain public listener</text>
+<text x="612" y="230" class="note">ExtendDB stops accepting public work.</text>
+<rect x="590" y="296" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="612" y="328" class="heading">Cancel + join maintenance</text>
+<text x="612" y="356" class="note">Keep both executors alive.</text>
+<rect x="590" y="422" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="612" y="454" class="heading">Request Cellar shutdown</text>
+<text x="612" y="482" class="note">Use preserve or fleet-only handoff.</text>
+<rect x="590" y="548" width="490" height="78" rx="12" fill="#352b20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="612" y="580" class="heading">Validate the stop report</text>
+<text x="612" y="608" class="note">Drain complete; durability closed.</text>
+<rect x="590" y="674" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="612" y="706" class="heading">Exit + retain persistent state</text>
+<text x="612" y="734" class="note">Fleet preserve needs clean-reload proof.</text>
+<rect x="40" y="818" width="1040" height="76" rx="12" fill="#3b2036" stroke="#fb7185" stroke-width="1.6"/>
+<text x="62" y="849" class="body">While serving: a node fence or supervised maintenance failure withdraws the public server.</text>
+<text x="62" y="878" class="note">A killed process or incomplete drain is not a successful shutdown.</text>
+</svg>
