@@ -9,6 +9,17 @@ permissions:
   contents: read
 
 jobs:
+  benchmark-tools:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Check configurable benchmark tooling
+        run: |
+          python3 -m venv "$RUNNER_TEMP/perf-venv"
+          "$RUNNER_TEMP/perf-venv/bin/pip" install -r scripts/perf/requirements.txt
+          "$RUNNER_TEMP/perf-venv/bin/python" -m unittest discover -s scripts/perf -p 'test_*.py'
   build:
     runs-on: ubuntu-24.04
     steps:

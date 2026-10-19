@@ -1,5 +1,11 @@
 # Measure BeyondDB performance
 
+The current Cellar `=0.1.0` three-node characterization is documented in
+[the local benchmark](local-benchmark.md). It verifies ten table
+data cells per node under 1 vCPU / 3 GiB / 5 GiB data limits, and records both
+throughput and latency, including transaction errors at higher concurrency.
+The measurements below retain the historical fixtures and their limitations.
+
 BeyondDB does not yet have a qualified production throughput or latency target. Earlier September 2026 single-node samples suggested that warm point reads could exceed the file-backed SQLite fixture, while durable writes and transactions remained slower. The refresh below did not reproduce those high read rates. Do not use these numbers to plan a fleet. BeyondDB's request path and durability contract differ: by default an item write waits for Cellule to publish committed state to object storage. Experimental follower durability can acknowledge a durable follower receipt while object tiering continues.
 
 Benchmark reports, raw logs and fixture snapshots are kept locally and excluded from Git. The summaries below retain measured revisions and limitations; durable behavior is checked by the committed integration tests.
