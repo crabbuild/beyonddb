@@ -18,13 +18,12 @@ import boto3
 from blake3 import blake3
 from botocore.config import Config
 
+from topology import Topology
+
 ACCOUNT = "123456789012"
 APP = bytes([0x42]) * 16
 ACCOUNT_NS = APP
 DATA_NS = bytes([0x43]) * 16
-NODE_NAMES = [f"perf30-node{i}" for i in range(1, 4)]
-PUBLIC = [f"http://127.0.0.1:{18000+i}" for i in range(1, 4)]
-PEER_PORTS = [19000+i for i in range(1, 4)]
 
 
 def digest(*parts):
@@ -73,9 +72,18 @@ def headers(key, node, path, body):
 class Control:
     def __init__(self, run_dir):
         self.root = Path(run_dir)
+        self.topology = Topology.load(self.root)
         self.key = (self.root / "peer.key").read_bytes()
         self.credentials = json.loads((self.root / "credentials.json").read_text())
         settings = json.loads((self.root / "node1.json").read_text())
+        for index in self.topology.indices:
+            node = json.loads((self.root / f"node{index+1}.json").read_text())
+            if (node["initial_partitions"] != self.topology.cells
+                    or node["node_name"] != self.topology.node_names[index]
+                    or node["public_endpoint"] != self.topology.endpoints[index]
+                    or node["peer_bind"] != f"127.0.0.1:{self.topology.peer_port(index)}"
+                    or node["fleet"] != settings["fleet"]):
+                raise ValueError("node configuration differs from persisted fixture topology")
         self.bucket = settings["fleet"]["bucket"]
         self.prefix = settings["fleet"]["prefix"]
         self.s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:19100",
@@ -84,7 +92,7 @@ class Control:
                                config=Config(retries={"total_max_attempts": 1}))
 
     def sdk(self, index=0, pool=128):
-        return boto3.client("dynamodb", endpoint_url=PUBLIC[index], region_name="us-east-1",
+        return boto3.client("dynamodb", endpoint_url=self.topology.endpoints[index], region_name="us-east-1",
                             aws_access_key_id=self.credentials["access_key"],
                             aws_secret_access_key=self.credentials["secret"],
                             config=Config(max_pool_connections=pool, connect_timeout=2,
@@ -92,7 +100,7 @@ class Control:
 
     def lease(self, index):
         value = json.loads(self.s3.get_object(Bucket=self.bucket,
-                           Key=f"{self.prefix}/nodes/{NODE_NAMES[index]}.json")["Body"].read())
+                           Key=f"{self.prefix}/nodes/{self.topology.node_names[index]}.json")["Body"].read())
         if value["expires_ms"] <= time.time_ns() // 1_000_000:
             raise RuntimeError("node lease expired")
         return value
@@ -100,10 +108,10 @@ class Control:
     def action(self, index, action):
         lease = self.lease(index)
         body = json.dumps({"generation": lease["generation"], "action": action}).encode()
-        conn = http.client.HTTPConnection("127.0.0.1", PEER_PORTS[index], timeout=40)
+        conn = http.client.HTTPConnection("127.0.0.1", self.topology.peer_port(index), timeout=40)
         try:
             conn.request("POST", "/peer/management", body,
-                         headers(self.key, NODE_NAMES[index], "/peer/management", body))
+                         headers(self.key, self.topology.node_names[index], "/peer/management", body))
             response = conn.getresponse()
             result = json.loads(response.read())
             if response.status != 200 or response.getheader("x-cells-peer-version") != "1":
@@ -117,10 +125,10 @@ class Control:
         encoded = blob(json.dumps(value, separators=(",", ":")).encode())
         frame = (blob(b"BDB1") + blob(tenant()) + blob(APP) + blob(namespace) + blob(partition)
                  + struct.pack(">II", operation, 1) + b"\0" + struct.pack(">Q", 0) + blob(encoded))
-        sock = socket.create_connection(("127.0.0.1", PEER_PORTS[index]), timeout=45)
+        sock = socket.create_connection(("127.0.0.1", self.topology.peer_port(index)), timeout=45)
         stream = sock.makefile("rb")
         try:
-            upgrade_headers = headers(self.key, NODE_NAMES[index], "/peer/tunnel", b"")
+            upgrade_headers = headers(self.key, self.topology.node_names[index], "/peer/tunnel", b"")
             upgrade_headers.update({"Host": "localhost", "Connection": "Upgrade",
                                     "Upgrade": "cellar-tunnel", "Content-Length": "0",
                                     "x-cells-tunnel-version": "1", "x-cells-tunnel-kind": "do"})
@@ -160,7 +168,7 @@ class Control:
 
     def ownership(self):
         result = []
-        for index in range(3):
+        for index in self.topology.indices:
             items, after = [], None
             while True:
                 page = self.action(index, {"cells": {"after": after, "limit": 100}})
@@ -170,5 +178,5 @@ class Control:
                 after = page["next_cursor"]
                 if after is None:
                     break
-            result.append({"node": NODE_NAMES[index], "lease": self.lease(index), "cells": items})
+            result.append({"node": self.topology.node_names[index], "lease": self.lease(index), "cells": items})
         return result

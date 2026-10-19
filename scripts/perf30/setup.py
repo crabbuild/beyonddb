@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create/start/stop only this benchmark's Docker resources in a dedicated VM.
 
-Prepare three 5 GiB ext4 mounts in the VM first; see docs/local-30-cell-benchmark.md.
+Prepare one 5 GiB ext4 mount per configured node in the VM first; see docs/local-30-cell-benchmark.md.
 The load generator and object store are outside each database node's limits.
 """
 import argparse
@@ -14,6 +14,7 @@ import time
 import urllib.request
 
 from control import Control
+from topology import Topology
 
 CONTEXT = "colima-bdbperf30"
 RUNTIME = "rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e"
@@ -36,12 +37,27 @@ def main():
     parser.add_argument("action", choices=["init", "store", "node", "stop"])
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--binary", type=Path)
-    parser.add_argument("--node", type=int, choices=[1, 2, 3])
+    parser.add_argument("--node", type=int)
+    parser.add_argument("--nodes", type=int, help="init only: node count (default: 3)")
+    parser.add_argument("--cells-per-node", type=int, help="init only: table ranges per node (default: 10)")
     parser.add_argument("--bootstrap", action="store_true")
     args = parser.parse_args()
     root = args.run_dir.resolve()
+    if args.action != "init" and (args.nodes is not None or args.cells_per_node is not None):
+        parser.error("topology options apply only to init; later actions use fixture.json")
+    try:
+        topology = (Topology(args.nodes if args.nodes is not None else 3,
+                             args.cells_per_node if args.cells_per_node is not None else 10)
+                    if args.action == "init" else Topology.load(root))
+    except ValueError as error:
+        parser.error(str(error))
+    if args.action == "node" and (args.node is None or not 1 <= args.node <= topology.nodes):
+        parser.error(f"node must be between 1 and {topology.nodes}")
     if args.action == "init":
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if any(root.iterdir()):
+            parser.error("init requires an empty run directory; retained fixtures must not be overwritten")
+        write_private(root / "fixture.json", json.dumps(topology.to_dict(), indent=2).encode())
         credentials = {"access_key": "AKIAPERF30LOCAL0001", "secret": secrets.token_urlsafe(40),
                        "store_secret": secrets.token_urlsafe(40)}
         write_private(root / "credentials.json", json.dumps(credentials).encode())
@@ -56,13 +72,13 @@ def main():
                       "AWS_ALLOW_HTTP=true\nAWS_VIRTUAL_HOSTED_STYLE_REQUEST=false\n").encode())
         write_private(root / "policy.json", json.dumps({"Version": "2012-10-17", "Statement": [
             {"Effect": "Allow", "Action": "dynamodb:*", "Resource": "*"}]}).encode())
-        for i in range(1, 4):
+        for i in range(1, topology.nodes + 1):
             config = {"node_name": f"perf30-node{i}", "data_dir": "/data", "region": "us-east-1",
                       "public_bind": f"127.0.0.1:{18000+i}",
                       "public_endpoint": f"http://127.0.0.1:{18000+i}",
-                      "peer_bind": f"127.0.0.1:{19000+i}", "peer_advertise": f"127.0.0.1:{19000+i}",
+                      "peer_bind": f"127.0.0.1:{topology.peer_port(i-1)}", "peer_advertise": f"127.0.0.1:{topology.peer_port(i-1)}",
                       "peer_key_file": "/config/peer.key", "encryption_key_file": "/config/encryption.key",
-                      "accounts": ["123456789012"], "initial_partitions": 30,
+                      "accounts": ["123456789012"], "initial_partitions": topology.cells,
                       "max_active_cells": 2048, "split_threshold_bytes": 1073741824,
                       "auth_cache_enabled": False, "shutdown_mode": "preserve",
                       "fleet": {"bucket": "beyonddb-perf30", "endpoint": "http://127.0.0.1:19100",
@@ -73,7 +89,7 @@ def main():
             write_private(root / f"node{i}.json", json.dumps(config, indent=2).encode())
         print("Created private configuration and credentials.")
     elif args.action == "store":
-        print(docker("run", "--detach", "--name", "beyonddb-perf30-store", "--label", "beyonddb.perf=30cells",
+        print(docker("run", "--detach", "--name", "beyonddb-perf30-store", "--label", f"beyonddb.perf={topology.cells}cells",
                      "--network", "host", "--cpus", "1", "--memory", "4g", "--memory-swap", "4g",
                      "--env-file", str(root / "store.env"), "--volume", "beyonddb-perf30-store:/data",
                      STORE, "/data", "--address", "127.0.0.1:19100"))
@@ -98,7 +114,7 @@ def main():
         command = f"exec /opt/beyonddb /config/node{i}.json"
         if args.bootstrap:
             command += " --bootstrap < /config/bootstrap.secret"
-        print(docker("run", "--detach", "--name", f"beyonddb-perf30-node{i}", "--label", "beyonddb.perf=30cells",
+        print(docker("run", "--detach", "--name", f"beyonddb-perf30-node{i}", "--label", f"beyonddb.perf={topology.cells}cells",
                      "--network", "host", "--cpus", "1", "--memory", "3g", "--memory-swap", "3g",
                      "--ulimit", "nofile=65536:65536", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m", "--cap-drop", "ALL",
                      "--security-opt", "no-new-privileges", "--pids-limit", "512",
@@ -122,9 +138,9 @@ def main():
             time.sleep(1)
         print(f"Node {i} ready.")
     else:
-        print(docker("stop", "--timeout", "100", *[f"beyonddb-perf30-node{i}" for i in range(1, 4)]))
+        print(docker("stop", "--timeout", "100", *[f"beyonddb-perf30-node{i}" for i in range(1, topology.nodes + 1)]))
         print(docker("stop", "--timeout", "30", "beyonddb-perf30-store"))
-        stopped = json.loads(docker("inspect", *[f"beyonddb-perf30-node{i}" for i in range(1, 4)], "beyonddb-perf30-store"))
+        stopped = json.loads(docker("inspect", *[f"beyonddb-perf30-node{i}" for i in range(1, topology.nodes + 1)], "beyonddb-perf30-store"))
         if any(p["State"]["Running"] or p["State"]["ExitCode"] != 0 or p["State"]["OOMKilled"] for p in stopped):
             raise RuntimeError("benchmark stop was incomplete; inspect retained process logs")
 

@@ -1,6 +1,33 @@
-# Three nodes, one table, 30 data cells
+# Configurable local benchmark: nodes and table cells
 
-This local fixture measures signed DynamoDB API throughput and response latency
+`scripts/perf30` supports `--nodes N --cells-per-node C` on `setup.py init`.
+The total table range count is `N * C`, between **2 and 256**, matching the
+server's bootstrap limit. Both values must be positive. The defaults remain
+three nodes and ten data cells per node; the directory, container and table
+names retain `perf30` for compatibility with the original fixture.
+
+```sh
+python3 scripts/perf30/setup.py init --run-dir /path/to/fresh-run \
+  --nodes 4 --cells-per-node 8
+```
+
+This example creates four node configurations and a 32-range table plan.
+`fixture.json` in the private run directory persists the topology. Later setup,
+prepare, measure and verify actions load it automatically. Node configurations
+and saved table manifests must agree; passing topology flags to later setup
+actions is rejected. Existing fixtures without `fixture.json` retain the original
+three-node, 30-cell interpretation. Initialize into an empty directory; retained
+keys and data must not be reinitialized or reused with a different topology.
+
+Placement assigns a contiguous block of `C` ranges to each node. Load rotates
+over every range and ingress node. Two-item transactions target different nodes
+when `N > 1`; a single-node fixture targets distinct cells on that node.
+Reports and plots derive counts, coverage, workload order and concurrency from
+the saved results. Original 30-cell result files remain readable. The October 18
+measurements below describe the original topology; other configurations have
+not been performance-qualified.
+
+The original local fixture measured signed DynamoDB API throughput and response latency
 using three Linux containers. Each database node has **1 vCPU, 3 GiB RAM, no
 container swap allowance, and its own 5 GiB ext4 data disk**. Each node
 also sets `nofile=65536:65536`; the VM Docker default of 1,024 is insufficient
@@ -131,8 +158,16 @@ Use a dedicated Colima profile; never resize or stop another experiment's VM.
 The checked-in setup script deliberately owns only resources named
 `beyonddb-perf30-*` in the `colima-bdbperf30` context. Its configuration and data
 paths are fixed to that fixture. Public and peer listeners bind loopback.
+Only one topology can occupy this named fixture at a time. A different topology
+requires a fresh dedicated VM/data deployment after preserving any retained
+experiment. Scale VM CPU, memory and disk for the selected node count plus the
+separate object store; each database container retains its 1 CPU / 3 GiB / 5 GiB
+limits. The following defaults reproduce the measured topology:
 
 ```sh
+PERF_NODES=3
+PERF_CELLS_PER_NODE=10
+
 colima start --profile bdbperf30 --cpu 6 --memory 12 --disk 30 \
   --vm-type vz --mount-type virtiofs --mount /Volumes/Workspace:w \
   --activate=false
@@ -152,11 +187,11 @@ images enforce capacity but share the host's underlying storage performance.
 Run this once in a fresh fixture:
 
 ```sh
-colima ssh --profile bdbperf30 -- bash -c '
+colima ssh --profile bdbperf30 -- bash -s -- "$PERF_NODES" <<'SH'
 set -eu
 root=/mnt/lima-colima-bdbperf30/beyonddb-perf30
 sudo mkdir -p "$root/disks"
-for i in 1 2 3; do
+for ((i=1; i<=$1; i++)); do
   disk="$root/disks/node$i.img"
   test ! -e "$disk"
   sudo mkdir -p "$root/node$i"
@@ -164,7 +199,7 @@ for i in 1 2 3; do
   sudo mkfs.ext4 -q -m 0 "$disk"
   sudo mount -o loop,nodev,nosuid "$disk" "$root/node$i"
 done
-'
+SH
 ```
 
 Install the benchmark's client dependencies in an isolated environment. The
@@ -179,18 +214,20 @@ PERF_RUN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-run
 PERF_BIN=/Volumes/Workspace/crabbuild-target/beyonddb-perf30-linux/release/beyonddb
 PERF_OUT="$PWD/benchmarks/2026-10-18-three-node-30-cell"
 
-"$PERF_PY" scripts/perf30/setup.py init --run-dir "$PERF_RUN"
+"$PERF_PY" scripts/perf30/setup.py init --run-dir "$PERF_RUN" \
+  --nodes "$PERF_NODES" --cells-per-node "$PERF_CELLS_PER_NODE"
 "$PERF_PY" scripts/perf30/setup.py store --run-dir "$PERF_RUN"
 ```
 
 The store action creates bucket `beyonddb-perf30` using the generated credentials.
-Each node action waits for `/health`. Start node 1 with `--bootstrap`, then nodes
-2 and 3. The public endpoints use ports `18001`–`18003`.
+Each node action waits for `/health`. Start node 1 with `--bootstrap`, then the
+remaining nodes. Public endpoints start at `18001`; peer ports start at `19001`
+and skip `19100`, which belongs to the local object store.
 
 ```sh
 "$PERF_PY" scripts/perf30/setup.py node --node 1 --bootstrap \
   --run-dir "$PERF_RUN" --binary "$PERF_BIN"
-for i in 2 3; do
+for ((i=2; i<=PERF_NODES; i++)); do
   "$PERF_PY" scripts/perf30/setup.py node --node "$i" \
     --run-dir "$PERF_RUN" --binary "$PERF_BIN"
 done
@@ -236,7 +273,7 @@ is optional and runs after measurement:
 
 ```sh
 python3 scripts/perf30/report.py \
-  --input "$PERF_OUT/results-main.json" --output "$PERF_OUT"
+  --input "$PERF_OUT/results-main.json" --output "$PERF_OUT" --summary-clients 8
 "$PERF_PY" -m pip install -r scripts/perf30/requirements-plot.txt
 "$PERF_PY" scripts/perf30/plot.py \
   --input "$PERF_OUT/results-main.json" --output "$PERF_OUT"
@@ -249,3 +286,13 @@ Remount the existing images at their original node paths before starting the
 retained store and database containers. Wait for S3 readiness before starting
 the database nodes. Use `measure` to reuse the existing table; `prepare`
 intentionally rejects an existing table. Never rerun `init` over retained keys.
+
+## Check the tooling
+
+Python 3.12 or later is required. Run the focused offline tests in the client
+environment; they validate topology limits, bootstrap key boundaries, placement,
+cross-node transactions, coverage and report compatibility without starting a VM:
+
+```sh
+"$PERF_PY" -m unittest discover -s scripts/perf30 -p 'test_*.py'
+```

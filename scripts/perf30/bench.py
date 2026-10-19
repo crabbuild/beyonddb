@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark one table over 30 ordered data cells on three bounded nodes.
+"""Benchmark one table over configurable ordered data cells and bounded nodes.
 
 All measured traffic uses signed boto3 calls with retries disabled. The load is
 closed loop: throughput and response latency are measured together, including
@@ -21,8 +21,9 @@ import threading
 import time
 import uuid
 
-from control import (ACCOUNT_NS, DATA_NS, NODE_NAMES, PUBLIC, Control, data_partition,
+from control import (ACCOUNT_NS, DATA_NS, Control, data_partition,
                      digest, identity, target_id, tenant)
+from topology import Topology
 
 TABLE = "Perf30"
 
@@ -33,24 +34,30 @@ def save(path, value):
     temporary.replace(path)
 
 
-def key(ordinal, row=0, sk=1):
-    # Inside [floor(i*256/30), floor((i+1)*256/30)) Unicode PK fences.
-    return {"pk": {"S": chr(ordinal * 256 // 30 + 1) + f"/seed-{row:04d}"},
+def key(ordinal, row=0, sk=1, topology=Topology()):
+    # Choose a prefix within the installed Unicode PK bootstrap interval.
+    return {"pk": {"S": topology.prefix(ordinal) + f"/seed-{row:04d}"},
             "sk": {"N": str(sk)}}
 
 
 def verify(control, manifest):
+    topology = control.topology
+    if (manifest.get("topology", Topology().to_dict()) != topology.to_dict()
+            or manifest["data_cells"] != topology.cells
+            or sorted(row["ordinal"] for row in manifest["ranges"]) != list(range(topology.cells))
+            or any(row["node"] != topology.owner(row["ordinal"]) for row in manifest["ranges"])):
+        raise RuntimeError("table manifest differs from configured topology")
     for row in manifest["ranges"]:
         spec = row["installed_spec"]
         for sample in range(4):
-            value = key(row["ordinal"], sample)["pk"]["S"].encode()
+            value = key(row["ordinal"], sample, topology=topology)["pk"]["S"].encode()
             encoded = b"\x10" + value.replace(b"\0", b"\0\xff") + b"\0\0"
             lower = bytes(spec["lower"]) if spec["lower"] is not None else None
             upper = bytes(spec["upper"]) if spec["upper"] is not None else None
             if (lower is not None and encoded < lower) or (upper is not None and encoded >= upper):
                 raise RuntimeError("workload key is outside its installed ordered interval")
     nodes = control.ownership()
-    expected = {row["scope"]: NODE_NAMES[row["node"]] for row in manifest["ranges"]}
+    expected = {row["scope"]: topology.node_names[row["node"]] for row in manifest["ranges"]}
     observed = {}
     for node in nodes:
         for cell in node["cells"]:
@@ -61,13 +68,14 @@ def verify(control, manifest):
                 if cell["phase"] != "resident":
                     raise RuntimeError(f"data cell not resident: {cell}")
     if observed != expected:
-        raise RuntimeError(f"placement differs from the 10/10/10 manifest: {Counter(observed.values())}")
+        raise RuntimeError(f"placement differs from the configured manifest: {Counter(observed.values())}")
     return {"data_cells_per_node": dict(Counter(observed.values())), "nodes": nodes,
             "observed_at": datetime.now(timezone.utc).isoformat()}
 
 
 def prepare(control, output):
-    for i in range(3):
+    topology = control.topology
+    for i in topology.indices:
         control.action(i, "pause_balancing")
     # Table identity is deterministic from the next account command sequence.
     # No other writer may run against this dedicated fixture during setup.
@@ -78,23 +86,23 @@ def prepare(control, output):
                 target_id(ACCOUNT_NS, bytes(4)), (sequence+1).to_bytes(8, "big"),
                 TABLE.encode())[:16]).hex()
     manifest = {"table": TABLE, "table_id": table_id, "account_sequence": sequence,
-                "ranges": [], "data_cells": 30, "placement": "controlled first touch",
+                "ranges": [], "data_cells": topology.cells, "topology": topology.to_dict(), "placement": "controlled first touch",
                 "balancing_paused": True, "payload_bytes": 1024}
-    for ordinal in range(30):
+    for ordinal in range(topology.cells):
         partition = data_partition(table_id, ordinal)
-        _, state = control.query(ordinal // 10, DATA_NS, partition, 4, None)
+        _, state = control.query(topology.owner(ordinal), DATA_NS, partition, 4, None)
         if state is not None:
             raise RuntimeError("future range unexpectedly installed")
         _, scope = identity(DATA_NS, partition)
-        manifest["ranges"].append({"ordinal": ordinal, "node": ordinal // 10,
+        manifest["ranges"].append({"ordinal": ordinal, "node": topology.owner(ordinal),
                                     "partition": partition.hex(), "scope": scope})
-        print(f"Warmed range {ordinal:02d} on {NODE_NAMES[ordinal//10]}", flush=True)
+        print(f"Warmed range {ordinal:02d} on {topology.node_names[topology.owner(ordinal)]}", flush=True)
     control.sdk().create_table(TableName=TABLE, BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"},
                               {"AttributeName": "sk", "AttributeType": "N"}],
         KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"},
                    {"AttributeName": "sk", "KeyType": "RANGE"}])
-    clients = [control.sdk(i) for i in range(3)]
+    clients = [control.sdk(i) for i in topology.indices]
     for row in manifest["ranges"]:
         _, state = control.query(row["node"], DATA_NS, bytes.fromhex(row["partition"]), 4, None)
         if state is None or state["spec"]["table"]["id"] != table_id:
@@ -104,12 +112,12 @@ def prepare(control, output):
         row["installed_spec"] = state["spec"]
         for sample in range(4):
             for sk in (1, 2):
-                clients[row["node"]].put_item(TableName=TABLE, Item={**key(row["ordinal"], sample, sk),
+                clients[row["node"]].put_item(TableName=TABLE, Item={**key(row["ordinal"], sample, sk, topology),
                                                 "payload": {"S": "x" * 1024}})
-    manifest["seed_items"] = 240
+    manifest["seed_items"] = topology.cells * 8
     save(output / "table.json", manifest)
     save(output / "ownership-prepared.json", verify(control, manifest))
-    print("Verified one table, 30 installed ranges, 10 data cells per node and 240 seed items.", flush=True)
+    print(f"Verified one table, {topology.cells} ranges, {topology.cells_per_node} data cells per node and {manifest['seed_items']} seed items.", flush=True)
 
 
 def percentiles(values):
@@ -120,7 +128,9 @@ def percentiles(values):
     return {"mean_ms": round(statistics.mean(values), 3), **result, "max_ms": round(max(values), 3)}
 
 
-def run_case(clients, operation, workers, seconds, run_id, phase):
+def run_case(clients, operation, workers, seconds, run_id, phase, topology=Topology()):
+    if len(clients) != topology.nodes:
+        raise ValueError("SDK clients must match configured node count")
     barrier = threading.Barrier(workers + 1)
     stop = [0.0]
     ordinal_counter = itertools.count()
@@ -134,42 +144,42 @@ def run_case(clients, operation, workers, seconds, run_id, phase):
         barrier.wait()
         while time.perf_counter() < stop[0]:
             ordinal = next(ordinal_counter)
-            cell = ordinal % 30
+            cell = ordinal % topology.cells
             # Frontend and owner are independent: rotate ingress across all nodes.
-            front = (ordinal // 30 + cell) % 3
+            front = (ordinal // topology.cells + cell) % topology.nodes
             client = clients[front]
-            other = (cell + 10) % 30
-            row = (ordinal // 30) % 4
+            other = topology.partner(cell)
+            row = (ordinal // topology.cells) % 4
             touched = [cell, other] if operation.startswith("transact_") else [cell]
             attempted_cells.update(touched)
             endpoint_counts[front] += 1
             started = time.perf_counter()
             try:
                 if operation == "get":
-                    response = client.get_item(TableName=TABLE, Key=key(cell, row), ConsistentRead=True)
+                    response = client.get_item(TableName=TABLE, Key=key(cell, row, topology=topology), ConsistentRead=True)
                     if response.get("Item", {}).get("payload", {}).get("S") != "x" * 1024:
                         raise RuntimeError("point-read payload mismatch")
                 elif operation == "query":
                     response = client.query(TableName=TABLE, ConsistentRead=True,
                         KeyConditionExpression="pk = :pk AND sk BETWEEN :a AND :b",
-                        ExpressionAttributeValues={":pk": key(cell, row)["pk"], ":a": {"N": "1"}, ":b": {"N": "2"}})
+                        ExpressionAttributeValues={":pk": key(cell, row, topology=topology)["pk"], ":a": {"N": "1"}, ":b": {"N": "2"}})
                     if len(response.get("Items", [])) != 2:
                         raise RuntimeError("ordered range-query result mismatch")
                 elif operation == "put":
-                    item = key(cell, row)
-                    item["pk"]["S"] = chr(cell * 256 // 30 + 1) + f"/write-{run_id}-{phase}-{worker_id}-{ordinal}"
+                    item = key(cell, row, topology=topology)
+                    item["pk"]["S"] = topology.prefix(cell) + f"/write-{run_id}-{phase}-{worker_id}-{ordinal}"
                     client.put_item(TableName=TABLE, Item={**item, "payload": {"S": "x" * 1024}})
                 elif operation == "transact_get":
                     response = client.transact_get_items(TransactItems=[
-                        {"Get": {"TableName": TABLE, "Key": key(c, row)}} for c in (cell, other)])
+                        {"Get": {"TableName": TABLE, "Key": key(c, row, topology=topology)}} for c in (cell, other)])
                     items = response.get("Responses", [])
                     if len(items) != 2 or not all(i.get("Item", {}).get("payload", {}).get("S") == "x" * 1024 for i in items):
                         raise RuntimeError("transaction-read payload mismatch")
                 elif operation == "transact_write":
                     items = []
                     for c in (cell, other):
-                        item = key(c, row)
-                        item["pk"]["S"] = chr(c * 256 // 30 + 1) + f"/tx-{run_id}-{phase}-{worker_id}-{ordinal}"
+                        item = key(c, row, topology=topology)
+                        item["pk"]["S"] = topology.prefix(c) + f"/tx-{run_id}-{phase}-{worker_id}-{ordinal}"
                         items.append({"Put": {"TableName": TABLE, "Item": {**item, "payload": {"S": "x" * 1024}}}})
                     client.transact_write_items(TransactItems=items, ClientRequestToken=str(uuid.uuid4()))
                 else:
@@ -213,12 +223,12 @@ def run_case(clients, operation, workers, seconds, run_id, phase):
             "attempted_cell_touches": dict(sorted(attempted.items())),
             "frontend_requests": dict(endpoints), "latency_samples_ms": samples,
             "failures": failures, "write_witnesses": witnesses, "tail_sample_warning": count < 1000,
-            "covers_all_30_cells": len(coverage) == 30}
+            "covers_all_cells": set(coverage) == set(range(topology.cells))}
 
 
-def snapshot_cgroups():
+def snapshot_cgroups(topology):
     result = {}
-    for i in range(1, 4):
+    for i in range(1, topology.nodes + 1):
         result[f"node{i}"] = subprocess.check_output([
             "docker", "--context", "colima-bdbperf30", "exec", f"beyonddb-perf30-node{i}",
             "sh", "-c", "cat /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.events /sys/fs/cgroup/io.stat; df -B1 /data"], text=True)
@@ -226,13 +236,17 @@ def snapshot_cgroups():
 
 
 def measure(control, output, args):
+    topology = control.topology
     manifest = json.loads((output / "table.json").read_text())
-    results = {"started_at": datetime.now(timezone.utc).isoformat(), "endpoints": PUBLIC,
+    results = {"started_at": datetime.now(timezone.utc).isoformat(), "endpoints": topology.endpoints,
+               "topology": topology.to_dict(), "label": args.label,
+               "planned_cases": len(args.operations) * len(args.clients) * args.repeats,
+               "warmup_s": args.warmup, "operations": args.operations,
                "profile": "release", "payload_bytes": 1024, "strong_reads": True,
                "sdk_retries": 0, "client_read_timeout_s": 45, "model": "closed_loop",
-               "transaction_items": 2, "transaction_placement": "different cells and nodes",
+               "transaction_items": 2, "transaction_placement": "different cells and nodes" if topology.nodes > 1 else "different cells on one node",
                "durability": "bucket publication; follower durability disabled", "warmup_errors": 0, "cases": []}
-    clients = [control.sdk(i, max(args.clients)) for i in range(3)]
+    clients = [control.sdk(i, max(args.clients)) for i in topology.indices]
     save(output / f"ownership-before-{args.label}.json", verify(control, manifest))
     run_id = uuid.uuid4().hex[:12]
     for operation in args.operations:
@@ -240,38 +254,38 @@ def measure(control, output, args):
             for repeat in range(args.repeats):
                 phase = f"{args.label}-{operation}-{workers}-{repeat}"
                 if args.warmup:
-                    warmup = run_case(clients, operation, workers, args.warmup, run_id, phase+"-warmup")
+                    warmup = run_case(clients, operation, workers, args.warmup, run_id, phase+"-warmup", topology)
                     save(output / f"warmup-{phase}.json", warmup)
                     results["warmup_errors"] += warmup["errors"]
                     save(output / f"results-{args.label}.json", results)
                     if warmup["errors"]:
                         print(f"Warmup errors retained for {phase}", flush=True)
-                before = snapshot_cgroups()
-                case = run_case(clients, operation, workers, args.seconds, run_id, phase)
+                before = snapshot_cgroups(topology)
+                case = run_case(clients, operation, workers, args.seconds, run_id, phase, topology)
                 case["resources_before"] = before
                 results["cases"].append(case)
                 save(output / f"results-{args.label}.json", results)
-                case["resources_after"] = snapshot_cgroups()
-                case["lease_loads_after"] = {NODE_NAMES[i]: control.lease(i)["load"] for i in range(3)}
+                case["resources_after"] = snapshot_cgroups(topology)
+                case["lease_loads_after"] = {topology.node_names[i]: control.lease(i)["load"] for i in topology.indices}
                 verified = 0
                 for cell, item_key in case["write_witnesses"].items():
-                    response = clients[int(cell)//10].get_item(TableName=TABLE, Key=item_key, ConsistentRead=True)
+                    response = clients[topology.owner(int(cell))].get_item(TableName=TABLE, Key=item_key, ConsistentRead=True)
                     if response.get("Item", {}).get("payload", {}).get("S") != "x" * 1024:
                         raise RuntimeError("acknowledged write witness did not read back")
                     verified += 1
                 case["write_witnesses_verified"] = verified
                 save(output / f"results-{args.label}.json", results)
-                compact = {k: case[k] for k in ("operation", "clients", "completed", "errors", "elapsed_s", "requests_per_s", "p50_ms", "p95_ms", "p99_ms", "covers_all_30_cells")}
+                compact = {k: case[k] for k in ("operation", "clients", "completed", "errors", "elapsed_s", "requests_per_s", "p50_ms", "p95_ms", "p99_ms", "covers_all_cells")}
                 print(json.dumps(compact), flush=True)
     save(output / f"ownership-after-{args.label}.json", verify(control, manifest))
-    if results["warmup_errors"] or any(case["errors"] or not case["covers_all_30_cells"] for case in results["cases"]):
+    if results["warmup_errors"] or any(case["errors"] or not case["covers_all_cells"] for case in results["cases"]):
         raise SystemExit("Some cases failed or did not cover every data cell; inspect retained results")
 
 
 @contextmanager
-def telemetry(output, label):
+def telemetry(output, label, topology):
     command = ["docker", "--context", "colima-bdbperf30", "stats", "--format", "{{json .}}",
-               *[f"beyonddb-perf30-node{i}" for i in range(1, 4)], "beyonddb-perf30-store"]
+               *[f"beyonddb-perf30-node{i}" for i in range(1, topology.nodes + 1)], "beyonddb-perf30-store"]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
     with (output / f"docker-stats-{label}.jsonl").open("w") as log:
         def collect():
@@ -314,7 +328,7 @@ def main():
     if args.action == "prepare":
         prepare(control, args.output)
     elif args.action == "measure":
-        with telemetry(args.output, args.label):
+        with telemetry(args.output, args.label, control.topology):
             measure(control, args.output, args)
     else:
         print(json.dumps(verify(control, json.loads((args.output / "table.json").read_text())), indent=2))
