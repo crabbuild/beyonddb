@@ -1,6 +1,6 @@
-# Retired Cellule test targets
+# Retired runtime test coverage
 
-At the user's request on 2026-10-18, the unported `elastic_cells` and
+Historical record: on 2026-10-18, the unported Cellule-runtime `elastic_cells` and
 `peer_network` targets and their exclusive fixture modules were removed.
 Their CI invocations were removed too. The general all-target build and strict
 Clippy gates remain enabled. Passing native Cellar tests and their shared

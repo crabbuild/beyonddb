@@ -19,8 +19,8 @@ Read [README.md](README.md) for product scope, [architecture](docs/architecture.
 for subsystem boundaries, [the server guide](docs/cellar-server.md) for deployment
 and qualification, and [API coverage](docs/api.md) before changing public behavior.
 The [ordered partitioning contract](docs/ordered-cell-partitioning.md) governs
-routing. Some design and implementation documents retain historical Cellule
-results; confirm current behavior against source and registered tests.
+routing. Historical design and test results are linked from the implementation-status
+guide; confirm current behavior against source and registered tests.
 
 [Cargo.toml](Cargo.toml), [Cargo.lock](Cargo.lock) and the
 [CI workflows](.github/workflows) define dependency and toolchain versions.
@@ -146,7 +146,7 @@ with the repository-specific rules below.
   reuse an ID or reinterpret persisted bytes. Specify upgrade/replay behavior,
   add compatibility fixtures, or explicitly reject incompatible state.
   Safe format upgrades remain unqualified; incompatible roots require an explicit
-  migration or a new storage prefix. Never open legacy Cellule roots as Cellar state.
+  migration or a new storage prefix. Never open roots from an incompatible runtime as Cellar state.
 - Keep application SQL parameterized and behind the typed adapter. Cellar owns
   transaction control and runtime tables. Do not bypass its SQL allowlist or
   construct SQL by concatenating user input.
@@ -242,7 +242,7 @@ heavy builds or qualification fixtures against the same host resource budget.
 - Keep unsupported behavior and qualification boundaries explicit in README and
   API docs. Do not claim support until a signed SDK request reaches a durable
   result and the result survives the relevant owner restart. Historical retired
-  tests in [the coverage inventory](docs/retired-cellule-tests.md) are not gates.
+  tests in [the coverage inventory](docs/retired-tests.md) are not gates.
 - Before delivery, inspect the diff for unrelated edits, accidental dependency
   changes, generated artifacts and secrets; run `git diff --check`. Update affected
   config examples, docs and links. A PR should explain the problem, final behavior,
@@ -250,3 +250,9 @@ heavy builds or qualification fixtures against the same host resource budget.
 - Report exactly which checks ran and which could not run. Separate focused local
   results from Linux CI and process qualification; never describe pending checks
   as passed.
+
+Documentation uses SVG for architecture/flow visuals and Mermaid only for
+sequence diagrams. Keep operational guides current; link historical evidence
+through Git history instead of mixing development logs into deployment instructions.
+Run `python3 scripts/check-docs.py` after documentation edits; it checks local
+links/headings, shell and JSON examples, SVG structure and the sequence-only rule.

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 590" role="img" aria-labelledby="title desc">
+<title id="title">Recorded local fixture: one table, thirty data cells</title>
+<desc id="desc">Original measurement: three bounded database nodes; shared VM and physical storage.</desc>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+<marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0L10 4L0 8Z" fill="#94a3b8"/></marker>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#f1f5f9} .title{font-size:25px;font-weight:700} .heading{font-size:18px;font-weight:600} .note{font-size:15px;fill:#cbd5e1} .small{font-size:14px;fill:#94a3b8} .edge{fill:none;stroke:#94a3b8;stroke-width:1.8;marker-end:url(#arrow)}</style>
+</defs>
+<rect width="1000" height="590" rx="16" fill="#0f172a"/>
+<rect width="1000" height="590" rx="16" fill="url(#grid)"/>
+<path d="M500 190V225H170V270" class="edge"/>
+<path d="M500 190V225H500V270" class="edge"/>
+<path d="M500 190V225H830V270" class="edge"/>
+<path d="M170 400V430H500V460" class="edge"/>
+<path d="M500 400V430H500V460" class="edge"/>
+<path d="M830 400V430H500V460" class="edge"/>
+<rect x="340" y="110" width="320" height="80" rx="9" fill="#083344" stroke="#22d3ee" stroke-width="1.4"/>
+<rect x="35" y="270" width="270" height="90" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="365" y="270" width="270" height="90" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="695" y="270" width="270" height="90" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="290" y="460" width="420" height="90" rx="9" fill="#422f18" stroke="#fbbf24" stroke-width="1.4"/>
+<text x="35" y="45" class="title" text-anchor="start">Recorded local fixture: one table, thirty data cells</text>
+<text x="35" y="75" class="small" text-anchor="start">Original measurement: three bounded database nodes; shared VM and physical storage.</text>
+<text x="500.0" y="140" class="heading" text-anchor="middle">Signed SDK load</text>
+<text x="500.0" y="164" class="note" text-anchor="middle">Rotating ingress and range traffic</text>
+<text x="170.0" y="300" class="heading" text-anchor="middle">Node 1</text>
+<text x="170.0" y="324" class="note" text-anchor="middle">10 table cells / 1 CPU / 3 GiB</text>
+<text x="170" y="386" class="small" text-anchor="middle">5 GiB ext4 data disk</text>
+<text x="500.0" y="300" class="heading" text-anchor="middle">Node 2</text>
+<text x="500.0" y="324" class="note" text-anchor="middle">10 table cells / 1 CPU / 3 GiB</text>
+<text x="500" y="386" class="small" text-anchor="middle">5 GiB ext4 data disk</text>
+<text x="830.0" y="300" class="heading" text-anchor="middle">Node 3</text>
+<text x="830.0" y="324" class="note" text-anchor="middle">10 table cells / 1 CPU / 3 GiB</text>
+<text x="830" y="386" class="small" text-anchor="middle">5 GiB ext4 data disk</text>
+<text x="500.0" y="490" class="heading" text-anchor="middle">Local RustFS store</text>
+<text x="500.0" y="514" class="note" text-anchor="middle">1 CPU / 4 GiB, outside database-node limits</text>
+<text x="35" y="575" class="small" text-anchor="start">System/coordinator cells are additional. Higher-concurrency transaction windows failed.</text>
+</svg>

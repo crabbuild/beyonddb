@@ -2,11 +2,8 @@
 
 Use these commands to connect, create a table, change an item, and inspect time to live (TTL) and Streams behavior. First [configure a Cellar node](cellar-server.md) and bootstrap an access key. BeyondDB accepts signed DynamoDB JSON requests at `public_endpoint`; pass that address with `--endpoint-url`. The examples use a string partition key named `pk`.
 
-```text
-AWS CLI -- SigV4 --> public endpoint -- route --> owning Cell
-                                                  |
-                                                  +--> durable result
-```
+ExtendDB authenticates and validates requests; BeyondDB routes them to the
+owning Cellar cell. The endpoint does not bypass signing for local clients.
 
 Run the commands in one shell so later examples can use `BEYONDDB_ENDPOINT` and the AWS credential variables.
 
@@ -86,10 +83,10 @@ aws dynamodb get-item \
 aws dynamodb update-item \
   --table-name Notes \
   --key '{"pk":{"S":"note-1"}}' \
-  --update-expression 'SET #body = :body' \
+  --update-expression 'SET #body = :body, #version = :next' \
   --condition-expression '#version = :expected' \
   --expression-attribute-names '{"#body":"body","#version":"version"}' \
-  --expression-attribute-values '{":body":{"S":"updated"},":expected":{"N":"1"}}' \
+  --expression-attribute-values '{":body":{"S":"updated"},":expected":{"N":"1"},":next":{"N":"2"}}' \
   --return-values ALL_NEW \
   --endpoint-url "$BEYONDDB_ENDPOINT"
 ```

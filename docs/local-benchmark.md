@@ -45,21 +45,7 @@ that interrupted matrix remains retained. All containers
 share one local VM and its physical disk. These are local measurements, not
 independent machine or fleet capacity qualification.
 
-```mermaid
-flowchart LR
-    SDK[Signed SDK load generator] --> A[Node 1: 1 CPU / 3 GiB]
-    SDK --> B[Node 2: 1 CPU / 3 GiB]
-    SDK --> C[Node 3: 1 CPU / 3 GiB]
-    A --- R1[Table ranges 0–9 / 5 GiB disk]
-    B --- R2[Table ranges 10–19 / 5 GiB disk]
-    C --- R3[Table ranges 20–29 / 5 GiB disk]
-    A <--> B
-    B <--> C
-    C <--> A
-    A --> S[Local RustFS object store]
-    B --> S
-    C --> S
-```
+![Measured three-node fixture with ten data cells per node and an external object store](../diagram/operations/benchmark.svg)
 
 ## Measured result — October 18, 2026
 

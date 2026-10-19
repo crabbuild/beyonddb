@@ -174,7 +174,7 @@ For conditional updates, transactions, TTL and Streams examples, see the
 The [API matrix](docs/api.md) distinguishes implemented paths from behavior
 verified through signed SDK requests and owner restart. Fleet-scale throughput
 and unattended recovery remain unqualified. Retired legacy test coverage is
-listed [here](docs/retired-cellule-tests.md).
+listed [here](docs/retired-tests.md).
 
 ## Development
 
@@ -207,9 +207,11 @@ See [contributor invariants](AGENTS.md),
 
 ## Documentation
 
+Start with the [documentation index](docs/README.md) for current operational and design guides.
+
 | Goal | Guide |
 | --- | --- |
-| Deploy and configure a node | [Embedded Cellar server](docs/cellar-server.md) |
+| Deploy and operate a node | [Deployment](docs/deployment.md) · [Server reference](docs/cellar-server.md) · [Operations](docs/operations.md) |
 | Use AWS CLI and SDK requests | [User guide](docs/user-guide.md) |
 | Check API support | [API coverage](docs/api.md) |
 | Understand routing and splits | [Ordered cell partitioning](docs/ordered-cell-partitioning.md) |

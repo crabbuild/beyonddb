@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" role="img" aria-labelledby="title desc">
+<title id="title">Evidence before a compatibility claim</title>
+<desc id="desc">A code path, a local test and a production guarantee are different levels of evidence.</desc>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+<marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0L10 4L0 8Z" fill="#94a3b8"/></marker>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#f1f5f9} .title{font-size:25px;font-weight:700} .heading{font-size:18px;font-weight:600} .note{font-size:15px;fill:#cbd5e1} .small{font-size:14px;fill:#94a3b8} .edge{fill:none;stroke:#94a3b8;stroke-width:1.8;marker-end:url(#arrow)}</style>
+</defs>
+<rect width="1000" height="540" rx="16" fill="#0f172a"/>
+<rect width="1000" height="540" rx="16" fill="url(#grid)"/>
+<path d="M230 215H280" class="edge"/>
+<path d="M475 215H525" class="edge"/>
+<path d="M720 215H770" class="edge"/>
+<path d="M865 270V315H500V355" class="edge"/>
+<rect x="35" y="160" width="195" height="110" rx="9" fill="#083344" stroke="#22d3ee" stroke-width="1.4"/>
+<rect x="280" y="160" width="195" height="110" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="525" y="160" width="195" height="110" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="770" y="160" width="195" height="110" rx="9" fill="#422f18" stroke="#fbbf24" stroke-width="1.4"/>
+<rect x="280" y="355" width="440" height="100" rx="9" fill="#1e293b" stroke="#94a3b8" stroke-width="1.4"/>
+<text x="35" y="45" class="title" text-anchor="start">Evidence before a compatibility claim</text>
+<text x="35" y="75" class="small" text-anchor="start">A code path, a local test and a production guarantee are different levels of evidence.</text>
+<text x="132.5" y="190" class="heading" text-anchor="middle">1. Contract</text>
+<text x="132.5" y="214" class="note" text-anchor="middle">Options, results and</text>
+<text x="132.5" y="233" class="note" text-anchor="middle">errors</text>
+<text x="377.5" y="190" class="heading" text-anchor="middle">2. Native</text>
+<text x="377.5" y="214" class="note" text-anchor="middle">Commands, bounds and</text>
+<text x="377.5" y="233" class="note" text-anchor="middle">replay</text>
+<text x="622.5" y="190" class="heading" text-anchor="middle">3. Signed client</text>
+<text x="622.5" y="214" class="note" text-anchor="middle">Public API + durable</text>
+<text x="622.5" y="233" class="note" text-anchor="middle">result</text>
+<text x="867.5" y="190" class="heading" text-anchor="middle">4. Recovery</text>
+<text x="867.5" y="214" class="note" text-anchor="middle">Owner loss + retained</text>
+<text x="867.5" y="233" class="note" text-anchor="middle">state</text>
+<text x="500.0" y="385" class="heading" text-anchor="middle">5. Workload and fault qualification</text>
+<text x="500.0" y="409" class="note" text-anchor="middle">Exact binary, limits, failure domains and complete</text>
+<text x="500.0" y="428" class="note" text-anchor="middle">outcomes</text>
+<text x="35" y="500" class="note" text-anchor="start">Record missing cases and failed windows. A shared-VM benchmark is not fleet capacity.</text>
+</svg>

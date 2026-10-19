@@ -1,142 +1,79 @@
-# Check DynamoDB API coverage
+# DynamoDB API coverage
 
-See the [server guide](cellar-server.md#qualification-still-required) for current
-Cellar qualification boundaries.
-The detailed coverage labels below record the earlier Cellule fixtures. Each
-path needs equivalent Cellar evidence before those labels apply to this branch.
-
-Use this page to decide whether a DynamoDB operation fits your workload. BeyondDB exposes ExtendDB's DynamoDB JSON endpoint, but a protocol handler alone does not establish Cell-backed support. A **verified path** has a signed AWS SDK or CLI request, a durable Cell commit, and a result checked after owner or process restart. Each fixture proves only its stated cases, not every DynamoDB option or error response.
-
-| Label in this page | What you can conclude |
-| --- | --- |
-| **Cell-backed with restart coverage** | The stated request path and restart case passed; check the boundary column for unsupported options. |
-| **Partial** | Some options work, but the named alternatives are rejected or unqualified. |
-| **Unsupported** | No compatible Cell path is available through the public endpoint. |
-
-The [AWS CLI guide](user-guide.md) shows requests you can try. The [implementation record](implementation-status.md) contains the test evidence and open qualification gates.
+This page describes the current Cellar-backed server, not a general DynamoDB
+compatibility certification. An implemented path can have focused tests while
+options, error responses and fleet failures remain unqualified. See
+[implementation status](implementation-status.md) for executable evidence.
 
 ## Tables, items, and reads
 
-Core table, item, read, and transaction operations have Cell paths. Read the boundary column before using an option that changes schema, pagination, or consistency behavior.
-
-| Operation or option | BeyondDB status | Boundary |
+| Operation | Current implementation | Boundary |
 | --- | --- | --- |
-| `CreateTable`, `DescribeTable`, `ListTables`, `DeleteTable` | Cell-backed; signed SDK restart coverage for creation, metadata, and deletion paths | Routed creation and large deletion can remain in transitional states while workers resume durable progress. |
-| `UpdateTable` | Partial | Billing mode, provisioned throughput, table class, and deletion protection use account Cell metadata. GSI create/delete/update, stream specification, vector updates, and on-demand ceilings are rejected. |
-| `PutItem`, `GetItem`, `UpdateItem`, `DeleteItem` | Cell-backed; signed SDK and owner-restart coverage | Conditions and updates run in one owning Cell command. Exact expression compatibility still needs the complete protocol suite. |
-| `Query`, `Scan` | Cell-backed; signed SDK pagination and restart coverage | Query handles hash and sort keys. Scan uses bounded pages and supports parallel segments. Continuation across a directory change needs broader qualification. |
-| `BatchGetItem`, `BatchWriteItem` | Cell-backed through ExtendDB; process smoke and restart coverage | A batch is not a cross-item atomic transaction. Check unprocessed items and retry according to the client contract. |
-| `TransactWriteItems`, `TransactGetItems` | Durable coordinator and participant paths; cross-Cell SDK hard-restart coverage | Conflict and capacity behavior at sustained fleet load is unqualified. GSI propagation remains asynchronous after base commit. |
-| `TagResource`, `UntagResource`, `ListTagsOfResource` | Cell-backed; signed SDK restart coverage | Table deletion removes tag rows in bounded generation cleanup. |
+| Create/Describe/List/DeleteTable | Account metadata and ordered data-cell lifecycle | Creating/deleting work may require background progress |
+| UpdateTable | Billing/throughput metadata, table class, deletion protection | Online GSI, Streams changes, vector updates and on-demand ceilings rejected |
+| Put/Get/Update/DeleteItem | Routed commands/queries; conditions evaluated at owner | Full expression and error compatibility remains unqualified |
+| Query / Scan | Ordered range traversal, pagination and parallel Scan | Cross-cell pages are not one atomic snapshot |
+| BatchGet / BatchWrite | Independent item operations | A batch is not an atomic transaction; inspect unprocessed items |
+| TransactWrite / TransactGet | Local fast paths and durable coordinator/participant paths | Sustained conflict/capacity and fleet fault matrices remain open |
+| Tag/Untag/ListTagsOfResource | Table-generation metadata | Tags changed after creation do not change placement |
 
-The [implementation record](implementation-status.md#current-verified-slice)
-maps these paths to tests. The full upstream protocol suite remains an
-[acceptance gate](implementation-status.md#acceptance-proof-for-a-server-claim).
-
-### Creation-time Cell model extension
-
-`CreateTable.Tags` accepts `beyonddb:cell-model` with `single`, `auto`, or `partitioned`. `single` fixes the base table to one data Cell; `auto` starts at one and permits splitting; `partitioned` starts at the configured count, with a minimum of two. Omitting the tag retains existing behavior. The choice is durable table-generation metadata, not an AWS DynamoDB setting.
-
-Later tag operations change metadata only. They do not change placement, and `UpdateTable` does not convert models. GSIs stay separate; LSIs stay with their base items. Read [Cell model limits](scaling.md#choose-a-tables-cell-model) and the [CLI creation example](user-guide.md#create-a-table-and-wait-for-it).
+Every public table starts with **2–256 ordered ranges**, four by default. The
+BeyondDB creation tag `beyonddb:cell-model` accepts `auto` or `partitioned` with the
+configured count. `single` is rejected. Omitting the tag uses the configured
+count. This is a BeyondDB extension, not an AWS setting.
 
 ## Indexes
 
-Local secondary indexes (LSIs) share a base Cell's atomic mutation. Global secondary indexes (GSIs) have separate owner Cells and receive base changes asynchronously.
-
-| Feature | BeyondDB status |
+| Feature | Current contract |
 | --- | --- |
-| LSI created with a table, `ALL` projection | Implemented with base mutation and index maintenance in one Cell command; account and routed SDK fixtures cover Query/Scan, transactions, and restart. |
-| LSI `KEYS_ONLY` or `INCLUDE` | Rejected at CreateTable. ExtendDB needs a shared read-plan and base-fetch capacity contract before BeyondDB can return correct attributes. |
-| GSI created with a table | Independent range Cells, asynchronous journal projection, and `ALL`/`KEYS_ONLY`/`INCLUDE` Query and Scan paths. Selected signed SDK and recovery tests pass. |
-| Online GSI creation, deletion, or update | Rejected by `UpdateTable`. Index backfill primitives exist, but account lifecycle orchestration and public SDK qualification do not. |
-| Vector indexes and `SearchVectors` | ExtendDB has handlers; BeyondDB rejects vector index creation and has no supported Cell vector path. |
+| Creation-time LSI, `ALL` projection | Shares base-cell mutations and read context |
+| LSI `KEYS_ONLY` / `INCLUDE` | Rejected; shared read-plan/base-fetch contract is incomplete |
+| Creation-time GSI | Separate ordered ranges; asynchronous `ALL`, `KEYS_ONLY`, `INCLUDE` projections |
+| Strong GSI reads / unprojected base fetch | Unsupported; GSI reads do not fetch missing base attributes |
+| Online index changes / vector indexes | Unsupported public paths |
 
-See [LSI contract](lsi-contract.md) and
-[GSI design and limits](global-indexes.md). Index support does not imply
-fleet-scale index recovery or a guarantee that a hot partition-key group can
-grow beyond one Cell.
+See [LSIs](lsi-contract.md) and [GSIs](global-indexes.md). A hot PK collection with
+an LSI must remain local; adding sort-key splits cannot bypass that restriction.
 
 ## TTL
 
-Time to live (TTL) removes expired items in background work. Setting an expiration time does not hide the item immediately from reads.
-
-`UpdateTimeToLive` and `DescribeTimeToLive` store settings in the account Cell.
-The serving worker configures a fixed expiry index in data Cells, backfills
-older items in bounded commands, and conditionally removes expired items.
-Settings and sweep progress survive owner restart. Expiry is asynchronous.
-The global TTL listing traits remain unsupported; the worker enumerates each
-configured account directly. [TTL implementation status](implementation-status.md#running-the-current-server)
+`UpdateTimeToLive` and `DescribeTimeToLive` persist policy. Background workers
+backfill the expiry index and submit conditional deletes in bounded batches.
+Expiry is asynchronous: expired items may remain visible until deletion. Maintain
+the account in the server's `accounts` list. See [operations](operations.md).
 
 ## Streams
 
-Streams record eligible item changes in the base mutation's Cell command. Reading and retention have additional lifecycle limits.
+Creation-time Streams capture eligible base changes and TTL removals atomically
+with item mutations. Discovery and reads cover retained table generations within
+the 24-hour visibility window, including deleted generations.
 
-`CreateTable` can install a stream policy. Item changes and eligible TTL
-removals produce records in the same Cell command as the base mutation.
-`ListStreams`, `DescribeStream`, `GetShardIterator`, and `GetRecords` can read
-current and deleted table generations during the 24-hour retention window.
-A signed SDK write and CLI Streams read survived a hard server restart.
-
-This is **partial Streams support**. `UpdateTable` cannot enable, disable, or
-change the view type. Bounded retention sweeps cover active routed owners and
-catalog-discovered dormant or deleted data Cells. Expired stream catalog rows,
-full split-lineage and iterator qualification, and fleet-scale retention work
-remain open. See [Streams contract](streams-contract.md) and
-[implementation status](implementation-status.md#streams-dependency-contract).
+Streams is **partial**: `UpdateTable` cannot enable/disable it or change view type.
+Iterator behavior, split lineage, physical catalog collection and fleet-scale
+retention require broader qualification. See [Streams](streams-contract.md).
 
 ## Authentication and administration
 
-The signed public endpoint can enforce stored credentials and inline policies. Account administration and credential issuance are separate unfinished surfaces.
+ExtendDB verifies SigV4 and evaluates stored inline user/role policies and
+permission boundaries. Credential secrets are encrypted in Cellar cells.
+Bootstrap installs one configured credential and inline user policy. Optional
+caching changes cross-node freshness; see [server reference](cellar-server.md#serving-and-caching).
 
-The public endpoint verifies SigV4 through ExtendDB. Long-lived credentials,
-externally provisioned temporary credentials, and revocation use encrypted
-credential Cells. Inline user/role policies and user/role permission boundaries
-are Cell-backed; signed tests cover denial and owner restart. BeyondDB does
-not issue STS credentials. Group policies, session policies and tags, and the
-management APIs for accounts, users, roles, policies, and keys are unfinished.
-The server uses a pass-through authorization cache so policy removal takes
-effect without a stale cached grant. [Catalog implementation](../src/catalog.rs)
+BeyondDB does not issue STS credentials. Public account/user/role/key management,
+group/session-policy coverage and administrative surfaces are incomplete.
 
 ## Explicitly unsupported or incomplete
 
-These gaps require more than a server configuration change. In particular, the current import/export extensions do not implement DynamoDB's S3 API workflow.
-
-| Area | Current result |
+| Area | Limit |
 | --- | --- |
-| On-demand backup and restore, continuous backup, PITR | `BackupEngine` methods return `Unsupported`; there is no coordinated table-wide backup cut. |
-| DynamoDB S3 import/export | Pinned ExtendDB has local-file, synchronous extensions rather than DynamoDB's S3 workflow. BeyondDB supplies empty allowed path lists, so both handlers reject requests. |
-| PartiQL and Global Tables | Pinned ExtendDB does not dispatch these operations. BeyondDB has no Cell implementation or replication protocol for them. |
-| SSE specification and on-demand throughput ceilings | Rejected at CreateTable; on-demand ceilings are also rejected at UpdateTable. Table class values are metadata only, without AWS pricing semantics. |
-| Account-wide management, metrics, admin login, STS issuance | Cell-backed implementations are absent or explicitly unavailable. |
-| Production-scale and upgrade compatibility | 10,000-Cell/multi-TB, sustained load, storage collection, and in-place upgrades of older development roots remain unqualified. |
+| Backups, restore and PITR | Backend methods return unsupported; no coordinated table backup cut |
+| S3 import/export | The frontend's local-file extensions are disabled by empty allowed paths |
+| PartiQL and Global Tables | No supported dispatch/implementation in this server |
+| SSE configuration | CreateTable option rejected; credential encryption is not database-wide SSE |
+| Capacity/pricing semantics | Table billing/class metadata does not establish AWS charging or throughput guarantees |
+| Upgrades and fleet SLAs | In-place format upgrades, bounded recovery and production-scale capacity unqualified |
 
-The source gates are in [table creation/update](../src/backend.rs),
-[backup methods](../src/backend/remaining.rs), and
-[server wiring](../src/cellar/server.rs). For ExtendDB's own standalone feature set,
-see its [differences from DynamoDB](https://github.com/ExtendDB/extenddb/blob/main/docs/differences-from-dynamodb.md).
-
-## How to qualify a new API claim
-
-Use the same evidence path for each new operation or option:
-
-```mermaid
-flowchart LR
-    Compare["Compare ExtendDB SQLite<br/>and protocol behavior"] --> Signed["Send signed AWS SDK<br/>request"]
-    Signed --> Commit["Verify durable<br/>Cell result"]
-    Commit --> Restart["Restart or replace<br/>the owner"]
-    Restart --> Replay["Check result,<br/>replay, and errors"]
-```
-
-1. Compare the backend result with ExtendDB's SQLite backend and the upstream
-   protocol suite, including validation and error responses.
-2. Send the operation through ExtendDB's signed public endpoint using an AWS
-   SDK or CLI client. Check that its mutation and result reach a durable Cell
-   commit.
-3. Restart or replace the owner from published object-store state. Replay the
-   request where applicable and verify the data, metadata, and error outcome.
-4. For cross-Cell work, inject failure before and after the coordinator decision
-   and verify idempotent participant resolution.
-
-Until those checks pass, describe a path as implemented or partial rather than
-generally compatible. The current [independent qualification runner](implementation-status.md#independent-client-qualification)
-supports unchanged ExtendDB Python client tests.
+Source gates: [backend](../src/backend.rs), [remaining operations](../src/backend/remaining.rs),
+[frontend wiring](../src/cellar/server.rs). Qualification requires protocol
+comparison, signed client behavior, durable results and the relevant restart/fault
+checks. See [acceptance proof](implementation-status.md#acceptance-proof-for-a-server-claim).

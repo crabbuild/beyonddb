@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 610" role="img" aria-labelledby="title desc">
+<title id="title">One table, ordered ranges, multiple nodes</title>
+<desc id="desc">A logical directory maps half-open key intervals to cells; Cellar chooses their physical owners.</desc>
+<defs>
+<pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+<marker id="arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0 0L10 4L0 8Z" fill="#94a3b8"/></marker>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#f1f5f9} .title{font-size:25px;font-weight:700} .heading{font-size:18px;font-weight:600} .note{font-size:15px;fill:#cbd5e1} .small{font-size:14px;fill:#94a3b8} .edge{fill:none;stroke:#94a3b8;stroke-width:1.8;marker-end:url(#arrow)}</style>
+</defs>
+<rect width="1000" height="610" rx="16" fill="#0f172a"/>
+<rect width="1000" height="610" rx="16" fill="url(#grid)"/>
+<path d="M140 235V290H255V355" class="edge"/>
+<path d="M380 235V290H300V355" class="edge"/>
+<path d="M620 235V290H700V355" class="edge"/>
+<path d="M860 235V290H790V355" class="edge"/>
+<rect x="40" y="145" width="200" height="90" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="280" y="145" width="200" height="90" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="520" y="145" width="200" height="90" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="760" y="145" width="200" height="90" rx="9" fill="#3b2463" stroke="#a78bfa" stroke-width="1.4"/>
+<rect x="70" y="355" width="370" height="90" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<rect x="560" y="355" width="370" height="90" rx="9" fill="#064e3b" stroke="#34d399" stroke-width="1.4"/>
+<text x="35" y="45" class="title" text-anchor="start">One table, ordered ranges, multiple nodes</text>
+<text x="35" y="75" class="small" text-anchor="start">A logical directory maps half-open key intervals to cells; Cellar chooses their physical owners.</text>
+<text x="140.0" y="175" class="heading" text-anchor="middle">Cell A</text>
+<text x="140.0" y="199" class="note" text-anchor="middle">[-infinity, k1)</text>
+<text x="380.0" y="175" class="heading" text-anchor="middle">Cell B</text>
+<text x="380.0" y="199" class="note" text-anchor="middle">[k1, k2)</text>
+<text x="620.0" y="175" class="heading" text-anchor="middle">Cell C</text>
+<text x="620.0" y="199" class="note" text-anchor="middle">[k2, k3)</text>
+<text x="860.0" y="175" class="heading" text-anchor="middle">Cell D</text>
+<text x="860.0" y="199" class="note" text-anchor="middle">[k3, +infinity)</text>
+<text x="500" y="120" class="note" text-anchor="middle">Increasing (partition key, sort key)</text>
+<text x="255.0" y="385" class="heading" text-anchor="middle">Node 1</text>
+<text x="255.0" y="409" class="note" text-anchor="middle">Hosts cells A + B</text>
+<text x="745.0" y="385" class="heading" text-anchor="middle">Node 2</text>
+<text x="745.0" y="409" class="note" text-anchor="middle">Hosts cells C + D</text>
+<text x="35" y="500" class="note" text-anchor="start">Move: same cell and range, new owner. Split: new child identities and directory entries.</text>
+<text x="35" y="532" class="note" text-anchor="start">Illustrative placement. Metadata and coordinator cells also consume node resources.</text>
+<text x="35" y="564" class="small" text-anchor="start">Hot-PK sort-key splits must preserve LSI collection locality.</text>
+</svg>
