@@ -1,7 +1,7 @@
 # Measure BeyondDB performance
 
 The current Cellar `=0.1.0` three-node characterization is documented in
-[the 30-cell local benchmark](local-30-cell-benchmark.md). It verifies ten table
+[the local benchmark](local-benchmark.md). It verifies ten table
 data cells per node under 1 vCPU / 3 GiB / 5 GiB data limits, and records both
 throughput and latency, including transaction errors at higher concurrency.
 The measurements below retain the historical fixtures and their limitations.

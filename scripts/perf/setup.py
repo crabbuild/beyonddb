@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create/start/stop only this benchmark's Docker resources in a dedicated VM.
 
-Prepare one 5 GiB ext4 mount per configured node in the VM first; see docs/local-30-cell-benchmark.md.
+Prepare one 5 GiB ext4 mount per configured node in the VM first; see docs/local-benchmark.md.
 The load generator and object store are outside each database node's limits.
 """
 import argparse

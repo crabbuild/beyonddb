@@ -83,7 +83,7 @@ APIs returned 503s at 30 and 60 clients. All five eight-client windows passed:
 Transactions contain two items on different nodes. Their p99 estimates at
 eight clients have fewer than 1,000 successful samples and need longer runs.
 
-![Throughput and p99 latency](../diagram/perf30-throughput-latency.svg)
+![Throughput and p99 latency](../diagram/perf-throughput-latency.svg)
 
 The shared account cell logged 3,723 native admission refusals at its configured
 16-request limit. Internal refusal counts include paced reads and are distinct
