@@ -19,7 +19,7 @@ execution and durability. Every node embeds these layers.
 
 The request path separates protocol work from state execution. The Cell types below have different ownership and recovery policies, even when they run on the same node.
 
-![Components and ownership: detailed diagram retained from the original guide](../diagram/reference/architecture-1.svg)
+![Request layers and independently owned Cell types](../diagram/reference/architecture-1.svg)
 
 Fleet mode configures an S3-compatible bucket with conditional create/update
 semantics. Each node retains its own local data directory. Native peer requests
@@ -101,7 +101,7 @@ The original coordinator and participant identities survive routing changes. If 
 
 Splitting changes a route only after the source has sealed and both children have copied and verified its contents. Global secondary index (GSI) projection follows a different path: a base write commits a journal entry, then an index worker applies it asynchronously.
 
-![Range split and GSI projection: detailed diagram retained from the original guide](../diagram/reference/architecture-2.svg)
+![Seven-stage range split: prepare, verify, publish and retire](../diagram/reference/architecture-2.svg)
 
 Split plans are durable and replayable. The source cannot seal while prepared
 transactions or pending GSI projection work would be lost. Directory
@@ -112,7 +112,7 @@ under qualification; see [metadata ownership](metadata-sharding.md).
 
 For a GSI, the base command writes an immutable projection journal entry. A worker applies a versioned entry or tombstone to the index Cell. It removes the journal entry only after every required index acknowledges it durably. An unavailable index delays its own projection while healthy indexes can advance. GSI reads are therefore eventually consistent with base writes; a base transaction does not produce an atomic GSI view. See the [GSI design and limits](global-indexes.md).
 
-![Failure recovery and current limits: detailed diagram retained from the original guide](../diagram/reference/architecture-3.svg)
+![GSI projection: durable base acknowledgement, asynchronous delivery and receipt-gated journal pruning](../diagram/reference/architecture-3.svg)
 
 ## Failure recovery and current limits
 
