@@ -1,43 +1,337 @@
 # Cross-Cell transaction protocol
 
+A coordinated transaction has one durable decision and a fixed participant set.
+Participants lock keys and save proposed or read images; the coordinator records
+COMMIT or ABORT; resolution finishes the original work after retries or owner loss.
+
+| I need to… | Start here |
+| --- | --- |
+| Choose the local or coordinated path | [Execution paths](#current-cellar-reference) |
+| Follow a multi-Cell write | [Coordinated write path](#coordinated-write-path) |
+| Understand what readers can observe | [Read visibility and saved images](#read-visibility-and-saved-images) |
+| Handle a timeout, rejection or owner loss | [Retry and capacity rules](#retry-and-capacity-rules) and [recovery](#recovery-and-stable-identities) |
+| Size payloads and prepared work | [Payload and capacity boundaries](#payload-and-capacity-boundaries) |
+| Try a signed transaction | [Request example](#request-example) |
+| Inspect safety arguments and reproductions | [Detailed design and recorded evidence](#detailed-design-and-recorded-evidence) |
+
 ## Current Cellar reference
 
-BeyondDB uses durable prepare/decision/resolution records and immutable participant
-identities. The original protocol explanations, safety arguments, capacity
-analysis, regression cases and reproduction steps remain below.
+Use this first part for the checked-in Cellar adapter. The expandable sections
+retain the full original protocol analysis, numerical costs, failure reproductions
+and revision-specific evidence. They describe successive implementations; their
+older scheduling, cleanup and runtime claims do not override this reference.
 
-| Current Cellar boundary | Contract |
+| Request placement | Execution path | Boundary |
+| --- | --- | --- |
+| Write, one participant, no client token | One atomic local command | Every operation must resolve to that participant |
+| Write with a client token, or multiple participants | Durable coordinator + prepare/decision/resolution | Account-scoped identity and original participant targets survive routing changes |
+| Read, one participant, encoded reply fits | One atomic Cell query | Check locks and read items in one serialized callback |
+| Read spanning participants, or local reply too large | Durable coordinator + shared locks + saved images | Assemble immutable images through bounded queries |
+| GSI view of a committed base write | Asynchronous projection | A base transaction does not create an atomic GSI view |
+
+Public tables span **multiple ordered range Cells**. The `single` creation option
+is rejected; a request can still happen to touch only one participant. Several
+keys in the same range share one prepare and one resolution. See the
+[local paths](../src/backend/data.rs), [driver](../src/backend/transaction.rs) and
+[read adapter](../src/backend/transaction_read.rs).
+
+## Coordinated write path
+
+The example assumes three keys route to three participant Cells. The coordinator
+is another Cell selected independently of the current table routes.
+
+![A coordinated write publishes BEGIN, prepares three Cells, records one decision and resolves every original participant](../diagram/operations/transaction-flow.svg)
+
+| Phase | Durable work | Required guarantee |
+| --- | --- | --- |
+| BEGIN | Transaction identity, fingerprint, original participants/epochs and immutable operations | Publish before preparing any participant; a digest alone cannot reconstruct a lost request |
+| PREPARE | Evaluate conditions; capture images; acquire locks and apply reservations | These changes share one participant command; a failed prepare cannot leave partial state |
+| DECIDE | Record durable prepare evidence and one terminal decision | COMMIT requires every prepare receipt; COMMIT and ABORT cannot change to their opposite |
+| RESOLVE | Apply or discard, release locks/claims, record terminal markers and receipts | Resolve idempotently against the original participants; acknowledge completion before success/cancellation |
+
+The successful current driver combines prepare evidence and COMMIT in one
+`CommitPreparedTransaction` command. Historical sections also describe earlier
+per-receipt commands and sequential prepares; those command-count formulas are
+recorded costs, not the current execution plan.
+
+```mermaid
+sequenceDiagram
+    participant Client as AWS client
+    participant Driver as BeyondDB driver
+    participant Coord as Coordinator Cell
+    participant Cells as Original participant Cells
+    Client->>Driver: TransactWriteItems + optional client token
+    Driver->>Coord: Durable BEGIN + immutable targets and operations
+    par Prepare independent participants
+        Driver->>Cells: Evaluate, lock, stage and reserve
+        Cells-->>Driver: Durable prepare receipts
+    end
+    Driver->>Coord: CommitPreparedTransaction(receipts)
+    Coord-->>Driver: Durable COMMIT, or authoritative competing decision
+    loop Resolve original participants, bounded concurrency
+        Driver->>Cells: Apply or discard from the durable decision
+        Cells-->>Driver: Durable resolution receipt
+        Driver->>Coord: Record resolution progress
+    end
+    Driver-->>Client: Success or ordered cancellation after resolution
+```
+
+The sequence shows the all-prepared path. A definitive condition, conflict or
+admission failure requests ABORT while the coordinator is still BEGIN; an already
+published terminal decision wins. ABORT must resolve **every original participant**,
+including those whose prepare has not arrived.
+
+### What commits together
+
+| Participant action | One local atomic boundary |
 | --- | --- |
-| Public table layout | Multiple ordered data cells; `single` creation is rejected |
-| Local fast paths | Eligible operations can still resolve to one participant |
-| Retry | Submitted errors are ambiguous; preserve mutation/token identity |
-| Decision | Durable COMMIT/ABORT and idempotent participant resolution |
-| Recovery | Resume immutable work; a fresh BEGIN is not aborted merely because startup ran |
+| Prepare | Condition evaluation, proposed/read images, locks, phase record and physical apply reservation |
+| COMMIT resolution | Base items, local indexes, TTL metadata, GSI projection journal, stream records, terminal marker and lock/claim release |
+| ABORT resolution | Intent/lock cleanup and ABORTED tombstone; no committed write/stream effect |
+| Delayed prepare after ABORT | Reject using the retained terminal marker; do not reacquire locks |
+
+`ConditionCheck` keys need locks too. A preflight read cannot prevent a concurrent
+change between condition evaluation and commit. The [write-skew reproduction](#condition-checks-must-prevent-write-skew)
+retains the concrete two-transaction schedule and its safety argument.
+
+## Read visibility and saved images
+
+![Ordinary reads respect unresolved write intents; coordinated transactional reads capture locked images before release and acknowledge them before cleanup](../diagram/operations/transaction-reads.svg)
+
+| Reader | What it may observe | What it must not do |
+| --- | --- | --- |
+| Individual Get/Put/Update/Delete | Operate through the common item-lock boundary | Bypass a prepared intent |
+| Read behind a durable COMMIT whose apply is incomplete | Resolve and re-read, or return a retryable error | Return the old image from a still-locked participant |
+| Coordinated `TransactGetItems` | Immutable existing **or absent** images captured with shared locks | Re-read live items after releasing those locks |
+| Two separate `GetItem` calls | Calls may straddle a transaction | Claim an atomic multi-key view |
+| Query, Scan and batch reads | Per-item read-committed barriers | Claim one snapshot for the whole response, or miss prepared creates/deletes absent from live rows |
+| GSI read | An eventually consistent projected view | Infer atomic visibility from the base transaction |
+
+Shared read locks coexist and exclude writers. Once the last shared prepare
+succeeds, all captured images coexist while the keys remain locked. Resolution
+releases those locks; saved images preserve the response during assembly.
+An absent item needs a lock just as an existing item does.
+
+### Saved read-image lifetime
+
+| Step | Who can advance it | Durable boundary |
+| --- | --- | --- |
+| Capture | Participant prepare | Image and shared lock commit together |
+| Assemble | Initiating read adapter | Fetch saved images from original targets and restore every response position |
+| Acknowledge consumption | Initiating reader only | `BeginReadResultRelease` requires committed, fully resolved participants |
+| Delete and compact | Driver or recovery | Delete saved images idempotently, then record release and compact the operation mapping |
+| Interrupted before acknowledgement | Retain for the reader | Cancellation alone does not authorize image deletion |
+| Interrupted after acknowledgement | Recovery finishes cleanup | Original targets remain discoverable until every cleanup receipt is durable |
+
+This is an internal consumption acknowledgement after complete assembly, not proof
+that the HTTP client received the response. Cleanup failure after that durable
+acknowledgement leaves recoverable work; acknowledgement failure returns an error
+and starts no deletion. Terminal identity/digest markers remain to reject delayed
+phase messages. See the [cleanup protocol and regressions](#acknowledged-transactional-read-cleanup).
 
 ## Retry and capacity rules
 
-| Observation | What it proves |
+Classify evidence before deciding what can be retried.
+
+| Observation | What it proves | Next step |
+| --- | --- | --- |
+| Explicit caller refusal before SDK submission | That attempt did not start | Follow the bounded admission policy; retain transaction authority |
+| Durable rejected receipt | The recorded rejection for that mutation | Use the rejection contract; do not confuse it with a lost reply |
+| Complete committed receipt | Result covered by the configured Cellar durability gate | Use the durable outcome |
+| HTTP error, timeout, lost body or driver cancellation after submission | The outcome may be ambiguous | Resolve/query durable state; do not infer rollback or assign a fresh identity to the same uncertain invocation |
+| Matching client token and request fingerprint | Replay of the original transaction | Use its coordinator and immutable participants |
+| Same token with changed request content | Mismatch | Reject the changed request |
+
+Token lookup occurs before backend data routing; ExtendDB's frontend metadata
+validation may already have run. A matching replay cannot retarget an admitted
+transaction to new range Cells after a split. Preserve invocation identity/input
+when retrying the same uncertain command; explicit durable fallback outcomes have
+their own opcode/identity rules in [the transport](../src/backend/transaction_transport.rs).
+
+| Token / history boundary | Rule |
 | --- | --- |
-| Explicit caller-side refusal before SDK submission | That attempt was not started |
-| Durable rejected receipt | The recorded rejection for that mutation |
-| Complete committed receipt | Result covered by the configured durability gate |
-| HTTP error, timeout, lost body or driver cancellation | Outcome may be ambiguous after submission |
+| Successful token replay | Ten-minute window starts at durable completion; repeated resolution receipts do not move completion time |
+| Fully resolved ABORT | Unlink the token only after all abort resolutions, allowing a corrected condition or released lock to be retried |
+| Expired token slot | May admit a new transaction; old decision and participant records still fence late messages |
+| Unresolved record | Retain regardless of token age |
+| History reclamation | Token expiry alone is insufficient; safe full retirement remains open |
 
-Retain the original mutation/client-token identity and request content when
-resolving uncertainty. Do not turn a submitted error into a fresh mutation or
-assume it rolled back. Token mismatch must reject changed content; retries may
-not reroute an existing decision to a different participant set.
+## Recovery and stable identities
 
-Prepare budgets include staged data, index/stream intent and physical apply
-reservations. Encoded request size alone does not bound publication or memory
-cost. Multipart uploads and replies are bounded separately. Coalescing must
-preserve each caller's identity, admission and result; current batching limits
-are in [prepare_batch.rs](../src/backend/prepare_batch.rs).
+![BEGIN resumes immutable work, COMMIT applies it and ABORT discards it; recovery never rewrites participants to current routes](../diagram/operations/transaction-recovery.svg)
+
+| Failure point | Authoritative evidence | Recovery rule |
+| --- | --- | --- |
+| Lost BEGIN or prepare reply | Coordinator and participant state, receipts and immutable payload | Establish what published; a sent prepare is not a prepare receipt |
+| Lost decision reply | Original coordinator's durable state | Read the decision before resolving; never invent the opposing decision |
+| Driver loss after COMMIT | COMMIT plus participant PREPARED/COMMITTED states | Complete idempotent apply and record receipts |
+| ABORT racing a delayed prepare | ABORT and participant tombstones | Resolve unprepared participants too; later prepare must reject |
+| Fresh BEGIN at startup | Immutable coordinator input | Resume; startup alone does not authorize abort |
+| Abandoned BEGIN aged ten minutes | Atomic age check and ABORT command | The coordinator decides; elapsed time alone cannot discard participant state |
+| Unavailable coordinator | Prepared locks with unknown decision | Keep affected keys fenced and fail retryably while recovering the owner |
+| Split or new table route | Original table generation, participant target and epoch | Do not rewrite an admitted participant set; sealing must respect outstanding locks |
+
+Current startup and serving recovery use configured accounts and bounded pending
+pages. Initial recovery must succeed before public serving; a healthy participant
+can progress while another resolution fails. See [server readiness](cellar-server.md#starting-and-stopping)
+and the [recovery implementation](../src/backend/recovery.rs).
+
+**Trust boundary:** the authenticated internal driver supplies the durable
+coordinator decision to participants. Participants do not independently verify a
+decision certificate. Crash/retry safety does not establish tolerance of a faulty
+or compromised driver. Cellar supplies native ownership fencing; a BeyondDB range
+epoch does not replace it.
+
+## Payload and capacity boundaries
+
+![Temporary uploads, durable phase payloads and terminal evidence have different retention and cleanup rules](../diagram/operations/transaction-payloads.svg)
+
+| Layer | Current bound / behavior | What it does not bound |
+| --- | --- | --- |
+| Public transaction validation | ExtendDB validates the request, including unique item count and request-side size estimate | Aggregate evaluated Update images still need cloud-contract qualification |
+| Cell operation codec | Global ceiling **4 MiB + 64 KiB**, with smaller operation-specific envelopes | Whether a raw request fits after JSON/base64 expansion; total resident memory |
+| Small coordinator resume query | Up to **32 KiB** saved payload; complete encoded reply within **64 KiB** | Large/multi-chunk requests, which retain bounded chunk retrieval |
+| Durable phase SQL payload | **768-KiB** chunks; owning phase and chunk counts commit together | Full wire payload, WAL, physical apply or retained history |
+| Prepared participant | Staging, index/stream intents and physical apply reservations count toward capacity | Request bytes alone cannot size the reservation |
+| Coalesced prepare publication | Current host batcher forms at most **2 prepares** per publication | Per-caller identity, admission or result isolation must still hold |
+
+| Current scheduling window | Source |
+| --- | --- |
+| Up to **8** independent participant prepares | [transaction driver](../src/backend/transaction.rs) |
+| Up to **4** terminal participant resolutions | [recovery resolver](../src/backend/recovery.rs) |
+| **2** coalesced prepares; **2-ms** batching window | [prepare batcher](../src/backend/prepare_batch.rs) |
+
+Do not reclaim an unresolved participant's reservation on timeout. Coordinator
+capacity must also permit decision and receipt publication. Write payload
+compaction and acknowledged read cleanup reduce some retained bytes; abandoned
+readers, terminal records, command receipts and object-store history remain
+separate bounds. Detailed [payload](#bounded-sql-payloads) and
+[page-reservation](#durable-page-admission-for-participant-resolution) analyses follow below.
+
+## Request example
+
+Assume two ACTIVE tables, `Accounts` and `Transfers`, each with string partition
+key `pk`. Seed `Accounts/A` and `Accounts/B` with numeric `balance` attributes.
+Save this as `transfer.json`; conditions are evaluated during the participant
+command that acquires the locks, not by a separate balance read.
+
+```json
+{
+  "ClientRequestToken": "transfer-example-001",
+  "TransactItems": [
+    {
+      "Update": {
+        "TableName": "Accounts",
+        "Key": {"pk": {"S": "A"}},
+        "UpdateExpression": "SET #b = #b - :amount",
+        "ConditionExpression": "#b >= :amount",
+        "ExpressionAttributeNames": {"#b": "balance"},
+        "ExpressionAttributeValues": {":amount": {"N": "10"}}
+      }
+    },
+    {
+      "Update": {
+        "TableName": "Accounts",
+        "Key": {"pk": {"S": "B"}},
+        "UpdateExpression": "SET #b = #b + :amount",
+        "ExpressionAttributeNames": {"#b": "balance"},
+        "ExpressionAttributeValues": {":amount": {"N": "10"}}
+      }
+    },
+    {
+      "Put": {
+        "TableName": "Transfers",
+        "Item": {"pk": {"S": "transfer-example-001"}, "amount": {"N": "10"}},
+        "ConditionExpression": "attribute_not_exists(pk)"
+      }
+    }
+  ]
+}
+```
+
+Use a client shell configured with the bootstrapped DynamoDB credentials. This
+command assumes the [local server example](cellar-server.md#configuration):
+
+```sh
+aws --endpoint-url http://127.0.0.1:8000 --region us-east-1 \
+  dynamodb transact-write-items --cli-input-json file://transfer.json
+```
+
+Retry the unchanged file with the same token to resolve/replay that transaction
+within its replay window. A new transfer needs its own token and transfer-item
+key. Logical keys do not guarantee three distinct Cells; the diagram's placement
+is illustrative. This JSON/CLI example is explanatory; the signed fixtures below
+supply execution and recovery evidence.
+
+For an atomic view of the three items, save this as `transfer-read.json`:
+
+```json
+{
+  "TransactItems": [
+    {"Get": {"TableName": "Accounts", "Key": {"pk": {"S": "A"}}}},
+    {"Get": {"TableName": "Accounts", "Key": {"pk": {"S": "B"}}}},
+    {"Get": {"TableName": "Transfers", "Key": {"pk": {"S": "transfer-example-001"}}}}
+  ]
+}
+```
+
+```sh
+aws --endpoint-url http://127.0.0.1:8000 --region us-east-1 \
+  dynamodb transact-get-items --cli-input-json file://transfer-read.json
+```
+
+Read results follow request order. This read has its own capture point; it can
+observe later committed writes and does not replay the earlier write's token.
+
+## Qualification and source map
+
+| Area | Current entry points / evidence |
+| --- | --- |
+| Admission and stable identity | [admission](../src/backend/admission.rs), [token handling](../src/transaction_coordinator/token.rs) |
+| Prepare/decision | [driver](../src/backend/transaction.rs), [coordinator phases](../src/transaction_coordinator/phase.rs), [participant](../src/participant.rs) |
+| Read capture and cleanup | [read adapter](../src/backend/transaction_read.rs), [durable release](../src/transaction_coordinator/read_release.rs) |
+| Recovery and discovery | [resolver](../src/backend/recovery.rs), [account maintenance](../src/cellar/server.rs) |
+| Native signed transaction and batch regressions | [transaction suite](../tests/cellar_transactions.rs), [coalescing suite](../tests/cellar_coalescing.rs) |
+| Process evidence and commands | [server qualification](cellar-server.md#qualification-still-required), [qualification workflow](../.github/workflows/qualification.yml) |
+
+```sh
+cargo test --locked --test cellar_transactions -- --test-threads=1
+cargo test --locked --test cellar_coalescing -- --test-threads=1
+```
+
+The fixtures cover selected schedules and restart boundaries. Full API
+compatibility, serializable-history checking, bounded fleet recovery, sustained
+capacity and safe history retirement remain qualification work. Historical test
+names/pass counts below do not establish current Cellar coverage; consult the
+[retirement inventory](retired-tests.md) for removed gates.
 
 ## Detailed design and recorded evidence
 
-> **Revision scope:** The ordered range adapter and Cellar SDK are current. Runtime-specific admission mechanics, old transport tests, numerical costs and pass counts below belong to their recorded revisions; they are not new Cellar qualification. The original protocol invariants and failure analyses remain available in full.
+> **Revision scope:** The complete original analysis remains below, grouped by topic.
+> Runtime-specific admission mechanics, older scheduling, transport tests, numerical
+> costs and pass counts belong to their recorded revisions. They are not new Cellar
+> qualification. Use the [current reference](#current-cellar-reference) above for
+> local fast paths, concurrent prepare, combined COMMIT and acknowledged read cleanup.
 > Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/cross-cell-transactions.md).
+
+Expand a topic for the full safety arguments, failure schedules, fixture sizes,
+measurements and reproduction steps. Original section headings and links are retained.
+
+| Topic | What is preserved |
+| --- | --- |
+| [Foundation, placement and isolation](#at-a-glance) | Execution choices, three-key example, atomicity, write skew and scale assessment. |
+| [Durable records and protocol costs](#contract-and-recorded-boundary) | Ownership records, admission history, isolation targets and revision-specific command counts. |
+| [Bounded SQL and wire payloads](#bounded-sql-payloads) | SQL chunking, escaped values, wire fallback and multipart input transport. |
+| [Write state machine and read visibility](#write-state-machine) | Original sequence, token lifetime, lock barriers and saved-image serialization argument. |
+| [Splits, serving recovery and residency](#splits-recovery-and-capacity) | Split locks, driver evidence, coordinator admission, account participants and read barriers. |
+| [Foundation review and qualification plan](#foundation-review) | Trust boundary, payload reproduction, moved endpoints, apply capacity and API qualification order. |
+| [Capacity failures and tenant isolation](#recovery-while-the-survivor-keeps-serving) | Survivor recovery, dense exhaustion, page reservation, BEGIN cancellation, tenant collision and SQLite FULL. |
+| [Resolution progress and unavailable participants](#resolution-must-progress-past-an-unavailable-participant) | Continue healthy work, participant admission and bounded terminal resolution. |
+| [Local/global indexes and settled observations](#local-indexes-join-the-transaction-boundary) | Index atomicity, readiness timings, settled checkpoints, replica-query regressions and GSI scope. |
+| [Compaction and acknowledged read cleanup](#terminal-operation-compaction) | Terminal payload compaction, read-consumption acknowledgement and cleanup-residency regressions. |
+
+<details>
+<summary><strong>Foundation, placement and isolation</strong></summary>
 
 ## At a glance
 
@@ -235,6 +529,11 @@ Neither run qualifies 10,000 active Cells or multi-TB storage. Detailed
 failure reproductions follow below.
 
 <a id="contract-and-current-boundary"></a>
+
+</details>
+
+<details>
+<summary><strong>Durable records and protocol costs</strong></summary>
 
 ## Contract and recorded boundary
 
@@ -486,6 +785,11 @@ cannot acquire locks after recovery declares the participant resolved. A
 rejected command cannot leave a partial prepare: the runtime rolls its
 application savepoint back while recording the rejection.
 
+</details>
+
+<details>
+<summary><strong>Bounded SQL and wire payloads</strong></summary>
+
 ## Bounded SQL payloads
 
 Coordinator participant operations, cancellation decisions, and participant
@@ -713,6 +1017,11 @@ The runtime Blob capability does not directly provide this atomic SQL handoff:
 it uses a Blob-role namespace with asynchronous hydration, while application
 handlers expose synchronous bounded SQL. This transport keeps ownership inside
 the existing phase savepoint and adds no second decision authority.
+
+</details>
+
+<details>
+<summary><strong>Write state machine and read visibility</strong></summary>
 
 ## Write state machine
 
@@ -957,6 +1266,11 @@ Committed read images are currently retained indefinitely. Safe bounded
 collection requires a completion/response-retention contract that also fences
 late fetches and recovery. This is an explicit capacity gap, especially for
 read-heavy workloads; it must be closed before production scale claims.
+
+</details>
+
+<details>
+<summary><strong>Splits, serving recovery and residency</strong></summary>
 
 ## Splits, recovery, and capacity
 
@@ -1276,6 +1590,11 @@ The prior branch behavior returned live images without checking intents.
 `origin/main` has no BeyondDB transaction implementation. The new barrier
 addresses that unsafe visibility path, while the following API and recovery
 gates remain necessary.
+
+</details>
+
+<details>
+<summary><strong>Foundation review and qualification plan</strong></summary>
 
 ## Foundation review
 
@@ -1636,6 +1955,10 @@ failures; it does not justify production readiness or unlimited scaling.
 Public writes must continue to wait for all participant resolutions: success after the decision alone could expose partial application;
 cancellation after an ambiguous decision could hide a committed transaction.
 
+</details>
+
+<details>
+<summary><strong>Capacity failures and tenant isolation</strong></summary>
 
 ## Recovery while the survivor keeps serving
 
@@ -2170,6 +2493,11 @@ and runtime, format, diff, and Cell/LTX layout checks passed. The new FULL
 regressions establish local/peer command refusal and driver cleanup; the process
 smoke protects the deployed server path and does not simulate a full device.
 
+</details>
+
+<details>
+<summary><strong>Resolution progress and unavailable participants</strong></summary>
+
 ## Resolution must progress past an unavailable participant
 
 At `b03f83f71c2`, `finish_decided_cross_cell_transaction` returned on the first
@@ -2422,6 +2750,11 @@ API and persistence path without those injected pauses. Strict all-target
 Clippy, formatting, diff, and Cell/LTX layout checks passed. The source change
 adds 13 net production lines for bounded polling and the six shared descriptors.
 
+</details>
+
+<details>
+<summary><strong>Local/global indexes and settled observations</strong></summary>
+
 ## Local indexes join the transaction boundary
 
 ALL-projection local secondary indexes now share the base item's Cell command.
@@ -2668,6 +3001,11 @@ revision, online index lifecycle and automatic GSI splitting remained open.
 Current split status is in [global indexes](global-indexes.md); retention,
 full DynamoDB compatibility, and 10,000-Cell/multi-TB qualification remain open.
 
+</details>
+
+<details>
+<summary><strong>Compaction and acknowledged read cleanup</strong></summary>
+
 ## Terminal operation compaction
 
 Inspected main (`311105eb864`) and the previous branch head retained every
@@ -2835,3 +3173,5 @@ the other Linux peer failures or replace current-head CI qualification.
 Three further runs passed (7.04 s, 5.57 s, 5.53 s); the sibling settled-checkpoint
 regression passed (0.48 s). Strict Clippy for the native integration target passed
 (11.12 s), as did formatting and diff checks. Temporary diagnostics were removed.
+
+</details>

@@ -1,36 +1,117 @@
 # BeyondDB server reference
 
-The `beyonddb` executable embeds ExtendDB and Cellar. BeyondDB owns configuration,
-public TLS and application maintenance. Cellar owns execution, placement,
-ownership, private peer transport and durability. See [deployment](deployment.md)
-for setup and [operations](operations.md) for failure handling.
+Run one `beyonddb` executable per node. It embeds ExtendDB for the DynamoDB
+frontend and Cellar for state execution and durability. Use this guide to choose
+storage, configure a node, follow its lifecycle and inspect qualification evidence.
+
+| I need to… | Start here |
+| --- | --- |
+| Understand node boundaries | [Server layout](#server-layout) |
+| Select local or fleet persistence | [Persistence and shutdown](#persistence-and-shutdown) |
+| Set listener, key and capacity fields | [Configuration](#configuration) |
+| Bootstrap, start or stop a process | [Starting and stopping](#starting-and-stopping) |
+| Understand maintenance, caching and retries | [Serving and caching](#serving-and-caching) |
+| Select checks and interpret their limits | [Qualification still required](#qualification-still-required) |
+| Inspect the original fault cases and measurements | [Detailed qualification record](#detailed-qualification-record) |
+
+## Server layout
+
+![Public clients, private peers and persistent storage around one embedded BeyondDB server](../diagram/operations/server-boundaries.svg)
+
+| Layer | Owns |
+| --- | --- |
+| ExtendDB | Public HTTP, SigV4, IAM evaluation, validation and operation handling |
+| BeyondDB | Configuration, public TLS setup, ordered routing and application maintenance |
+| Cellar | Cell execution, placement, fenced ownership, private peer transport and durability |
+
+Every table spans ordered range Cells. The `accounts` list selects accounts for
+maintenance; it does not place a table into one Cell. See [architecture](architecture.md)
+for the Cell types and [deployment](deployment.md) for provisioning.
+
+## Persistence and shutdown
+
+Choose the **acknowledgement boundary** first, then choose how a node stops.
+
+![Local persistence, default fleet bucket publication and optional native follower durability](../diagram/operations/server-durability.svg)
+
+| Storage configuration | Acknowledgement / recovery boundary | Retain |
+| --- | --- | --- |
+| No `fleet` object | Local Cellar persistence; does not cover machine loss | Node data directory |
+| `fleet.follower_durability: false` | Bucket-publication proof is the default acknowledgement path | Node data, bucket prefix and deployment keys |
+| `fleet.follower_durability: true` | An eligible native follower fsync proof may race bucket publication; see [follower durability](follower-durability.md) | Node data, bucket prefix and deployment keys |
+
+| `shutdown_mode` | Use when | Completion requirement |
+| --- | --- | --- |
+| `preserve` — default in both modes | Restarting the same logical node | Drain work and close local durability; fleet mode also requires the SDK's clean-reload proof and retained local directory |
+| `handoff` — fleet only | Removing a node while an eligible live peer can adopt its Cells | Complete native transfer; cannot complete on the last eligible node; rejected without `fleet` |
+
+Local-only nodes have no replication marker: they reopen closed local state through
+normal recovery. A process kill is not a clean stop. Keep persistent state after exit.
 
 ## Configuration
 
-Use [config/cellar.example.json](../config/cellar.example.json). The parser
-rejects unknown fields. Current fields are defined in
-[src/bin/beyonddb.rs](../src/bin/beyonddb.rs).
+Start with [config/cellar.example.json](../config/cellar.example.json). The parser
+rejects unknown fields; [the executable's configuration structs](../src/bin/beyonddb.rs)
+are the source of truth. Paths below are examples to provision for the service account.
 
-| Field | Meaning / default |
+### Node, network and keys
+
+| Field | Requirement / default |
 | --- | --- |
-| `node_name` | Unique running node identity |
+| `node_name` | Unique identity for each running node |
 | `data_dir` | Persistent local directory; engine state is under `cellar-ordered-v1` |
 | `region` | Deployment and request-signing region |
-| `public_bind`, `public_endpoint` | Listener address and advertised public URL |
-| `public_certificate`, `public_private_key` | Optional PEM pair; required for non-loopback public serving |
-| `peer_bind`, `peer_advertise` | Private listener and reachable `HOST:PORT` |
-| `peer_key_file` | Exactly 32 raw bytes; matching key across fleet nodes |
-| `encryption_key_file` | Exactly 32 raw bytes; preserve to decrypt credential secrets |
-| `accounts` | Accounts maintained by this deployment; default empty |
-| `initial_partitions` | Initial base/GSI data-range count, 2–256; default 4 |
-| `max_active_cells` | Positive native residency limit for all cell types; default 128 |
-| `split_threshold_bytes` | Positive threshold supplied to range maintenance; default 268435456 |
-| `auth_cache_enabled` | Credential, authorization, table metadata and route caching; default false |
-| `shutdown_mode` | `preserve` (default) or fleet-only `handoff` |
-| `fleet` | Optional S3-compatible fleet configuration; absent means local persistence |
-| `bootstrap` | Optional account/key/principal/policy settings, used with `--bootstrap` |
+| `public_bind` | Public listener address; plaintext HTTP requires loopback |
+| `public_endpoint` | Advertised URL; scheme must match the listener's TLS configuration |
+| `public_certificate`, `public_private_key` | Optional PEM pair; both required for non-loopback public serving |
+| `peer_bind`, `peer_advertise` | Private listener and reachable advertised `HOST:PORT` |
+| `peer_key_file` | Exactly 32 raw bytes; matching peer key across fleet nodes |
+| `encryption_key_file` | Exactly 32 raw bytes; preserve it to decrypt stored credential secrets |
 
-The optional fleet object is:
+### Application policy and capacity
+
+| Field | Requirement / default |
+| --- | --- |
+| `accounts` | Accounts maintained by this deployment; default `[]` |
+| `initial_partitions` | Initial base/GSI range count, **2–256**; default **4** |
+| `max_active_cells` | Positive native residency limit for **all Cell types**; default **128** |
+| `split_threshold_bytes` | Positive threshold supplied to range maintenance; default **268435456** (256 MiB) |
+| `auth_cache_enabled` | Credential, authorization, table metadata and route caching; default **false** |
+| `shutdown_mode` | `preserve` (default) or fleet-only `handoff` |
+| `fleet` | Optional S3-compatible storage settings; absent means local persistence |
+| `bootstrap` | Optional initial account, access key, principal and policy settings; applied with `--bootstrap` |
+
+### Local node example
+
+This complete configuration starts an **already bootstrapped** local node. Create
+both key files and provision the account first using the [bootstrap steps](deployment.md#bootstrap-and-start).
+For initial provisioning, use the checked-in example's `bootstrap` object.
+
+```json
+{
+  "node_name": "bdb-node-1",
+  "data_dir": "/var/lib/beyonddb",
+  "region": "us-east-1",
+  "public_bind": "127.0.0.1:8000",
+  "public_endpoint": "http://127.0.0.1:8000",
+  "peer_bind": "127.0.0.1:9000",
+  "peer_advertise": "127.0.0.1:9000",
+  "peer_key_file": "/etc/beyonddb/peer.key",
+  "encryption_key_file": "/etc/beyonddb/encryption.key",
+  "accounts": ["123456789012"],
+  "initial_partitions": 4,
+  "max_active_cells": 128,
+  "split_threshold_bytes": 268435456,
+  "auth_cache_enabled": false,
+  "shutdown_mode": "preserve"
+}
+```
+
+### Add fleet storage
+
+Merge the following object into the node configuration. Create the bucket first
+and provide its credentials in the **server process environment**. Keep the
+DynamoDB client's bootstrapped identity separate from that storage identity.
 
 ```json
 {
@@ -43,355 +124,336 @@ The optional fleet object is:
 }
 ```
 
-`endpoint` may be omitted for the provider's standard endpoint. The server builds
-S3 clients from its environment. It disables conditional-operation retries to
-preserve ambiguous ownership evidence. GCS/Azure URL configuration, peer mTLS
-fields, `storage_url`, `sql_workers`, `disk_budget_bytes` and
-`node_retained_bytes` are not fields in this executable.
-
-The encryption key protects stored credentials; it is not a claim of encryption
-for every application row or storage file. Public TLS and peer authentication
-are separate controls. Isolate and encrypt the private network externally.
-
-## Serving and caching
-
-Readiness waits for Cellar startup, optional bootstrap and an initial transaction
-recovery pass for each configured account. A node fence or failed supervised
-maintenance task withdraws public serving. Use `/health` for listener readiness
-and signed requests for application checks.
-
-`accounts` drives table lifecycle, projection, TTL, retention and coordinator
-maintenance. Empty or incomplete account lists do not provide maintenance for
-omitted accounts. Table data remains in separately routed cells.
-
-Caching is off by default. When enabled, the frontend uses the pinned ExtendDB
-cache defaults and BeyondDB's bounded route metadata cache. Cross-node changes
-can remain cached until expiry; local invalidation is not a fleet-wide immediate
-revocation guarantee. Leave caching disabled when testing fresh authorization
-and inspect the pinned implementation before relying on a specific TTL.
-
-The current binary fixes native per-cell concurrency at 16 and the handler budget
-at 30 seconds. These are source settings, not JSON knobs. Pure queries use bounded
-backpressure; commands retain single-attempt submission semantics. More request
-concurrency can worsen latency or cause admission errors.
-
-## Persistence and shutdown
-
-| Mode | Acknowledgement and restart boundary |
+| Fleet setting | Meaning |
 | --- | --- |
-| Local, no `fleet` | Local Cellar persistence; retain node data; does not cover machine loss |
-| Fleet, follower durability false | Bucket-publication proof is the default acknowledgement path |
-| Fleet, follower durability true | Native follower fsync proof may race bucket publication; see [follower durability](follower-durability.md) |
-| `preserve` shutdown | Drain work and local durability; fleet mode also requires clean-reload proof |
-| `handoff` shutdown | Fleet-only transfer to an eligible live peer; cannot complete on the last eligible node |
+| `bucket` | S3-compatible bucket supporting conditional create/update |
+| `endpoint` | Optional provider override; omit for the provider's standard endpoint |
+| `prefix` | Nonempty, dedicated prefix for one compatible Cellar deployment |
+| `follower_durability` | Default `false`; opt into eligible native follower fsync proofs |
+| S3 client configuration | Built from the server environment; conditional-operation retries are disabled to preserve ambiguous ownership evidence |
 
-SIGINT/SIGTERM drains the public server, stops application maintenance and invokes
-Cellar shutdown. A successful exit requires drained work/cells, no pending
-dispatches, quiesced logs, closed local durability and no shutdown deadline failure.
-Keep persistent state after exit; never confuse a process kill with a clean stop.
+### Security and unsupported knobs
+
+| Control | What it protects | Operational boundary |
+| --- | --- | --- |
+| Public TLS | Client-to-public-listener traffic | Supply both PEM files and matching HTTPS URL for external serving |
+| Shared peer key | Private peer authentication | Does **not** encrypt transport; isolate and encrypt the private network externally |
+| Credential-encryption key | Stored access secrets and session tokens | Does **not** establish encryption of every application row or storage file |
+
+The parser does **not** accept GCS/Azure URL configuration, peer mTLS fields,
+`storage_url`, `sql_workers`, `disk_budget_bytes` or `node_retained_bytes`.
+See [deployment](deployment.md#expose-https-and-add-nodes) before adding peers.
 
 ## Starting and stopping
 
-Build with `cargo build --locked --bin beyonddb`. Run `beyonddb config.json --bootstrap`
-once with the new credential secret supplied on stdin; the bootstrap policy
-must be an operator-authored IAM policy file. Later starts omit `--bootstrap`.
-The bootstrap account must be listed in `accounts`.
+![Startup readiness gates and the ordered SIGINT or SIGTERM clean shutdown path](../diagram/operations/server-lifecycle.svg)
 
-The public server starts after Cellar reports ready, bootstrap completes and
-an initial transaction recovery pass succeeds for every configured account.
-The pass uses each shard's observed pending boundary, continues healthy work
-after a failure, and reports any unresolved admission or resolution failure
-before maintenance starts. Fresh BEGINs resume normally; startup alone does
-not authorize their abort. Initial fleet observation can take longer than
-local startup; the listener is not published while that readiness gate is closed.
-ExtendDB handles SIGINT/SIGTERM and drains its public listener. The application
-then cancels/joins maintenance and requests the Cellar stop protocol. A node
-fence or failed maintenance task withdraws public serving. Shutdown succeeds
-only with drained ingress, application work and cells, zero pending events and
-dispatches, quiesced logs, closed local durability and no drain timeout or elapsed
-deadline. Keep both caller-owned executors alive until that outcome is returned.
+### Build and bootstrap
 
-`shutdown_mode` defaults to `"preserve"`, including in fleet mode. Fleet Preserve
-prepares a clean reload of the same logical node using its retained local
-directory and requires the SDK's clean-reload proof. Local-only nodes have no
-replication marker and reopen their closed local state through normal recovery.
-Use `"handoff"` when removing a fleet node
-and another eligible node is running to adopt its cells. Handoff cannot complete
-on the last node; it is rejected without fleet configuration.
+Run from the repository root. Provision directories, keys and the operator-authored
+IAM policy using [the deployment guide](deployment.md#build-and-provision).
+
+```sh
+cargo build --locked --bin beyonddb
+```
+
+For **initial provisioning only**, include the `bootstrap` object from the example
+configuration. Its `account_id` must appear in `accounts`; `policy_file` must point
+to the operator's IAM policy. Supply the new credential secret on stdin, for example
+from a protected file mounted by your secret manager:
+
+```sh
+"${CARGO_TARGET_DIR:-target}/debug/beyonddb" /etc/beyonddb/config.json \
+  --bootstrap < /run/secrets/beyonddb-bootstrap
+```
+
+Later starts omit `--bootstrap`:
+
+```sh
+"${CARGO_TARGET_DIR:-target}/debug/beyonddb" /etc/beyonddb/config.json
+```
+
+### Readiness gates
+
+| Order | Gate | Failure / recovery behavior |
+| --- | --- | --- |
+| 1 | Configuration and Cellar startup | Public serving stays closed until native readiness |
+| 2 | Optional bootstrap | Persist the credential and policy before serving |
+| 3 | Initial transaction recovery for each configured account | Use each shard's observed pending boundary; continue healthy records/shards after failures, but report unresolved admission/resolution failure before maintenance starts |
+| 4 | Maintenance and public serving | Start only after the initial pass succeeds; fleet observation can take longer than local startup |
+
+Check from a second terminal after serving starts. These commands assume the local
+HTTP example and a **client shell configured with the bootstrapped DynamoDB key**:
+
+```sh
+curl --fail http://127.0.0.1:8000/health
+aws --endpoint-url http://127.0.0.1:8000 --region us-east-1 dynamodb list-tables
+```
+
+`/health` checks listener readiness. Follow signed `ListTables` with a write/read
+and restart check; health alone does not qualify application durability.
+
+### Coordinator recovery rules
+
+| Observed state | Allowed recovery action | Preserved invariant |
+| --- | --- | --- |
+| Durable COMMIT / ABORT | Resolve the recorded original participants | Do not change the admitted participant set |
+| Fresh BEGIN | Resume from immutable coordinator payloads | Keep original participant identities and epochs; startup does not authorize abort |
+| Abandoned BEGIN aged ten minutes | Atomically check age and record ABORT in the coordinator command | The deadline does not authorize decision collection |
+| Unavailable owner or uncertain mutation reply | Recover through the durable protocol | Neither observation establishes ABORT |
 
 Coordinator discovery pages durable account registrations and retained pending
-records. Published decisions resolve their original participants. Fresh BEGINs
-resume from the coordinator's immutable payloads, retaining original participant
-identities and epochs. An abandoned BEGIN may be atomically changed to ABORT
-after ten minutes; the age check and
-decision share the coordinator command. This deadline does not authorize
-collecting decisions or changing an admitted participant set. Recovery cannot
-infer ABORT from an unavailable owner or an uncertain mutation reply.
+records. See [the transaction protocol](cross-cell-transactions.md) for resolution
+and replay details.
+
+### Clean shutdown checklist
+
+SIGINT/SIGTERM drains ExtendDB's public listener, then BeyondDB cancels and joins
+maintenance before requesting Cellar shutdown. Embedding callers can own a
+`TaskGroup` and call its bounded `shutdown` first. Keep both caller-owned executors
+alive until the node outcome returns.
+
+A successful exit requires **every** condition below, as checked by
+[the executable](../src/bin/beyonddb.rs):
+
+| Stop-report condition | Required outcome |
+| --- | --- |
+| Public ingress, application work and Cells | Drained |
+| Pending application events and dispatches | Zero |
+| Logs | Quiesced |
+| Local durability | Closed |
+| Drain timeout / elapsed deadline | Neither occurred |
+| Fleet `preserve` only | Clean-reload proof prepared and consistent with retained local state |
+
+A node fence or failed supervised maintenance task withdraws public serving.
+Check the process outcome and logs before restart; keep the node directory.
+See [failure handling](operations.md#shutdown-and-replacement).
+
+## Serving and caching
+
+### Account maintenance
+
+`accounts` drives table lifecycle, projection, TTL, retention and coordinator
+maintenance. Empty or incomplete lists leave omitted accounts without those
+workers. Base and GSI data remain in separately routed Cells.
+
+| Maintenance responsibility | State it advances |
+| --- | --- |
+| Table lifecycle and range maintenance | Creation/deletion repair, capacity and split work |
+| GSI projection and statistics | Published index ranges, pending projections and metadata samples |
+| Transaction recovery | Discovered BEGINs and durable decisions |
+| TTL and retention | Expiry work and retained stream records, including inventoried ranges |
+
+### Cache policy
+
+| Setting / event | Behavior |
+| --- | --- |
+| `auth_cache_enabled: false` — default | Use when testing fresh authorization and revocation |
+| `auth_cache_enabled: true` | Use pinned ExtendDB cache defaults plus BeyondDB's bounded route metadata cache |
+| Cross-node credential, policy or metadata change | May remain cached until expiry; local invalidation is not fleet-wide immediate revocation |
+| Need a specific cache TTL | Inspect the pinned implementation before relying on one |
+
+### Admission and retry boundaries
+
+These limits are **source settings**, not JSON knobs. Raising client concurrency
+can increase latency or admission errors.
+
+| Boundary | Current behavior |
+| --- | --- |
+| Native per-Cell concurrency | **16** |
+| Native handler budget | **30 seconds** |
+| One HTTP gateway | **128** queued/submitted dispatches; **8** per target, with permits held through response completion |
+| Pure SDK query backpressure | Bounded **30-second** window for HTTP 429/503 and the recognized Cellar 0.1.0 owner-resolution failure |
+| Recognized HTTP 500 | Only the exact bounded `Worker failed: route failed: ResolveFailed` body; other 500s retain their failure |
+| Commands, including transaction read-image capture | One transport attempt; HTTP status does not prove a mutation was unstarted |
+
+The dispatch wrapper preserves the SDK body-size hint and retains permits through
+completion. Read pacing does not cache credentials, authorization or item values.
+Cellar still owns admission across gateways, execution and durability. Never infer
+mutation rollback from cancellation or a lost reply.
 
 ## Qualification still required
 
-[Current test targets](implementation-status.md#current-verified-slice) cover
-selected public operations, native peer/fencing faults, owner restoration and
-process loss. They do not establish full DynamoDB compatibility, automatic fleet
-recovery within a bound, independent-host follower-loss tolerance, sustained
-capacity, backup/PITR or safe upgrades of existing development roots.
+The [qualification workflow](../.github/workflows/qualification.yml) defines
+current native and process checks. The expandable record below preserves older
+measurements and fault cases; it is not a report of the latest CI run.
 
-Use fresh storage for incompatible formats. Do not open roots from a different
-runtime or reuse an older hash-layout root as ordered-layout state. Capture the
-binary revision, dependency lockfile and configuration with every qualification.
+| Evidence available | Still not established |
+| --- | --- |
+| Selected signed public operations and local restart | Full DynamoDB compatibility |
+| Native peer/fencing faults and fresh-owner restoration | Automatic fleet recovery within a bound |
+| Specific follower recovery process fixture | Independent-host follower-loss tolerance or a complete fleet fencing/follower-log matrix |
+| Capacity and admission fixtures | Sustained throughput, overload behavior or fleet capacity |
+| Retained state and process-loss cases | Backup/PITR or safe upgrades of development roots |
+| Migrated native contracts | Removed contracts listed in [the retirement inventory](retired-tests.md) |
+
+Use fresh storage for incompatible formats. Do not open roots from another runtime
+or reuse a hash-layout root as ordered-layout state. Record binary revision,
+`Cargo.lock`, configuration, storage and filesystem with every qualification.
+
+Examples from the repository root; process cases require Docker, OpenSSL and AWS CLI:
+
+```sh
+cargo test --locked --test cellar_sdk
+cargo test --locked --test cellar_transactions -- --test-threads=1
+cargo test --locked --test cellar_process -- --ignored --test-threads=1
+```
+
+See the [Rust workflow](../.github/workflows/rust.yml) and
+[signed SDK workflow](../.github/workflows/qualification.yml) for the full matrix.
 
 ## Detailed qualification record
 
-> **Recorded evidence:** These detailed native and process cases are retained from
-> the [original report](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/cellar-server.md).
-> Counts and timing describe those runs, not the latest CI result. Earlier-runtime
-> comparisons are not additional Cellar coverage. Current configuration remains
-> defined by the reference above.
+> **Recorded evidence:** The following tables preserve the cases and measurements
+> from the [original report](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/cellar-server.md).
+> Counts, budgets and timing belong to those runs. Earlier-runtime comparisons
+> are not additional Cellar coverage; recorded build/test successes are not the
+> latest CI result. Configuration and operation follow the reference above.
 
-The new `tests/cellar_sdk.rs` uses signed SDK requests against the real process,
-including typed/large escaped item values, conditional writes, token replay,
-Query pages and restart. The Put/Get/Update/Delete, transaction replay and
-query/restart cases pass. It is local qualification only. The separate
-`tests/cellar_process.rs` target has passing runs for nine bucket-backed cases:
-coordinator history, GSI projection recovery, large transactional reads on a
-fresh owner, metadata caching, segmented LSI scans, and signed Streams/TTL recovery with
-retained generations after table deletion and recreation, native capacity and
-authenticated peer identity, the broad SDK restart scenario and native follower
-recovery with bundle/LTX publication withheld. The broad SDK scenario
-keeps batch/transaction/index/large-value checks across ordered ranges through
-hard and graceful restarts, then deletes and recreates a table. The
-account-domain fixture also passes SDK handoff to a second node. Twenty-two cases in
-`tests/cellar_transactions.rs` qualify token retention, cross-cell write skew,
-bounded resume, delayed resolution, shared read snapshots, lost transaction
-phases, caller admission refusal, competing drivers, fair background discovery,
-acknowledged read-result cleanup, TTL lock races, ordered range-read barriers and
-prepared-commit/mixed-participant handoff through native SDK ingress.
-The native coordinator cases also retain history across 24 shards under a
-16-cell resident cap, recover a partial read on a fresh owner, discover a later
-BEGIN after settled passes, and admit four table ranges after 32 coordinator
-shards have exceeded residency. A caller-injected child-install refusal retains
-the same pending split until capacity returns. Proven pre-submission Capacity
-maps to LimitExceeded; native HTTP failure remains ambiguous. The native recovery
-admission cases cover BEGIN/COMMIT/ABORT at startup and while serving, progress
-past failed records and shards, retry without overwriting newer values, and
-deferred discovery beyond the initial pending boundary. A server regression
-checks failure before maintenance starts and successful retry. These use an
-explicit caller policy before SDK submission, not physical network faults.
-`tests/cellar_peer.rs` adds actual native peer sockets behind an opaque TCP
-cut. With SDK route caching both disabled and enabled, signed requests retain
-numeric pagination, two-range reads and 50 concurrent increments without AWS
-client retries. Removing the old directory before lease-expiry recovery retains
-values and advances native owner epochs. Authentication fails closed during a
-credential-owner cut while healthy local data remains readable, then recovers
-after expiry. Unknown keys create no credential cells; revocation remains fresh.
+| Recorded run | Result and scope |
+| --- | --- |
+| Focused native run | **155 tests**, **24 SHA-256-verified executables**, normal parallelism, zero failed/ignored |
+| RustFS process run | **9 explicitly executed cases**, zero failed/ignored; rebuilt server SHA-256 unchanged throughout |
+| Build gates in that record | All-target build and strict Clippy passed; current dependency pins are in [Cargo.toml](../Cargo.toml) |
+| Fault model | Caller refusal precedes SDK submission; native HTTP failure remains ambiguous. Caller/provider faults qualify their stated local contracts, not a complete fleet fault matrix |
 
-The public frontend paces pure SDK queries on HTTP 429/503 and Cellar 0.1.0
-owner-resolution failures within a 30-second backpressure window. Only the exact
-bounded `Worker failed: route failed: ResolveFailed` 500 body is recognized;
-other 500s retain their original failure. The dispatch wrapper preserves the
-SDK body size hint while retaining its permits through completion. This permits bursts through native per-cell admission
-without caching credential, authorization or item values. Commands keep their
-single-attempt transport contract, including transaction read-image capture;
-HTTP status still does not prove a mutation was unstarted. Separate policy
-checks cover read retry hints, deadline failure and mutation non-retry.
-Eight `tests/node_log_authority.rs` cases exercise the native single lease
-writer and folded log through real storage faults. They cover normal and slow
-renewals, an applied CAS reply lost before delivery, delayed/stalled ordinary
-reads, graceful sealing, natural expiry after sustained renewal failure and
-closed ingress after fencing. An expired unavailable follower cannot prove a
-new write while both bundle and LTX publication are withheld; that same signed
-request completes when publication resumes. The fixtures never edit authority
-records or require epoch rotation from TTL expiry alone.
-Four additional native shutdown cases verify immediate certified same-node
-restart, incomplete drain with unpublished signed work, a real provider CAS
-that commits after the node closes, and bounded read/write storage stalls.
-A clean report must match the actual local certificate; incomplete stops
-cannot grant one and must close ingress. After ordinary expiry, signed reads
-retain acknowledged rows in both data ranges. The tests do not retain
-Cellule's separate application-owned session retirement API.
-Six `tests/cellar_indexes.rs` cases retain local/global index mutation,
-transaction, split, replay and restart contracts. LSI splits keep PK collections
-together and retain logical query cursors. GSI replay preserves large chunked
-images, versions and tombstones. Maintenance visits every published GSI range
-through native ingress even when its base outbox is empty, so idle and empty
-ranges recover on a new owner. Fixtures observe actual SDK factories and owner
-epochs before issuing user index reads, after deleting the former directories.
-Backfill cases preserve the historical delivery barrier, prepare reservations
-and unfinished scan policy across owner replacement and range splits. The GSI
-transfer case retains 70 wide-key records, binary images and tombstones across
-partial-import and post-publication replacements. Equal index PK/SK entries
-span both children via the complete base-key suffix; signed forward/reverse
-queries retain all rows and full continuation keys after recovery.
-Embedding callers can own a `TaskGroup` and call its bounded `shutdown` before
-stopping the SDK node; the executable follows that same shutdown order.
-Two multipart cases preserve escaped inputs larger than one command,
-immutable/independent upload identities, exact receipt replay and durable
-payload recovery. Complete SDK snapshots verify expired staging cleanup and
-consumed-input collection. A fresh owner restores partial chunks after removal
-of the former directory. Another replacement occurs after ABORT but before
-the remaining account/data pieces arrive: delayed prepares remain rejected,
-normal writes succeed and signed reads contain no aborted payload. The
-controlled fixture clock governs application deadlines; SDK lease time stays
-independent.
-Three `tests/cellar_capacity.rs` cases verify physical reservation occupancy,
-near-full unrelated writes, durable Throttled prepare rejection and reservation
-release on COMMIT/ABORT. The original 144/32/2 MiB fixture budgets and item
-sizes are retained. Complete SDK snapshots audit rollback and cleanup; signed
-reads and exact rejected receipts survive fresh-owner recovery. Submitted SQL
-or transport errors remain ambiguous. A forced physical SQLite FULL upload is
-still unqualified on the public SDK and remains a separate migration gate.
-The native serving target retains the large ordered numeric/IAM contract:
-two initial ranges grow through automatic and explicit splits, one PK spans
-actual cells, token replay survives the new routes, and signed calls cross a
-separate native peer. Policy boundaries, revocation and encrypted credential
-state survive deletion of both owners' directories. Exact-limit Query pages
-now retain the owner's exhaustion proof when its range finishes the requested
-span, avoiding a redundant terminal page without another cell RPC. Logical
-target validation is available before admission; native authority stays in
-the SDK. CI executes these contracts alongside the other migrated suites.
-The data-range contract also retains activation fencing, durable transaction
-visibility, sealed export/import, resumable split publication and child stream
-lineage. Ordered fixture rows occupy both children. Complete non-owning SDK
-snapshots audit all four data journals after shutdown. Deleting the old local
-directory and observing native lease/sample expiry precede another node's
-restoration of all seven state scopes at higher ownership epochs, including
-the retired source and prepared child intent. Unfinished BEGINs remain pending
-until explicit fenced recovery. The physical SQLite FULL upload fixture still
-requires its separate SDK equivalent.
-Five `tests/cellar_metadata.rs` cases retain table-class change history and
-limits, deletion protection, capacity and logical byte counters, compacted
-transaction replay and sparse LSI/GSI statistics. They run under 8/11/16-cell
-resident budgets with signed SDK retries disabled. Fresh owners recover the
-same account scope at higher epochs after local-file deletion and observed
-native lease/sample departure. Real base/GSI splits during sampling reject
-stale statistics before publication. Public tables retain two initial ordered
-ranges; a second observed key is inserted before splitting a one-item source.
-Three `tests/cellar_batches.rs` cases preserve per-child returned-update
-conditions, stream ordinals, exact receipt replay and the 390,000-NUL escaped
-image case. A real SDK peer forwards prepare batches, then recovers prepared
-intents and their shared receipt after the original owner loses its lease.
-Another owner retains independent COMMIT/ABORT states. Each handoff removes
-the former local directory and verifies the same data scope at a higher epoch;
-signed reads and ordinary writes prove final visibility and released locks.
-Three `tests/cellar_images.rs` cases retain immutable saved images, bounded
-wide-read fallback and exact large conditional-failure images. Original
-380/384 KiB binary and NUL payloads remain intact. Signed cross-cell reads
-preserve response order and absent positions. Canceled-token retry and terminal
-replay preserve later writes. Separate SDK peers serve initial requests;
-fresh owners recover the same data scopes at higher epochs after deletion of
-all former local directories and observed lease/sample departure. Cellule
-mailbox measurements remain a separate migration gate.
-Two `tests/cellar_domain.rs` cases verify metadata-cache query counts and
-generation fencing, and usage counters against the compiled data schema.
-Directory fixtures exercise full-contract transfer, immutable initial-count
-activation, 1,024-entry metadata copy/cutover and interrupted retirement. A
-48-root/16-resident-cell case retains metadata fences and actual two-cell data
-through fresh-owner recovery. Those development-bucket cases qualify metadata
-behavior; they do not establish fleet capacity or 1,024 active data partitions.
-Interrupted creation also recovers its original two-cell plan before ACTIVE,
-then retains more than 64 MiB of data through another owner handoff.
-Paged serving also runs over 65 distinct installed data cells, checking Scan
-and TTL continuation through a 64-entry page boundary and the 16-table TTL
-schedule bound. A separate metadata-only fixture grows a valid 256-entry plan
-to 1,024 entries, splits its directory, and retains 1,025 pageable entries and
-an unfinished leaf transfer on a fresh owner after deleting the old directory.
-It does not claim 1,025 installed data cells.
-Two table-lifecycle fixtures also exercise repeated deletion/recreation with
-independent two-cell base/GSI directories under a 16-cell resident limit, and
-recovery of a committed retirement whose reply was lost before acknowledgement.
-Retired directory fences and old base items survive a fresh-owner handoff.
-Creating new cells after handoff waits for the departed node's observed native
-lease to expire and the native placement sample to observe departure; the
-fixture does not assert immediate fresh-cell placement.
-Signed coalescing qualification also retains 64 returned updates, eight
-same-key increments and 32 concurrent two-item transactions, including a lost
-prepare-batch reply and fresh-owner recovery. Registration batches preserve
-caller transport/admission isolation, durable discovery and cancellation
-semantics. One HTTP gateway bounds dispatch to 128 queued/submitted calls and
-eight per target through response completion. This is local backpressure;
-Cellar still owns cross-gateway admission, execution and durability. Mutations
-retain one transport attempt. Development/test builds optimize LTX checksum
-and compression dependencies so physical reservation traffic can meet the
-same durability deadlines; no reservation or workload bounds were reduced.
-Three native public-placement cases also reject Single selection, retain
-four-range plans despite later creation-policy and tag changes, preserve atomic
-reads within one range of a multi-range table, and split GSI ranges independently
-of the base plan. Token replay, exact stream counts and signed index values
-survive fresh-owner recovery after local-file deletion. SDK factory identities
-and ownership rows prove higher epochs for the restored data/index scopes.
-Native registration publication also holds actual account LTX provider PUTs
-through caller cancellation. Later admission waits for acknowledgement; both
-discovery rows survive native owner replacement without admitting BEGIN.
-Four-way publication coalesces below four durable account commands. Scope and
-batch rejection leave no partial row, while the maximal account/batch encoding
-survives restore. These cases use the SDK's publication and ownership proofs.
-Five native creation cases also retain partial GSI/base installation under
-10/11-cell resident budgets, worker-only repair, concurrent deletion, immutable
-initial counts and unpublished-directory retirement. Known pre-submission
-admission failures establish the partial checkpoints; SDK ownership and actual
-installed contracts remain authoritative. Signed values and index contents
-survive fresh owners after local-file deletion.
-Two native deletion cases retain the 160-item/160-LSI workload under an
-eight-cell resident limit, with worker-only cleanup after owner replacement.
-An internal account fixture retains bounded row cleanup; the public fixture
-spans two data cells, verifies retained base/LSI history and a retired directory,
-and recovers both SDK scopes at higher epochs. Stale deletion cannot affect the
-replacement generation, whose signed contents survive another fresh owner.
-Five native reclamation cases keep the 4/5/11-cell resident limits while SDK
-samples show more owned cells than resident cells. They cover first-transaction
-replay, repeated directory/data restoration, cold participants without account
-activation and durable base/GSI split seals. Completed split replay issues no
-historical-source ingress; signed data and exact index values survive fresh
-owners after local-file deletion. SDK Sticky ownership replaces the old explicit
-owner-release policy. The creation-time race pauses a real CreateTable retry,
-observes destruction of both original data activations under ordinary SDK
-pressure, then completes the same pending generation and restores the old data.
-Those values and the new table write survive another fresh owner.
-Six native coordinator-admission cases cover publication, hot reads and SDK owner claims.
-Two hold actual coordinator LTX payload PUTs.
-Concurrent replay shares one held cold publication after both requests reach
-SDK ingress; independent coordinator scopes overlap before release. Account
-registration survives owner replacement, and replay retains a newer signed
-value after local-file deletion. These cases keep four caller threads and the
-original 8/16-cell budgets and 150 ms/one-second observation bounds. A cold
-claim reuses one absent-owner read before its conditional PUT. A delayed SDK
-Create-mode claim receives a clean provider rejection after a real peer wins;
-the peer's owner record, coordinator sequence and newer values remain intact.
-Exact seed items and token replay survive another owner after both old local
-directories are removed. Both contenders are ready with free capacity before the
-timed claim, keeping membership startup outside that operation window. Registered
-admission issues four canonical SDK queries with no hot managed-cell provider
-GETs or account mutations. Fresh provisioners still issue that query; fresh SDK
-owners recover the same registration and coordinator state at higher epochs.
-The pending-slot case pins four SDK callbacks under a five-cell limit. Two
-coordinators reach SDK owner lookup, but the second creation CAS stays blocked
-while the first accepted CAS is held, including after its caller is cancelled.
-Once the first CAS settles at the provider, the queued claim progresses. The
-cancelled caller invokes no application handler; Cellar may retain dormant
-ownership from its accepted claim. Cancellation alone does not establish rollback.
-Registration and exact values survive another fresh owner. The shared activation
-observer is also checked by a fresh run of all five reclamation cases.
-No ownership record or CAS payload is fabricated.
-Two native ownership-race cases also retain the original two caller threads,
-eight-cell limits, two data ranges and ten-second bounds. They hold actual SDK
-owner lookup results or conditional PUTs while another SDK wins, and drain a live
-owner after a lookup. The signed reads preserve exact items and the winner's
-fence; later values survive another owner after local-file deletion. Cellar's
-public handoff supplies the release/durability proof, and a departing SDK may
-transfer directly to its successor. No fixture rewrites owner or lease records.
-The latest complete fixture run passed 155 focused native tests across 24
-SHA-256-verified executables with normal parallelism, zero failed/ignored. This
-includes all native discovery, creation, deletion, reclamation and admission
-ports and the stale-owner/competing-claim regressions. All nine explicitly
-executed RustFS process cases also pass on the rebuilt server, zero failed/ignored,
-with its SHA-256 unchanged throughout the run. Current dependency pins are recorded
-in [Cargo.toml](../Cargo.toml).
-Caller refusal is checked before SDK submission; a native HTTP error remains
-ambiguous. The caller/provider faults qualify their stated local contracts;
-they do not establish a fleet fencing or follower-log matrix. The separate process fixture supplies the
-specific follower recovery evidence described above. The two unported Cellule
-test targets were removed at the user's request. All-target build and strict
-Clippy gates remain enabled and pass; native and process coverage is retained.
-The removed contracts remain unqualified and are listed with their source
-revision in [the retirement inventory](retired-tests.md). Further API,
-index and fleet fault qualification remains separate from this SDK migration.
+Expand a domain to inspect its recorded assertions, fixture sizes and limits.
+
+<details>
+<summary><strong>Public SDK, process recovery and private peers</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Signed SDK](../tests/cellar_sdk.rs) | Real-process typed/large escaped values, conditional writes, token replay, Query pages and restart; Put/Get/Update/Delete, transaction replay and query/restart passed. Local qualification only. |
+| [Bucket-backed process cases](../tests/cellar_process.rs) | Nine cases covered coordinator history, GSI projection recovery, large transactional reads on a fresh owner, metadata caching, segmented LSI scans, signed Streams/TTL recovery with retained generations after deletion/recreation, native capacity and authenticated peer identity, broad SDK restart, and follower recovery with bundle/LTX publication withheld. |
+| Broad SDK scenario | Batch, transaction, index and large-value checks crossed ordered ranges through hard and graceful restarts, followed by table deletion/recreation. The account-domain fixture also passed SDK handoff to a second node. |
+| [Native peer sockets](../tests/cellar_peer.rs) | Opaque TCP cut with route caching disabled and enabled; numeric pagination, two-range reads and **50 concurrent increments** without AWS client retries. Removing the former directory before lease-expiry recovery preserved values and advanced owner epochs. |
+| Credential-owner cut | Authentication failed closed while healthy local data remained readable, then recovered after expiry. Unknown keys created no credential Cells; revocation remained fresh. |
+| Query pacing policy | Tests covered read retry hints, deadline failure and mutation non-retry. Bursts passed native per-Cell admission without caching credential, authorization or item values; command attempts remained single-shot. |
+
+</details>
+
+<details>
+<summary><strong>Transactions, coordinator discovery and admission failures</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Transaction suite](../tests/cellar_transactions.rs) | **22 cases** covered token retention, cross-Cell write skew, bounded resume, delayed resolution, shared read snapshots, lost phases, caller admission refusal, competing drivers, fair background discovery, acknowledged read-result cleanup, TTL lock races, ordered range-read barriers and prepared-COMMIT/mixed-participant handoff through native SDK ingress. |
+| Coordinator residency | History across **24 shards** under a **16-Cell** resident cap; partial read recovery on a fresh owner; discovery of a later BEGIN after settled passes; four table ranges admitted after **32 coordinator shards** exceeded residency. |
+| Split install refusal | Caller-injected child-install refusal retained the same pending split until capacity returned. Proven pre-submission Capacity mapped to LimitExceeded; native HTTP failure remained ambiguous. |
+| Recovery admission | BEGIN/COMMIT/ABORT at startup and while serving; progress past failed records/shards; retry without overwriting newer values; discovery deferred beyond the initial pending boundary. A server regression failed before maintenance, then succeeded on retry. |
+| Fault boundary | These admission cases used an explicit caller policy **before SDK submission**, not physical network faults. |
+
+</details>
+
+<details>
+<summary><strong>Lease authority, follower proof and clean shutdown</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Node log authority](../tests/node_log_authority.rs) | **8 cases** exercised the native single lease writer and folded log through real storage faults: normal/slow renewal, applied CAS reply lost before delivery, delayed/stalled ordinary reads, graceful sealing, natural expiry after sustained renewal failure and closed ingress after fencing. |
+| Expired follower | An expired unavailable follower could not prove a new write while both bundle and LTX publication were withheld. The same signed request completed when publication resumed. Fixtures never edited authority records or required epoch rotation from TTL expiry alone. |
+| Additional shutdown cases | **4 cases** covered immediate certified same-node restart, incomplete drain with unpublished signed work, a real provider CAS committing after node close, and bounded read/write storage stalls. |
+| Stop proof | The clean report matched the actual local certificate; incomplete stops could not grant a certificate and had to close ingress. After ordinary expiry, signed reads preserved acknowledged rows in both data ranges. |
+| Historical distinction | These tests do not retain the earlier runtime's separate application-owned session-retirement API. Its removed contracts remain unqualified. |
+
+</details>
+
+<details>
+<summary><strong>Indexes, split state and ordered serving</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Index suite](../tests/cellar_indexes.rs) | **6 cases** retained local/global index mutation, transaction, split, replay and restart contracts. LSI splits kept PK collections together and logical Query cursors valid; GSI replay retained large chunked images, versions and tombstones. |
+| Idle GSI recovery | Maintenance visited every published GSI range through native ingress even with an empty base outbox. Idle/empty ranges recovered on a new owner; fixtures observed SDK factories and higher epochs after deleting former directories, before user index reads. |
+| Backfill | Historical delivery barrier, prepare reservations and unfinished scan policy survived owner replacement and range splits. |
+| GSI transfer | **70 wide-key records**, binary images and tombstones survived partial-import and post-publication replacements. Equal index PK/SK entries spanned both children via the full base-key suffix; signed forward/reverse queries retained all rows and complete continuation keys. |
+| [Ordered numeric/IAM serving](../tests/cellar_serving.rs) | Two initial ranges grew through automatic and explicit splits; one PK spanned actual Cells; token replay survived new routes; signed calls crossed a separate native peer. Policy boundaries, revocation and encrypted credential state survived deletion of both owners' directories. |
+| Query exhaustion | Exact-limit Query pages retained the owner's exhaustion proof when the range finished the requested span, avoiding a redundant terminal page without another Cell RPC. Logical-target validation preceded admission; native authority stayed in the SDK. CI included these contracts with the migrated suites. |
+| Data-range state | Activation fencing, durable transaction visibility, sealed export/import, resumable split publication and child stream lineage; ordered rows occupied both children. Complete non-owning SDK snapshots audited **all four data journals** after shutdown. |
+| Data-range recovery | Old directory deletion and observed native lease/sample expiry preceded restoration of **all seven state scopes** at higher epochs, including the retired source and prepared child intent. Unfinished BEGINs remained pending until explicit fenced recovery. |
+
+</details>
+
+<details>
+<summary><strong>Large payloads, reservations, batches and saved images</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| Multipart payloads | **2 cases** retained escaped inputs larger than one command, immutable/independent upload identities, exact receipt replay and durable payload recovery. Complete SDK snapshots verified expired staging cleanup and consumed-input collection. |
+| Multipart owner loss | A fresh owner restored partial chunks after former-directory removal. Another replacement occurred after ABORT but before remaining account/data pieces arrived: delayed prepares stayed rejected, ordinary writes succeeded, and signed reads contained no aborted payload. Fixture time governed application deadlines independently of SDK lease time. |
+| [Capacity](../tests/cellar_capacity.rs) | **3 cases** verified physical reservation occupancy, near-full unrelated writes, durable Throttled prepare rejection and reservation release on COMMIT/ABORT. Original **144/32/2 MiB** fixture budgets and item sizes were retained. |
+| Capacity recovery boundary | Complete SDK snapshots audited rollback/cleanup; signed reads and exact rejected receipts survived fresh-owner recovery. Submitted SQL/transport errors remained ambiguous. Forced physical SQLite FULL upload still lacked a public-SDK equivalent and remained unqualified. |
+| [Batches](../tests/cellar_batches.rs) | **3 cases** preserved per-child returned-update conditions, stream ordinals, exact receipt replay and the **390,000-NUL** escaped image. A real SDK peer forwarded prepare batches, then recovered prepared intents and their shared receipt after the original owner's lease loss. |
+| Batch handoff | Another owner retained independent COMMIT/ABORT states. Every handoff removed the former directory and verified the same data scope at a higher epoch; signed reads/writes proved visibility and released locks. |
+| [Saved images](../tests/cellar_images.rs) | **3 cases** retained immutable images, bounded wide-read fallback and exact large conditional-failure images with original **380/384 KiB** binary/NUL payloads. Signed cross-Cell reads preserved response order and absent positions; canceled-token retry and terminal replay preserved later writes. |
+| Image recovery boundary | Separate SDK peers served initial requests. Fresh owners recovered identical data scopes at higher epochs after all former directories were removed and lease/sample departure was observed. Earlier-runtime mailbox measurements remained a separate unqualified gate. |
+
+</details>
+
+<details>
+<summary><strong>Metadata, directories, paging and table lifecycle</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Metadata](../tests/cellar_metadata.rs) | **5 cases** retained table-class history/limits, deletion protection, capacity/logical byte counters, compacted transaction replay and sparse LSI/GSI statistics under **8/11/16-Cell** resident budgets with signed SDK retries disabled. |
+| Metadata recovery | Same account scope, higher owner epochs after local-file deletion and observed lease/sample departure. Real base/GSI splits during sampling rejected stale statistics before publication. Public tables kept two initial ranges; a second observed key was inserted before splitting a one-item source. |
+| [Account domain](../tests/cellar_domain.rs) | **2 cases** checked metadata-cache query counts, generation fencing and usage counters against the compiled data schema. |
+| [Directory transfer](../tests/cellar_directories.rs) | Full-contract transfer, immutable initial-count activation, **1,024-entry** metadata copy/cutover and interrupted retirement. A **48-root / 16-resident-Cell** case preserved metadata fences and actual two-Cell data through fresh-owner recovery. Development-bucket evidence does not establish fleet capacity or 1,024 active data partitions. |
+| Interrupted creation | Original two-Cell plan recovered before ACTIVE, then more than **64 MiB** of data survived another owner handoff. |
+| Scan and TTL paging | **65 distinct installed data Cells** crossed the **64-entry** page boundary and the **16-table** TTL schedule bound. |
+| Metadata-only paging | A valid **256-entry** plan grew to **1,024** entries, split its directory and retained **1,025 pageable entries** plus unfinished leaf transfer on a fresh owner after old-directory deletion. This did not claim 1,025 installed data Cells. |
+| Lifecycle recovery | **2 fixtures** exercised repeated deletion/recreation with independent two-Cell base/GSI directories under a **16-Cell** resident cap, and recovery of committed retirement with a lost reply. Retired-directory fences and old base items survived fresh-owner handoff. |
+| Fresh placement boundary | New Cell creation waited for observed native lease expiry and placement-sample departure; immediate fresh-Cell placement was not asserted. |
+
+</details>
+
+<details>
+<summary><strong>Coalescing, placement and durable registration</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Signed coalescing](../tests/cellar_coalescing.rs) | **64 returned updates**, **8 same-key increments** and **32 concurrent two-item transactions**, including a lost prepare-batch reply and fresh-owner recovery. Registration batches preserved caller transport/admission isolation, durable discovery and cancellation semantics. |
+| Gateway and build conditions | One gateway bounded **128** queued/submitted calls and **8** per target through response completion; Cellar retained cross-gateway admission/execution/durability. Mutations kept one attempt. Development/test builds optimized LTX checksum/compression dependencies to meet unchanged durability deadlines; reservation/workload bounds were not reduced. |
+| [Public placement](../tests/cellar_placement.rs) | **3 cases** rejected Single selection, retained four-range plans across later creation-policy/tag changes, preserved atomic reads within one range of a multi-range table, and split GSI ranges independently of the base plan. |
+| Placement restoration | Token replay, exact stream counts and signed index values survived fresh-owner recovery after local-file deletion. SDK factory identities and ownership rows proved higher epochs for restored data/index scopes. |
+| Registration publication | Actual account LTX provider PUTs stayed held through caller cancellation. Later admission waited for acknowledgement; both discovery rows survived owner replacement without admitting BEGIN. |
+| Registration batching | Four-way publication coalesced below four durable account commands. Scope/batch rejection left no partial row; maximal account/batch encoding survived restore. Cases used SDK publication and ownership proofs. |
+
+</details>
+
+<details>
+<summary><strong>Creation, deletion and residency reclamation</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Creation](../tests/cellar_creation.rs) | **5 cases** retained partial GSI/base installation under **10/11-Cell** resident budgets, worker-only repair, concurrent deletion, immutable initial counts and unpublished-directory retirement. Known pre-submission admission failures established partial checkpoints; SDK ownership and installed contracts remained authoritative. |
+| Creation restoration | Signed values/index contents survived fresh owners after local-file deletion. |
+| [Deletion](../tests/cellar_deletion.rs) | **2 cases** retained a **160-item / 160-LSI** workload under an **8-Cell** cap, with worker-only cleanup after owner replacement. An internal account fixture retained bounded row cleanup. |
+| Deletion generation fence | The public fixture spanned two data Cells, retained base/LSI history and a retired directory, and recovered both scopes at higher epochs. Stale deletion could not affect the replacement generation; its signed contents survived another fresh owner. |
+| [Reclamation](../tests/cellar_reclamation.rs) | **5 cases** kept **4/5/11-Cell** caps while SDK samples showed more owned than resident Cells: first-transaction replay, repeated directory/data restoration, cold participants without account activation and durable base/GSI split seals. |
+| Split replay and ownership | Completed split replay issued no historical-source ingress; signed data and exact index values survived fresh owners after local-file deletion. SDK Sticky ownership replaced explicit application owner release. |
+| Creation-time race | Paused a real CreateTable retry, observed destruction of both original data activations under ordinary SDK pressure, then completed the same pending generation and restored old data. Old values and the new table write survived another fresh owner. |
+
+</details>
+
+<details>
+<summary><strong>Coordinator admission, cancellation and competing owners</strong></summary>
+
+| Scope | Recorded evidence |
+| --- | --- |
+| [Coordinator admission](../tests/cellar_admission.rs) | **6 cases** covered publication, hot reads and SDK owner claims. Two held actual coordinator LTX payload PUTs. Concurrent replay shared one held cold publication after both requests reached ingress; independent coordinator scopes overlapped before release. |
+| Admission budgets | **4 caller threads**, original **8/16-Cell** caps and **150 ms / 1-second** observation bounds. Account registration survived replacement; replay preserved a newer signed value after local-file deletion. |
+| Cold claim and lost race | Cold claim reused one absent-owner read before conditional PUT. A delayed SDK Create-mode claim received clean provider rejection after a real peer won; the winner's owner record, coordinator sequence and newer values stayed intact. |
+| Claim recovery | Exact seed items and token replay survived another owner after both former directories were removed. Both contenders were ready with free capacity before timing began, excluding membership startup from the operation window. |
+| Hot registration reads | Registered admission issued **4 canonical SDK queries**, with no hot managed-Cell provider GETs or account mutations. Fresh provisioners still queried; fresh owners recovered identical registration/coordinator state at higher epochs. |
+| Pending-slot case | **4 SDK callbacks** were pinned under a **5-Cell** cap. Two coordinators reached owner lookup, but the second creation CAS remained blocked while the first accepted CAS was held, even after caller cancellation. Provider settlement released the queued claim. |
+| Cancellation boundary | The canceled caller invoked no application handler; Cellar could retain dormant ownership from the accepted claim. Cancellation alone did not prove rollback. Registration/exact values survived another fresh owner; all **5 reclamation cases** rechecked the shared activation observer. No owner record or CAS payload was fabricated. |
+| [Ownership races](../tests/cellar_peer/ownership_race.rs) | **2 cases**, original **2 caller threads**, **8-Cell** caps, **2 data ranges** and **10-second** bounds. Held actual SDK owner lookup results or conditional PUTs while another SDK won; also drained a live owner after lookup. |
+| Race outcome | Signed reads preserved exact items and the winner's fence; later values survived another owner after local-file deletion. Public Cellar handoff supplied release/durability proof and could transfer directly to the successor. Fixtures never rewrote owner/lease records. |
+
+</details>
+
+The two unported earlier-runtime test targets were removed; their contracts remain
+unqualified and retain source revisions in [the retirement inventory](retired-tests.md).
+Further API, index and fleet fault qualification remains separate from the SDK migration.

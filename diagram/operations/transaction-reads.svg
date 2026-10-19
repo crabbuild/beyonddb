@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 986" role="img" aria-labelledby="title desc">
+<title id="title">Transactional reads: capture before release</title>
+<desc id="desc">Ordinary reads must not return an old image behind an unresolved committed write intent; they resolve and reread or fail retryably. A cross-Cell transactional read captures existing or absent images and shared locks atomically in each participant. All captures coexist once the last shared prepare succeeds. The coordinator commits and resolves participants to release locks while retaining saved images. The initiating reader assembles original positions, then durably acknowledges consumption before cleanup. Cleanup can finish through recovery; unacknowledged images remain retained.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="986" fill="#0f172a"/>
+<rect width="1120" height="986" fill="url(#grid)"/>
+<text x="40" y="53" class="title">Transactional reads: capture before release</text>
+<text x="40" y="88" class="note">Locks protect the capture; saved images protect the response after locks are released.</text>
+<text x="40" y="139" class="eyebrow" style="fill:#fbbf24">ORDINARY READ VS. PENDING WRITE</text>
+<text x="590" y="139" class="eyebrow" style="fill:#34d399">COORDINATED TRANSACTGETITEMS</text>
+<path d="M285 254V302" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M285 380V428" class="edge" stroke="#fbbf24" marker-end="url(#arrow-amber)"/>
+<path d="M285 506V554" class="edge" stroke="#fbbf24" marker-end="url(#arrow-amber)"/>
+<rect x="40" y="176" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="60" y="208" class="heading">COMMIT is already durable</text>
+<text x="60" y="236" class="note">Some Cells may still be PREPARED.</text>
+<rect x="40" y="302" width="490" height="78" rx="12" fill="#352b20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="60" y="334" class="heading">A has applied; B has not</text>
+<text x="60" y="362" class="note">B retains its exclusive write intent.</text>
+<rect x="40" y="428" width="490" height="78" rx="12" fill="#352b20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="60" y="460" class="heading">Read B through the lock barrier</text>
+<text x="60" y="488" class="note">Resolve and re-read, or fail retryably.</text>
+<rect x="40" y="554" width="490" height="78" rx="12" fill="#3b2036" stroke="#fb7185" stroke-width="1.6"/>
+<text x="60" y="586" class="heading">Never return B’s stale image</text>
+<text x="60" y="614" class="note">Missing creates and deletes need barriers too.</text>
+<path d="M835 254V302" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M835 380V428" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<path d="M835 506V554" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<path d="M835 632V680" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="590" y="176" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="610" y="208" class="heading">Prepare shared read locks</text>
+<text x="610" y="236" class="note">Atomically capture existing or absent images.</text>
+<rect x="590" y="302" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="610" y="334" class="heading">Last shared prepare succeeds</text>
+<text x="610" y="362" class="note">All captures coexist while keys remain locked.</text>
+<rect x="590" y="428" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="610" y="460" class="heading">COMMIT + resolve participants</text>
+<text x="610" y="488" class="note">Release locks; preserve immutable images.</text>
+<rect x="590" y="554" width="490" height="78" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="610" y="586" class="heading">Assemble every original position</text>
+<text x="610" y="614" class="note">Read saved images, including absent items.</text>
+<rect x="590" y="680" width="490" height="78" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="610" y="712" class="heading">Acknowledge, then clean up</text>
+<text x="610" y="740" class="note">Durable consumption intent permits deletion.</text>
+<rect x="40" y="843" width="1040" height="98" rx="12" fill="#1e293b" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="62" y="877" class="heading">Read-result lifetime is explicit</text>
+<text x="62" y="906" class="body">Only the initiating reader acknowledges complete assembly. Recovery can finish acknowledged cleanup.</text>
+<text x="62" y="932" class="note">Cancellation before acknowledgement retains images; terminal markers still prevent late recreation.</text>
+</svg>

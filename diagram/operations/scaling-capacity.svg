@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 610" role="img" aria-labelledby="title desc">
+<title id="title">Capacity has three separate budgets</title>
+<desc id="desc">Per-Cell database and capture limits, per-node resources and resident Cell admission, and shared account, directory, coordinator and object-store capacity must all be considered. Metadata and coordinator Cells count against the node residency limit. Raising one limit does not qualify aggregate capacity.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="610" fill="#0f172a"/>
+<rect width="1120" height="610" fill="url(#grid)"/>
+<text x="40" y="53" class="title">Capacity has three separate budgets</text>
+<text x="40" y="90" class="note">Count retained work, maintenance and recovery alongside user items.</text>
+<rect x="40" y="135" width="330" height="310" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="60" y="171" class="eyebrow" style="fill:#a78bfa">DATA / GSI CELL</text>
+<text x="60" y="211" class="heading">Bound one range</text>
+<text x="60" y="254" class="note">Items and local indexes</text>
+<text x="60" y="289" class="note">Transaction state and receipts</text>
+<text x="60" y="324" class="note">Projection / stream work</text>
+<text x="60" y="359" class="note">512 MiB database budget</text>
+<text x="60" y="394" class="note">64 MiB capture budget</text>
+<rect x="395" y="135" width="330" height="310" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="415" y="171" class="eyebrow" style="fill:#34d399">PER NODE</text>
+<text x="415" y="211" class="heading">Share host resources</text>
+<text x="415" y="254" class="note">CPU, memory and local disk</text>
+<text x="415" y="289" class="note">Resident data + system Cells</text>
+<text x="415" y="324" class="note">Queues and durability work</text>
+<text x="415" y="359" class="note">Restore and split scratch</text>
+<text x="415" y="394" class="note">max_active_cells: default 128</text>
+<rect x="750" y="135" width="330" height="310" rx="12" fill="#352b20" stroke="#fbbf24" stroke-width="1.6"/>
+<text x="770" y="171" class="eyebrow" style="fill:#fbbf24">SHARED PATHS</text>
+<text x="770" y="211" class="heading">Measure contention</text>
+<text x="770" y="254" class="note">Account and table metadata</text>
+<text x="770" y="289" class="note">Directory and route lookups</text>
+<text x="770" y="324" class="note">Transaction coordinators</text>
+<text x="770" y="359" class="note">GSI projection backlogs</text>
+<text x="770" y="394" class="note">Object-store requests</text>
+<rect x="40" y="490" width="1040" height="80" rx="12" fill="#1e293b" stroke="#94a3b8" stroke-width="1.6"/>
+<text x="64" y="523" class="body">Plan headroom for owner recovery, range copies and pending durable work.</text>
+<text x="64" y="551" class="note">A larger resident-Cell limit is not a throughput or memory guarantee.</text>
+</svg>

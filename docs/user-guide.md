@@ -189,5 +189,5 @@ A retry can outlive the request that caused it. Use the response and current tab
   control-plane request was rolled back.
 
 The [API matrix](api.md) lists explicit unsupported cases. The
-[implementation status](implementation-status.md) records focused SDK and
-restart evidence, including known load failures.
+[server guide](cellar-server.md#detailed-qualification-record) records focused SDK
+and restart evidence; [performance](performance.md) retains measured load failures.

@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 970" role="img" aria-labelledby="title desc">
+<title id="title">One transaction, three participant Cells</title>
+<desc id="desc">BeyondDB validates and groups the request by original participant. A coordinator stores durable BEGIN and immutable operations before any participant prepares. Each participant atomically evaluates conditions, locks keys, stages images and reserves apply capacity. All durable prepare evidence permits COMMIT; a definitive failure requests ABORT while BEGIN. The driver resolves every original participant from the immutable decision and records durable resolution receipts before returning success or cancellation. A coordinator is separate from the table routes; logical keys do not guarantee distinct Cells.</desc>
+<defs>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#1e293b" stroke-width="0.6"/></pattern>
+ <style>
+ text{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#f1f5f9}
+ .title{font-size:32px;font-weight:700;letter-spacing:-0.6px}
+ .heading{font-size:22px;font-weight:650}
+ .body{font-size:20px}
+ .note{font-size:18px;fill:#b8c7db}
+ .eyebrow{font-size:17px;font-weight:650;letter-spacing:1.4px}
+ .edge{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+ </style>
+<marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#22d3ee" stroke-width="1.6"/></marker>
+<marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#34d399" stroke-width="1.6"/></marker>
+<marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#a78bfa" stroke-width="1.6"/></marker>
+<marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fbbf24" stroke-width="1.6"/></marker>
+<marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#fb7185" stroke-width="1.6"/></marker>
+<marker id="arrow-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#94a3b8" stroke-width="1.6"/></marker>
+</defs>
+<rect width="1120" height="970" fill="#0f172a"/>
+<rect width="1120" height="970" fill="url(#grid)"/>
+<text x="40" y="53" class="title">One transaction, three participant Cells</text>
+<text x="40" y="88" class="note">Example placement: Accounts/A, Accounts/B and Transfers/id route to three Cells.</text>
+<text x="40" y="136" class="eyebrow" style="fill:#22d3ee">1 · ADMIT IMMUTABLE WORK</text>
+<path d="M350 211H400" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<path d="M720 211H770" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="40" y="170" width="310" height="84" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="58" y="205" class="heading">TransactWriteItems</text>
+<text x="58" y="234" class="note">Signed request + stable token</text>
+<rect x="400" y="170" width="320" height="84" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="418" y="205" class="heading">BeyondDB driver</text>
+<text x="418" y="234" class="note">Validate; group original keys</text>
+<rect x="770" y="170" width="310" height="84" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="788" y="205" class="heading">Coordinator: BEGIN</text>
+<text x="788" y="234" class="note">Immutable targets + payloads</text>
+<path d="M925 254V290H560V335" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<text x="40" y="314" class="eyebrow" style="fill:#34d399">2 · PREPARE INDEPENDENT CELLS</text>
+<path d="M200 335H920" class="edge" stroke="#34d399"/>
+<path d="M200 335V375" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="40" y="375" width="320" height="120" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="60" y="408" class="heading">Participant A</text>
+<text x="60" y="438" class="body">Accounts/A</text>
+<text x="60" y="471" class="note">Conditions, locks, images, capacity</text>
+<path d="M200 495V535" class="edge" stroke="#a78bfa"/>
+<path d="M560 335V375" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="400" y="375" width="320" height="120" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="420" y="408" class="heading">Participant B</text>
+<text x="420" y="438" class="body">Accounts/B</text>
+<text x="420" y="471" class="note">Conditions, locks, images, capacity</text>
+<path d="M560 495V535" class="edge" stroke="#a78bfa"/>
+<path d="M920 335V375" class="edge" stroke="#34d399" marker-end="url(#arrow-green)"/>
+<rect x="760" y="375" width="320" height="120" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="780" y="408" class="heading">Participant T</text>
+<text x="780" y="438" class="body">Transfers/id</text>
+<text x="780" y="471" class="note">Conditions, locks, images, capacity</text>
+<path d="M920 495V535" class="edge" stroke="#a78bfa"/>
+<path d="M200 535H920" class="edge" stroke="#a78bfa"/>
+<path d="M560 535V595" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<text x="40" y="575" class="eyebrow" style="fill:#a78bfa">3 · PUBLISH ONE DECISION</text>
+<rect x="250" y="595" width="620" height="90" rx="12" fill="#292047" stroke="#a78bfa" stroke-width="1.6"/>
+<text x="560" y="630" class="heading" text-anchor="middle">COMMIT or ABORT</text>
+<text x="560" y="660" class="note" text-anchor="middle">COMMIT requires every durable prepare receipt.</text>
+<path d="M560 685V755" class="edge" stroke="#a78bfa" marker-end="url(#arrow-purple)"/>
+<text x="40" y="735" class="eyebrow" style="fill:#34d399">4 · RESOLVE + CONFIRM</text>
+<rect x="250" y="755" width="620" height="84" rx="12" fill="#10392f" stroke="#34d399" stroke-width="1.6"/>
+<text x="560" y="789" class="heading" text-anchor="middle">Resolve the original participant set</text>
+<text x="560" y="818" class="note" text-anchor="middle">Apply or discard; record every durable resolution receipt.</text>
+<path d="M560 839V890" class="edge" stroke="#22d3ee" marker-end="url(#arrow-cyan)"/>
+<rect x="250" y="890" width="620" height="50" rx="12" fill="#102e40" stroke="#22d3ee" stroke-width="1.6"/>
+<text x="560" y="922" class="heading" text-anchor="middle">Return success or ordered cancellation</text>
+</svg>

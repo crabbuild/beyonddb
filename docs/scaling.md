@@ -1,21 +1,152 @@
-# BeyondDB elastic Cell topology
+# Scale BeyondDB with ordered range Cells
+
+<a id="beyonddb-elastic-cell-topology"></a>
+
+A table grows through multiple ordered data ranges, each owned by a Cell.
+Cellar places those Cells on nodes; BeyondDB maintains the table's logical
+ranges and routes. Capacity remains bounded by the Cells, hosts and shared
+services doing the work.
+
+| I need to… | Start here |
+| --- | --- |
+| Understand tables, ranges and node owners | [Current Cellar reference](#current-cellar-reference) |
+| Choose initial ranges and residency limits | [Creation and capacity](#creation-and-capacity) |
+| Understand moves, splits and hot keys | [Moving and splitting](#moving-and-splitting) |
+| Plan growth and judge qualification | [Growth decisions](#growth-decisions) |
+| Inspect detailed designs and failure evidence | [Detailed record](#detailed-design-and-recorded-evidence) |
 
 ## Current Cellar reference
 
-The current server uses ordered ranges, defaulting to four initial cells per
-table (2–256 supported). `auto` and `partitioned` use the configured multiple
-ranges; `single` is rejected. Native Cellar owns physical placement and balancing.
+![One table spans ordered range Cells; native Cellar selects their physical node owners](../diagram/operations/ordered-ranges.svg)
 
-The original capacity model, controller boundaries, split/recovery mechanisms,
-acceptance gates and measured regressions remain below. Metadata/coordinator
-cells count against `max_active_cells`; old JSON resource knobs are not accepted.
-See [server configuration](cellar-server.md#configuration) and the
-[current local result](local-benchmark.md) before applying any sizing advice.
+| Responsibility | Current contract |
+| --- | --- |
+| Logical partitioning | BeyondDB routes the complete ordered `(PK, SK)` into adjacent half-open ranges |
+| Physical ownership | Cellar selects and fences the node owning each Cell; fleet mode enables native rebalancing |
+| Point requests | Resolve one range using the full primary key |
+| Query | Requires PK equality; visits intersecting SK ranges in order |
+| Local indexes | LSIs stay with their base items and preserve PK-collection locality |
+| Global indexes | GSIs have independent ordered ranges and asynchronous projection |
+| Transaction recovery | Resolve the admitted original participants; preserve identities through topology changes |
+
+Multiple ranges on one node share its failure domain. More ranges do not
+guarantee more hosts, balanced traffic or higher write throughput. See
+[ordered partitioning](ordered-cell-partitioning.md) for encoding and pagination,
+and [server boundaries](cellar-server.md#server-layout) for component ownership.
+
+## Creation and capacity
+
+Merge these fields into a complete [node configuration](cellar-server.md#configuration).
+The values below are the current defaults:
+
+```json
+{
+  "initial_partitions": 4,
+  "max_active_cells": 128,
+  "split_threshold_bytes": 268435456
+}
+```
+
+| Setting / budget | Meaning |
+| --- | --- |
+| `initial_partitions` | **2–256** initial base/GSI ranges per table/index; applies to creation, not existing-table repartitioning |
+| `beyonddb:cell-model` | Omitted, `auto` or `partitioned` use the configured multi-range policy; `single` is rejected |
+| Creation policy | Persisted with the table generation; changing tags later does not convert placement |
+| `max_active_cells` | Native per-node residency cap for **all Cell types**, including metadata, inventory and coordinators |
+| `split_threshold_bytes` | Range-maintenance threshold; **268435456 = 256 MiB** by default; not usable item capacity |
+| Compiled data/GSI budget | **512 MiB database / 64 MiB capture** per Cell; includes more than item payloads |
+
+![Data/GSI Cell budgets, node resource and residency budgets, and shared service contention must all be considered](../diagram/operations/scaling-capacity.svg)
+
+Size for local indexes, transaction reservations, journals, stream records,
+retained history, recovery and split scratch space. Increasing residency does
+not reserve RAM or disk, raise a Cell's compiled budget, or remove a shared
+metadata bottleneck. The parser rejects old resource fields such as
+`disk_budget_bytes`, `node_retained_bytes` and `sql_workers`.
+
+## Moving and splitting
+
+![Moving preserves one Cell and its interval; splitting creates child Cells and replacement range routes](../diagram/operations/scaling-move-split.svg)
+
+| Operation | Safety boundary |
+| --- | --- |
+| Move a Cell | Native ownership transfer/recovery keeps the logical Cell identity; physical-owner fencing still applies |
+| Choose a split | Select an observed key boundary; without LSIs, a PK's SK siblings can span Cells |
+| Seal the source | Unresolved participant work and pending GSI projection entries must drain before sealing |
+| Publish children | Retain the durable plan, copy and verify children, publish replacement routes, then open children |
+| Recover or retry | Continue the original durable protocol; a lost mutation reply does not establish nonexecution |
+
+For tables with LSIs, split only between PK collections. One indivisible hot
+item still has one serialized write authority. Deterministic initial fences do
+not predict workload balance, and the observed-median split policy is not a
+byte/load-weighted placement guarantee.
+
+Source sealing can interrupt access. Online delta catch-up, merges and broad
+split-during-pagination qualification remain open. See the
+[split safety reference](ordered-cell-partitioning.md#split-safety-and-what-remains-open),
+[GSI cutover](global-indexes.md#split-and-recovery-reference) and
+[transaction recovery](cross-cell-transactions.md#recovery-and-stable-identities).
+
+## Growth decisions
+
+| Observed pressure | Review before changing capacity |
+| --- | --- |
+| Resident-Cell admission failures | Count every Cell type and retained work; compare memory/disk headroom with residency limits |
+| One range fills or queues writes | Inspect key distribution, LSI locality and pending work; verify that a legal split can make progress |
+| One node is busy | Check eligible fleet peers, placement/recovery health and shared-service pressure before adding capacity |
+| Many ranges, limited throughput | Inspect account/catalog contention, coordinator work, projection lag and object-store latency |
+| Recovery or maintenance falls behind | Measure backlog age, retained bytes and restore cost alongside foreground throughput |
+
+The [local benchmark](local-benchmark.md) exercised **30 data Cells on three
+nodes**, including transaction failures at higher concurrency. It is a shared-VM
+characterization, not a production sizing rule. Use the
+[performance guide](performance.md) to compare throughput, latency, samples,
+errors, resource use and range coverage together.
+
+### Qualification still required
+
+**10,000 active Cells and multi-TB storage are design targets.** Passing a focused
+split or restart test does not establish that capacity. The retained delivery
+plan requires the following evidence:
+
+| Area | Required proof |
+| --- | --- |
+| Fleet growth and recovery | Add/remove nodes under SDK load; preserve acknowledged data and reject stale owners through interrupted movement |
+| Metadata growth | Bounded route lookup, directory updates and table-name ownership as one account/table grows |
+| Large collections and indexes | Same-PK SK growth where eligible, correct Query/Scan continuation, and version/tombstone-preserving GSI cutover |
+| Coordinator scale | Stable token lookup during expansion, distributed recovery and safe bounded history retirement |
+| Operational capacity | Runs at **1,000 then 10,000 active Cells**, real multi-TB data, declared hardware/durability and measured latency/recovery limits |
+
+Use [Rust CI](../.github/workflows/rust.yml) and
+[signed SDK qualification](../.github/workflows/qualification.yml) as the current
+check inventory. Fleet-scale recovery, retention and composed capacity remain
+unqualified. Historical timing and test results below apply to their recorded
+revisions, fixtures and runtime.
+
+## Current source map
+
+| Contract | Source / reference |
+| --- | --- |
+| JSON defaults, residency and native balancing | [Executable](../src/bin/beyonddb.rs), [server configuration](cellar-server.md#application-policy-and-capacity) |
+| Creation selector and ordered bootstrap | [Creation policy](../src/backend/table_creation.rs), [provisioning](../src/cellar/provision.rs) |
+| Split selection and orchestration | [Observed split point](../src/partition/split_point.rs), [split controller](../src/split.rs) |
+| Compiled database/capture limits | [Data application](../src/lib.rs), [GSI application](../src/global_index.rs) |
+| Maintenance and recovery | [Server composition](../src/cellar/server.rs), [transaction protocol](cross-cell-transactions.md) |
 
 ## Detailed design and recorded evidence
 
-> **Revision scope:** The current server uses ordered multi-cell tables and native Cellar placement. Hash layouts, one-cell creation, application-owned placement loops and old resource settings in the recorded sections describe earlier revisions, not supported deployment options. The target capacity and acceptance criteria remain design goals.
+The complete design and qualification journal follows in expandable topics.
+It retains capacity assumptions, fault cases, acceptance gates and measurements.
+
+> **Revision scope:** Earlier “current” and “now” refer to the recorded revision.
+> Hash routing, one-Cell creation, application-owned placement loops and retired
+> resource knobs are historical. Target controllers, merges, backup protocols and
+> capacity criteria are design material unless separately qualified. Use the
+> current reference above for supported configuration and ordered routing.
 > Snapshot: [original detailed document](https://github.com/crabbuild/beyonddb/blob/a1eb96a0e87d4473f1bec89c0f3b4f2b02a21afb/docs/scaling.md).
+
+<details>
+<summary><strong>Original overview, recorded status and historical table selectors</strong></summary>
 
 The Cellar contract requires ordered `(PK, SK)` ranges and multiple data
 cells for every table. See [ordered cell partitioning](ordered-cell-partitioning.md)
@@ -110,6 +241,11 @@ determine placement. Current tables always start with multiple ordered ranges.
 **Current sizing limit:** the compiled base data Cell has a **512 MiB SQLite database budget** and a **64 MiB capture budget**. The database budget includes items, local indexes, stream records, transaction state and other Cell metadata; usable item storage is smaller. The creation tag does not raise these limits. A table that will exceed this budget needs `auto` or `partitioned` in the current release. Configurable larger single-Cell budgets and live placement conversion are unfinished.
 
 Small same-Cell transaction reads can use one atomic query. Tokenized transaction writes still require the account-scoped coordinator, and cross-table transactions can span Cells. Placement therefore reduces some transaction work without establishing SQLite write parity. See [transaction execution paths](cross-cell-transactions.md#one-cell-and-multiple-cell-requests) and [measured performance](performance.md).
+
+</details>
+
+<details>
+<summary><strong>Capacity target, controller boundaries and delivery gates</strong></summary>
 
 ## Horizontal scaling delivery gates
 
@@ -286,6 +422,11 @@ traffic.
 Scheduling and storage latency reduce the achieved rate. This is a
 source-derived workload estimate, not measured fleet throughput; extending the
 interval or removing renewals requires proving the runtime fencing contract.
+
+</details>
+
+<details>
+<summary><strong>Recorded routing, maintenance, peer recovery and finite bounds</strong></summary>
 
 ## Scope and present boundary
 
@@ -496,6 +637,11 @@ can still encounter release or sustained pressure and retry from durable state. 
 data/account/credential activation, distributed placement, retained-history
 collection, and measured overload/recovery behavior remain scale gates.
 
+</details>
+
+<details>
+<summary><strong>Original ownership, split/merge, transaction and completion design</strong></summary>
+
 ## Target ownership
 
 ```text
@@ -690,6 +836,11 @@ used by an AWS SDK and establish all of the following:
 Until these gates pass, BeyondDB is a bounded prototype, regardless of the
 declared database budget or the number of Cells the framework can address.
 
+</details>
+
+<details>
+<summary><strong>Deleted-table residency and reclamation evidence</strong></summary>
+
 ## Table deletion and active residency
 
 The independent ExtendDB Python item suite exposed a serving limit after 31
@@ -785,6 +936,11 @@ Verification on 2026-09-26:
   passed with `SSL_CERT_FILE=/etc/ssl/cert.pem` (8.45 seconds).
 - Strict all-target Clippy, compiled server build, Rust formatting, Python Ruff,
   and diff checks passed. No fleet-scale or multi-TB qualification was performed.
+
+</details>
+
+<details>
+<summary><strong>Concurrent admission, lease timing and shutdown evidence</strong></summary>
 
 ## Concurrent request admission
 
@@ -958,6 +1114,11 @@ The draft remains unqualified for sustained load and production scale. The
 large-transaction smoke failure needs underlying invocation evidence before
 assigning a cause or changing capacity, deadlines, or retry policy.
 
+</details>
+
+<details>
+<summary><strong>Large transaction payload and transfer qualification</strong></summary>
+
 ### Large transaction transfer qualification
 
 Temporary probes reproduced the compiled-server failure in 515.27 seconds at
@@ -1102,6 +1263,11 @@ queues a read of another Cell until its deadline. It tests whether queue expiry
 fences an untouched Cell; this is a candidate mechanism, not yet proof of where
 the full workload spent its deadline. SQL/page I/O and lifecycle timing still
 need distinction if that reproduction does not explain the observed path.
+
+</details>
+
+<details>
+<summary><strong>SQL queue expiry, collateral fencing and diagnostic follow-ups</strong></summary>
 
 ### SQL queue expiry and collateral fencing
 
@@ -1535,6 +1701,11 @@ This is a fresh hard-kill scenario
 with the unchanged 45-second gate. These single-run timings are not a controlled
 performance comparison or fleet recovery qualification.
 
+</details>
+
+<details>
+<summary><strong>Measured placement, cold restoration and initial creation recovery</strong></summary>
+
 ### Measured node placement inputs
 
 The binary now uses the signed capacity path described above instead of fixed
@@ -1727,6 +1898,11 @@ Production Rust grows by 213 net lines for the shared peer composition,
 scoped provisioning capability, and common range admission/recovery boundary.
 No wire shape, storage schema, dependency, or configuration setting changed.
 
+</details>
+
+<details>
+<summary><strong>Independent splits, unresolved source work and index growth</strong></summary>
+
 ## Independent source-range splits
 
 Pending data splits are keyed by `(table_id, source_partition_id)`. Each source
@@ -1888,6 +2064,10 @@ after route publication before either child opens. These are bounded fixtures;
 cutover latency qualification remain outstanding. An indivisible HASH group can
 still exhaust one Cell; sort-key subranges remain necessary.
 
+</details>
+
+<details>
+<summary><strong>Sealed-source residency and child-opening recovery</strong></summary>
 
 ## Sealed-source residency after splits
 
@@ -2097,6 +2277,11 @@ coverage for the interrupted claim
 without production fault injection or weaker assertions/timeouts. Production
 code grows by 38 net lines to share restoration and verify discovery readiness.
 These are focused local results; the broader process qualification remains in CI.
+
+</details>
+
+<details>
+<summary><strong>Usage/statistics, coordinator images and retired-range reclamation</strong></summary>
 
 ### Bounded base-range usage measurement
 
@@ -2310,6 +2495,10 @@ Clippy, the standalone server build, formatting, diff, Cell/LTX layout and
 policy entry-point checks pass. Full SDK/process qualification remains a CI
 gate for the pushed head.
 
+</details>
+
+<details>
+<summary><strong>Creation resumption, persisted placement and generation-scoped deletion</strong></summary>
 
 ## Resume incomplete table creation
 
@@ -2471,6 +2660,11 @@ That intermittent failure is not
 resolved by this deletion change. Large routed/GSI deletion and process-level
 recovery still require their broader qualification gates.
 
+</details>
+
+<details>
+<summary><strong>Session retirement, peer admission and cold-restoration diagnostics</strong></summary>
+
 ## Graceful node-session retirement
 
 CI run `36313605590` passed all 20 peer-network cases but failed the standalone
@@ -2577,6 +2771,11 @@ Scan. The scenario passed in 30.14s with background recovery/capacity warnings;
 this did not reproduce or explain the original failure. The delay was removed.
 CI retains server warnings so a recurrence can distinguish admission, ownership
 and routing failures. The intermittent Scan failure remains open.
+
+</details>
+
+<details>
+<summary><strong>Discovery freshness and historical settled-range movement</strong></summary>
 
 ## Placement freshness after fleet discovery
 
@@ -2696,6 +2895,11 @@ cases (678.16s), and all three standalone process cases (288.38s). This qualifie
 the graceful node-session retirement fix on that head. It predates the codec,
 discovery-timing and range-rebalance increments and does not qualify those changes
 or establish the cause of the intermittent Scan failure.
+
+</details>
+
+<details>
+<summary><strong>Bounded activation replay, restart and final fixture qualification</strong></summary>
 
 ## Bounded activation replay
 
@@ -2868,3 +3072,5 @@ policy was changed.
 Final BeyondDB/runtime all-target Clippy with runtime test-support passes in
 6.42s after these fixture changes. Format, layout, policy-entry and documentation
 checks also pass; production Rust remains the same bounded retirement change.
+
+</details>
